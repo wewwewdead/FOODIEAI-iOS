@@ -1,0 +1,6 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND composedMessage CONTAINS[c] "SignOut""
+Timestamp               Ty Process[PID:TID]
+2026-05-08 22:24:21.118 Df FoodieAI[16287:38d3a] (Foundation) [SignOutProbe] calling AuthService.signOut()
+2026-05-08 22:24:21.391 Df FoodieAI[16287:38d3a] (Foundation) [SignOutProbe] signOut() returned cleanly; session=nil
+Child process terminated with signal 15: Terminated

@@ -1,0 +1,10 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND composedMessage CONTAINS[c] "Profile""
+Timestamp               Ty Process[PID:TID]
+2026-05-08 22:23:20.214 Df FoodieAI[16165:386a9] [com.apple.UIKit:EventBus] Event Timing Profile for Touch: not found, path="/System/Library/EventTimingProfiles/Sim.Touch.plist"
+2026-05-08 22:23:20.214 Df FoodieAI[16165:386a9] [com.apple.UIKit:EventBus] Event Timing Profile for Pencil: not found, path="/System/Library/EventTimingProfiles/Sim.Pencil.plist"
+2026-05-08 22:23:20.285 Df FoodieAI[16165:386b0] (Foundation) [Profile] SELECT profiles WHERE id=d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb
+2026-05-08 22:23:20.297 Df FoodieAI[16165:386bb] [com.apple.network:connection] [C1 373EE4E8-AEA7-4B6E-8BDC-83C5D999FF02 Hostname#7b99c224:443 quic-connection, url: https://kymwhecbblgbruqezixx.supabase.co/rest/v1/profiles, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{2D8748D1-F73A-4A82-AC63-475AA00BE9AD}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 22:23:20.300 Df FoodieAI[16165:386bb] [com.apple.network:connection] [C2 DCF40AC4-FED2-4929-A1D8-CE3064EE9129 IPv4#7e6835a9:443 quic-connection, url: https://kymwhecbblgbruqezixx.supabase.co/rest/v1/profiles, tls, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{2D8748D1-F73A-4A82-AC63-475AA00BE9AD}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 22:23:20.429 Df FoodieAI[16165:386b9] (Foundation) [Profile] SELECT returned 1 row(s)
+Child process terminated with signal 15: Terminated

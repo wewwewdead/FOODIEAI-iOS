@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Privacy Manifest. Required for App Store submission as of 2024.
+         References:
+           https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
+           https://developer.apple.com/documentation/bundleresources/privacy_manifest_files/describing_data_use_in_privacy_manifests
+    -->
+
+    <!-- We do not track users (no device fingerprinting, no third-party SDKs that
+         link data across apps/websites for advertising). -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+
+    <!-- We don't access any of Apple's "required reason" APIs (UserDefaults,
+         file timestamp, system boot time, disk space, active keyboard).
+         If a future dependency does, declare the reason here. -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array/>
+
+    <!-- We don't connect to tracking domains. -->
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+
+    <!-- Data the app collects, linked to the user's account, used only for app
+         functionality. Nothing here is used for tracking or third-party
+         advertising. -->
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array>
+        <dict>
+            <!-- Email address — comes from the Google identity used for sign-in,
+                 stored in the user's profiles row. Used to identify the account
+                 across sessions; never shared with third parties. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeEmailAddress</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- Photos — meal images uploaded to Supabase Storage under the user's
+                 own private folder ({uid}/...) for analyze-and-track functionality.
+                 Per-user RLS; not shared with third parties. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypePhotosorVideos</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

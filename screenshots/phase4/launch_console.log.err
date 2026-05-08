@@ -1,0 +1,6 @@
+2026-05-07 23:50:28.875 FoodieAI[28264:347603] === AppConfig ===
+2026-05-07 23:50:28.875 FoodieAI[28264:347603] supabaseURL: https://kymwhecbblgbruqezixx.supabase.co
+2026-05-07 23:50:28.875 FoodieAI[28264:347603] supabaseURL.host: kymwhecbblgbruqezixx.supabase.co
+2026-05-07 23:50:28.875 FoodieAI[28264:347603] anonKey length: 208
+2026-05-07 23:50:28.875 FoodieAI[28264:347603] analyzeBaseURL: http://localhost:3001
+2026-05-07 23:50:28.875 FoodieAI[28264:347603] =================

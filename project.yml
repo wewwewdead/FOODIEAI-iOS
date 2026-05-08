@@ -1,0 +1,191 @@
+name: FoodieAI
+options:
+  bundleIdPrefix: com.foodieai
+  deploymentTarget:
+    iOS: "17.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: true
+  defaultConfig: Debug
+  xcodeVersion: "16.0"
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: 1
+    DEVELOPMENT_LANGUAGE: en
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+    GCC_TREAT_WARNINGS_AS_ERRORS: NO
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      GCC_PREPROCESSOR_DEFINITIONS: "DEBUG=1"
+      ONLY_ACTIVE_ARCH: YES
+
+packages:
+  Supabase:
+    url: https://github.com/supabase/supabase-swift
+    from: "2.20.0"
+
+targets:
+  FoodieAI:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: FoodieAI
+        excludes:
+          - "**/*.md"
+          - "**/.DS_Store"
+    resources:
+      - path: FoodieAI/Resources/Assets.xcassets
+      - path: FoodieAI/Resources/Fonts
+        buildPhase: resources
+        excludes:
+          - "OFL-*.txt"
+    info:
+      path: FoodieAI/Info.plist
+      properties:
+        CFBundleDisplayName: FoodieAI
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UIUserInterfaceStyle: Light
+        UILaunchScreen:
+          UIColorName: brandCream
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIRequiredDeviceCapabilities:
+          - arm64
+        # Runtime config from Secrets.xcconfig — host-only (no scheme).
+        # AppConfig prepends https:// (or http:// for localhost/127.0.0.1).
+        # Avoiding full URLs sidesteps xcconfig's "//" comment-escape problem.
+        SUPABASE_HOST: $(SUPABASE_HOST)
+        SUPABASE_ANON_KEY: $(SUPABASE_ANON_KEY)
+        ANALYZE_HOST: $(ANALYZE_HOST)
+        # Privacy strings (Phase 8 final copy)
+        NSCameraUsageDescription: FoodieAI uses the camera to analyze meals you capture.
+        NSPhotoLibraryUsageDescription: FoodieAI uses your photos to analyze meals you've already taken.
+        # OAuth callback scheme — matches PRODUCT_BUNDLE_IDENTIFIER
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: $(PRODUCT_BUNDLE_IDENTIFIER)
+            CFBundleURLSchemes:
+              - $(PRODUCT_BUNDLE_IDENTIFIER)
+        # Bundled fonts — Phase 2.
+        # M PLUS Rounded 1c: 6 static .ttf files (Light/Regular/Medium/Bold/ExtraBold/Black).
+        # Internal family names use the legacy form "Rounded Mplus 1c", PostScript prefix
+        # "RoundedMplus1c-" — AppFont references those, not the marketed "M PLUS Rounded 1c".
+        # Nunito: variable font; iOS registers the 8 named instances. AppFont uses
+        # PostScript names "Nunito-Regular/SemiBold/Bold/ExtraBold".
+        UIAppFonts:
+          - MPLUSRounded1c-Light.ttf
+          - MPLUSRounded1c-Regular.ttf
+          - MPLUSRounded1c-Medium.ttf
+          - MPLUSRounded1c-Bold.ttf
+          - MPLUSRounded1c-ExtraBold.ttf
+          - MPLUSRounded1c-Black.ttf
+          - Nunito-VariableFont_wght.ttf
+    configFiles:
+      Debug: Secrets.xcconfig
+      Release: Secrets.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.foodieai.FoodieAI
+        PRODUCT_NAME: FoodieAI
+        TARGETED_DEVICE_FAMILY: "1" # iPhone only for v1
+        SWIFT_EMIT_LOC_STRINGS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: brandCream
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_PREVIEWS: YES
+        OTHER_LDFLAGS: -ObjC
+    dependencies:
+      - package: Supabase
+        product: Supabase
+    # Sign in with Apple entitlement is intentionally NOT declared.
+    # SIWA requires a paid Apple Developer Program membership ($99/yr) and
+    # cannot be used with a free personal team. To re-enable later, uncomment:
+    #
+    # entitlements:
+    #   path: FoodieAI/FoodieAI.entitlements
+    #   properties:
+    #     com.apple.developer.applesignin:
+    #       - Default
+    #
+    # ...and re-add the SignInWithAppleButton wiring in Phase 4 auth.
+    # Google OAuth (via ASWebAuthenticationSession) works without this entitlement.
+
+  FoodieAITests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: FoodieAITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.foodieai.FoodieAITests
+    dependencies:
+      - target: FoodieAI
+
+schemes:
+  FoodieAI:
+    build:
+      targets:
+        FoodieAI: all
+        FoodieAITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - FoodieAITests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  FoodieAI-ThemePreview:
+    build:
+      targets:
+        FoodieAI: run
+    run:
+      config: Debug
+      environmentVariables:
+        - variable: LAUNCH_THEME_PREVIEW
+          value: "1"
+          isEnabled: true
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  FoodieAI-ComponentGallery:
+    build:
+      targets:
+        FoodieAI: run
+    run:
+      config: Debug
+      environmentVariables:
+        - variable: LAUNCH_COMPONENT_GALLERY
+          value: "1"
+          isEnabled: true
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

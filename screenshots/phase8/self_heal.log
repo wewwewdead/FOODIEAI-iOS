@@ -1,0 +1,12 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND (composedMessage CONTAINS[c] "Profile" OR composedMessage CONTAINS[c] "self-heal")"
+Timestamp               Ty Process[PID:TID]
+2026-05-08 23:00:12.044 Df FoodieAI[18387:40e7a] [com.apple.UIKit:EventBus] Event Timing Profile for Touch: not found, path="/System/Library/EventTimingProfiles/Sim.Touch.plist"
+2026-05-08 23:00:12.044 Df FoodieAI[18387:40e7a] [com.apple.UIKit:EventBus] Event Timing Profile for Pencil: not found, path="/System/Library/EventTimingProfiles/Sim.Pencil.plist"
+2026-05-08 23:00:12.116 Df FoodieAI[18387:40e92] (Foundation) [Profile] SELECT profiles WHERE id=d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb
+2026-05-08 23:00:12.131 Df FoodieAI[18387:40e8b] [com.apple.network:connection] [C1 FF1F9618-6821-4540-9855-0403F6B2BC26 Hostname#89fa4b6d:443 quic-connection, url: https://kymwhecbblgbruqezixx.supabase.co/rest/v1/profiles, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{F6330B11-2042-4A0F-AD6C-DE2F70295AA2}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 23:00:12.135 Df FoodieAI[18387:40e8b] [com.apple.network:connection] [C2 C7AB71D4-1D2C-4341-951C-8B856FA5962B IPv4#86891588:443 quic-connection, url: https://kymwhecbblgbruqezixx.supabase.co/rest/v1/profiles, tls, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{F6330B11-2042-4A0F-AD6C-DE2F70295AA2}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 23:00:12.714 Df FoodieAI[18387:40e82] (Foundation) [Profile] SELECT returned 0 row(s)
+2026-05-08 23:00:12.714 Df FoodieAI[18387:40e82] (Foundation) [Profile] self-heal INSERT profiles (id=d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb)
+2026-05-08 23:00:12.885 Df FoodieAI[18387:40e8b] (Foundation) [Profile] self-heal INSERT returned id=D73869BB-8BB7-41FB-B7B3-3B2D6D1E39BB
+Child process terminated with signal 15: Terminated

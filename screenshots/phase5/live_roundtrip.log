@@ -1,0 +1,20 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "(process == "FoodieAI" AND composedMessage CONTAINS[c] "Analyze") OR composedMessage CONTAINS[c] "AppConfig" OR composedMessage CONTAINS[c] "LiveProbe""
+Timestamp               Ty Process[PID:TID]
+2026-05-08 20:48:14.972 Df FoodieAI[8515:1b707] (Foundation) === AppConfig ===
+2026-05-08 20:48:14.972 Df FoodieAI[8515:1b707] (Foundation) analyzeBaseURL: http://localhost:3001
+2026-05-08 20:48:15.075 Df FoodieAI[8515:1b707] (Foundation) [LiveProbe] photo loaded (414x736); calling analyze()
+2026-05-08 20:48:15.098 Df FoodieAI[8515:1b715] (Foundation) [Analyze] POST http://localhost:3001/analyze bytes=345184
+2026-05-08 20:48:15.114 Df FoodieAI[8515:1b710] [com.apple.network:connection] [C1 AC59F910-4F9C-444B-9684-B96D322582B8 Hostname#7a2e1328:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{59BF1E6A-B45D-4AE0-BCF5-002628595706}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 20:48:21.960 Df FoodieAI[8515:1b716] (Foundation) [Analyze] HTTP 200 body-bytes=835
+2026-05-08 20:48:21.966 Df FoodieAI[8515:1b716] (Foundation) [Analyze] decoded food=Grilled octopus and vegetables with basil coach=Cleopatra calories=350.0 hasFood=true
+2026-05-08 20:48:21.985 Df FoodieAI[8515:1b707] (Foundation) [LiveProbe] analyze() returned; state=ready(<UIImage:0x1068f1220 named(main: LandingHero) {414, 736} renderingMode=automatic(original)>, FoodieAI.AnalyzeResponse(analysis: FoodieAI.GeminiAnalysis(fallback: Optional(""), food: Optional("Grilled octopus and vegetables with basil"), calories: Optional(350.0), carbs: Optional(20.0), sugar: Optional(5.0), benefits: Optional(["Octopus provides lean protein and iron, benefiting muscle development and blood health. Vegetables offer essential vitamins and fiber, supporting digestive health and immunity."]), drawbacks: Optional(["Overconsumption of certain seafood can lead to potential mercury exposure; consider leaner fish or plant-based protein sources for variety."]), nutrients: Optional(["Protein (from octopus) supports muscle repair and growth. Fiber (from vegetables) aids digestion and promotes satiety. Vitamin C (from basil and vegetables) boosts immune function. Health Score: 85/100"]), coachAdvice: Optional("This dish offers a delightful dance of flav<…>
+2026-05-08 20:48:27.961 Df FoodieAI[8515:1b714] [com.apple.network:connection] [C1 AC59F910-4F9C-444B-9684-B96D322582B8 Hostname#7a2e1328:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancel
+2026-05-08 20:48:27.961 Df FoodieAI[8515:1b714] [com.apple.network:connection] [C1 AC59F910-4F9C-444B-9684-B96D322582B8 Hostname#7a2e1328:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancelled
+	[C1.1.1 C56CE4AB-7302-4D7E-B4E8-426F8221B309 ::1.49878<->IPv6#a25a3d79.3001]
+	Connected Path: satisfied (Path is satisfied), interface: lo0
+	Privacy Stance: Not Eligible
+	Duration: 12.846s, DNS @0.002s took 0.001s, TCP @0.003s took 0.001s
+	bytes in/out: 1126/345707, packets in/out: 2/24, rtt: 0.001s, retransmitted bytes: 0, out-of-order bytes: 0
+	ecn packets sent/acked/marked/lost: 0/0/0/0
+Child process terminated with signal 15: Terminated

@@ -1,0 +1,15 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND composedMessage CONTAINS[c] "Analyze""
+Timestamp               Ty Process[PID:TID]
+2026-05-08 22:42:44.579 Df FoodieAI[17343:3caa2] (Foundation) analyzeBaseURL: http://localhost:3001
+2026-05-08 22:42:44.695 Df FoodieAI[17343:3caa2] (Foundation) [LiveProbe] food (LandingHero) photo loaded (414x736); calling analyze()
+2026-05-08 22:42:44.716 Df FoodieAI[17343:3cab4] (Foundation) [Analyze] POST http://localhost:3001/analyze bytes=345184
+2026-05-08 22:42:44.725 Df FoodieAI[17343:3cab2] [com.apple.network:connection] [C1 D08C5889-1072-4E20-8A7B-3BBFA03650DD Hostname#e6d3e617:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{42703F19-5AAF-48DE-A6C7-77FB4AAE0479}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 22:42:44.729 Df FoodieAI[17343:3cab2] [com.apple.network:connection] [C1 D08C5889-1072-4E20-8A7B-3BBFA03650DD Hostname#e6d3e617:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancel
+2026-05-08 22:42:44.729 Df FoodieAI[17343:3cab2] [com.apple.network:connection] [C1 Hostname#e6d3e617:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancelled
+2026-05-08 22:42:44.737 E  FoodieAI[17343:3cab3] [com.apple.CFNetwork:Default] Task <1CF9C170-2772-4E64-8D3B-774EA2EEA8C5>.<1> finished with error [-1004] Error Domain=NSURLErrorDomain Code=-1004 "Could not connect to the server." UserInfo={_kCFStreamErrorCodeKey=61, NSUnderlyingError=0x10648e9d0 {Error Domain=kCFErrorDomainCFNetwork Code=-1004 "(null)" UserInfo={_NSURLErrorNWPathKey=satisfied (Path is satisfied), interface: en0[802.11], uses wifi, LQM: unknown, _kCFStreamErrorCodeKey=61, _kCFStreamErrorDomainKey=1}}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <1CF9C170-2772-4E64-8D3B-774EA2EEA8C5>.<1>, _NSURLErrorRelatedURLSessionTaskErrorKey=(
+    "LocalDataTask <1CF9C170-2772-4E64-8D3B-774EA2EEA8C5>.<1>"
+), NSLocalizedDescription=Could not connect to the server., NSErrorFailingURLStringKey=http://localhost:3001/analyze, NSErrorFailingURLKey=http://localhost:3001/analyze, _kCFStreamErrorDomainKey=1}
+2026-05-08 22:42:44.737 Df FoodieAI[17343:3cab4] (Foundation) [Analyze] URLError code=-1004 desc=Could not connect to the server.
+2026-05-08 22:42:44.749 Df FoodieAI[17343:3caa2] (Foundation) [LiveProbe] analyze() returned; state=failed(<UIImage:0x1020ed180 named(main: LandingHero) {414, 736} renderingMode=automatic(original)>, FoodieAI.AnalyzeError.networkUnavailable)
+Child process terminated with signal 15: Terminated

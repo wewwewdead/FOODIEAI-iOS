@@ -1,0 +1,16 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND (composedMessage CONTAINS[c] "Profile" OR composedMessage CONTAINS[c] "Probe")"
+Timestamp               Ty Process[PID:TID]
+2026-05-08 22:22:41.672 Df FoodieAI[16121:382f7] [com.apple.UIKit:EventBus] Event Timing Profile for Touch: not found, path="/System/Library/EventTimingProfiles/Sim.Touch.plist"
+2026-05-08 22:22:41.672 Df FoodieAI[16121:382f7] [com.apple.UIKit:EventBus] Event Timing Profile for Pencil: not found, path="/System/Library/EventTimingProfiles/Sim.Pencil.plist"
+2026-05-08 22:22:41.790 Df FoodieAI[16121:382f7] (Foundation) [Probe] starting — loading profile
+2026-05-08 22:22:41.792 Df FoodieAI[16121:38303] (Foundation) [Profile] SELECT profiles WHERE id=d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb
+2026-05-08 22:22:41.802 Df FoodieAI[16121:38303] [com.apple.network:connection] [C1 2566B1F0-1B53-4EE8-B916-822B70FD4C09 Hostname#d09555cb:443 quic-connection, url: https://kymwhecbblgbruqezixx.supabase.co/rest/v1/profiles, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{523BDB12-1019-4562-A8CA-94DDE490D91E}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 22:22:41.806 Df FoodieAI[16121:38303] [com.apple.network:connection] [C2 8F7FEF76-1BA3-48ED-8197-F8CFC8AA8355 IPv4#d031b4fc:443 quic-connection, url: https://kymwhecbblgbruqezixx.supabase.co/rest/v1/profiles, tls, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{523BDB12-1019-4562-A8CA-94DDE490D91E}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 22:22:41.991 Df FoodieAI[16121:38307] (Foundation) [Profile] SELECT returned 1 row(s)
+2026-05-08 22:22:41.996 Df FoodieAI[16121:382f7] (Foundation) [Probe] load done — state=loaded(FoodieAI.Profile(id: D73869BB-8BB7-41FB-B7B3-3B2D6D1E39BB, displayName: nil, avatarUrl: nil, dailyCalorieGoal: 2000, dailyCarbGoalG: 250, dailySugarGoalG: 50, createdAt: 2026-05-08 13:15:48 +0000, updatedAt: 2026-05-08 13:15:48 +0000))
+2026-05-08 22:22:42.103 Df FoodieAI[16121:382f7] (Foundation) [Probe] hasUnsavedChanges=true — calling save()
+2026-05-08 22:22:42.107 Df FoodieAI[16121:38304] (Foundation) [Profile] UPDATE profiles SET (display_name=Phase 7 Probe cal=2200 carb=230 sugar=45) WHERE id=d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb
+2026-05-08 22:22:42.206 Df FoodieAI[16121:38304] (Foundation) [Profile] UPDATE returned id=D73869BB-8BB7-41FB-B7B3-3B2D6D1E39BB updated_at=2026-05-08T13:22:42Z
+2026-05-08 22:22:42.206 Df FoodieAI[16121:382f7] (Foundation) [Probe] save done — isSaving=false saveError=nil hasUnsavedChanges=false
+Child process terminated with signal 15: Terminated

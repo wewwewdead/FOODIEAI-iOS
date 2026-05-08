@@ -1,0 +1,30 @@
+# Secrets — actual credentials live here; the tracked Secrets.xcconfig only
+# references this file via #include?.
+Secrets.local.xcconfig
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+# Xcode-generated outputs (we generate the project from project.yml via xcodegen)
+FoodieAI.xcodeproj/
+FoodieAI.xcworkspace/
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# SPM
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,20 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "(process == "FoodieAI" AND composedMessage CONTAINS[c] "Analyze") OR composedMessage CONTAINS[c] "AppConfig" OR composedMessage CONTAINS[c] "LiveProbe""
+Timestamp               Ty Process[PID:TID]
+2026-05-08 21:05:05.295 Df FoodieAI[9869:2039e] (Foundation) === AppConfig ===
+2026-05-08 21:05:05.296 Df FoodieAI[9869:2039e] (Foundation) analyzeBaseURL: http://localhost:3001
+2026-05-08 21:05:05.544 Df FoodieAI[9869:2039e] (Foundation) [LiveProbe] non-food (generated) photo loaded (1024x1024); calling analyze()
+2026-05-08 21:05:05.600 Df FoodieAI[9869:203ab] (Foundation) [Analyze] POST http://localhost:3001/analyze bytes=384051
+2026-05-08 21:05:05.637 Df FoodieAI[9869:203ac] [com.apple.network:connection] [C1 50AD7875-1B65-4E40-8711-09BBEEF9E880 Hostname#5912ef13:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{56AC9083-6D3B-42C4-A8BB-A3C67696D4F4}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 21:05:10.006 Df FoodieAI[9869:203c8] (Foundation) [Analyze] HTTP 200 body-bytes=44
+2026-05-08 21:05:10.010 Df FoodieAI[9869:203c8] (Foundation) [Analyze] decoded food=<nil> coach=<nil> calories=<nil> hasFood=false
+2026-05-08 21:05:10.016 Df FoodieAI[9869:2039e] (Foundation) [LiveProbe] analyze() returned; state=noFood(<UIImage:0x1064f5b80 anonymous {1024, 1024} renderingMode=automatic(original)>)
+2026-05-08 21:05:16.004 Df FoodieAI[9869:203ac] [com.apple.network:connection] [C1 50AD7875-1B65-4E40-8711-09BBEEF9E880 Hostname#5912ef13:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancel
+2026-05-08 21:05:16.007 Df FoodieAI[9869:203ac] [com.apple.network:connection] [C1 50AD7875-1B65-4E40-8711-09BBEEF9E880 Hostname#5912ef13:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancelled
+	[C1.1.1 42307E40-952E-4D61-A8FF-472B4B7FB773 ::1.49927<->IPv6#d28cd66e.3001]
+	Connected Path: satisfied (Path is satisfied), interface: lo0
+	Privacy Stance: Not Eligible
+	Duration: 10.369s, DNS @0.008s took 0.003s, TCP @0.013s took 0.001s
+	bytes in/out: 333/400886, packets in/out: 2/27, rtt: 0.001s, retransmitted bytes: 16312, out-of-order bytes: 0
+	ecn packets sent/acked/marked/lost: 0/0/0/0
+Child process terminated with signal 15: Terminated

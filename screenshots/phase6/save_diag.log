@@ -1,0 +1,29 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND (composedMessage CONTAINS[c] "Save" OR composedMessage CONTAINS[c] "Analyze" OR composedMessage CONTAINS[c] "LiveProbe" OR composedMessage CONTAINS[c] "AppConfig")"
+Timestamp               Ty Process[PID:TID]
+2026-05-08 21:58:26.632 Df FoodieAI[14617:31a10] (Foundation) === AppConfig ===
+2026-05-08 21:58:26.632 Df FoodieAI[14617:31a10] (Foundation) analyzeBaseURL: http://localhost:3001
+2026-05-08 21:58:26.868 Df FoodieAI[14617:31a10] (Foundation) [LiveProbe] food (LandingHero) photo loaded (414x736); calling analyze()
+2026-05-08 21:58:26.898 Df FoodieAI[14617:31a1c] (Foundation) [Analyze] POST http://localhost:3001/analyze bytes=345184
+2026-05-08 21:58:26.912 Df FoodieAI[14617:31a1d] [com.apple.network:connection] [C1 5122F0A6-78F4-4903-95C9-91800E1A8C7F Hostname#acc950c8:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{F8F1A03D-B6C4-4528-8274-08F892099AF6}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 21:58:35.747 Df FoodieAI[14617:31a19] (Foundation) [Analyze] HTTP 200 body-bytes=1091
+2026-05-08 21:58:35.752 Df FoodieAI[14617:31a19] (Foundation) [Analyze] decoded food=Grilled calamari/octopus with vegetables and basil coach=Julius Caesar calories=300.0 hasFood=true
+2026-05-08 21:58:35.773 Df FoodieAI[14617:31a10] (Foundation) [LiveProbe] analyze() returned; state=ready(<UIImage:0x1024f50e0 named(main: LandingHero) {414, 736} renderingMode=automatic(original)>, FoodieAI.AnalyzeResponse(analysis: FoodieAI.GeminiAnalysis(fallback: Optional(""), food: Optional("Grilled calamari/octopus with vegetables and basil"), calories: Optional(300.0), carbs: Optional(12.0), sugar: Optional(4.0), benefits: Optional(["This dish offers lean protein for muscle health and satiety, while the vegetables provide essential vitamins and fiber for improved digestion and overall well-being."]), drawbacks: Optional(["Overconsumption of some seafood might lead to mercury concerns, though calamari is generally low; excessive oil in preparation can add unhealthy fats. Consider baked fish or a larger portion of leafy greens for even healthier options."]), nutrients: Optional(["Protein (from calamari/octopus) is crucial for muscle repair and growth, contributing to a feeling of fullness. Omega-3 Fatty Acids (from seafood) support heart and brain health, <…>
+2026-05-08 21:58:35.773 Df FoodieAI[14617:31a10] (Foundation) [LiveProbe] chaining save() after .ready
+2026-05-08 21:58:35.779 Df FoodieAI[14617:31a19] (Foundation) [Save] auth.currentUser?.id        = d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb
+2026-05-08 21:58:35.779 Df FoodieAI[14617:31a19] (Foundation) [Save] auth.session?.user.id       = d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb
+2026-05-08 21:58:35.779 Df FoodieAI[14617:31a19] (Foundation) [Save] storage path being uploaded = d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb/c06d7a9d-9992-40d1-8087-ab66468368b6.jpg
+2026-05-08 21:58:35.779 Df FoodieAI[14617:31a19] (Foundation) [Save] path leading char           = d
+2026-05-08 21:58:35.779 Df FoodieAI[14617:31a19] (Foundation) [Save] path contains '/'           = yes
+2026-05-08 21:58:36.465 Df FoodieAI[14617:31a10] (Foundation) [Save] uploaded image_path=d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb/c06d7a9d-9992-40d1-8087-ab66468368b6.jpg
+2026-05-08 21:58:37.077 Df FoodieAI[14617:31a10] (Foundation) [Save] inserted food_logs.id=115999EE-0610-4A00-A94D-4A284C554C68 user_id=D73869BB-8BB7-41FB-B7B3-3B2D6D1E39BB
+2026-05-08 21:58:37.096 Df FoodieAI[14617:31a10] (Foundation) [LiveProbe] save() returned; state=saved(<UIImage:0x1024f50e0 named(main: LandingHero) {414, 736} renderingMode=automatic(original)>, FoodieAI.AnalyzeResponse(analysis: FoodieAI.GeminiAnalysis(fallback: Optional(""), food: Optional("Grilled calamari/octopus with vegetables and basil"), calories: Optional(300.0), carbs: Optional(12.0), sugar: Optional(4.0), benefits: Optional(["This dish offers lean protein for muscle health and satiety, while the vegetables provide essential vitamins and fiber for improved digestion and overall well-being."]), drawbacks: Optional(["Overconsumption of some seafood might lead to mercury concerns, though calamari is generally low; excessive oil in preparation can add unhealthy fats. Consider baked fish or a larger portion of leafy greens for even healthier options."]), nutrients: Optional(["Protein (from calamari/octopus) is crucial for muscle repair and growth, contributing to a feeling of fullness. Omega-3 Fatty Acids (from seafood) support heart and brain health, and<…>
+2026-05-08 21:58:41.747 Df FoodieAI[14617:31a1c] [com.apple.network:connection] [C1 5122F0A6-78F4-4903-95C9-91800E1A8C7F Hostname#acc950c8:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancel
+2026-05-08 21:58:41.747 Df FoodieAI[14617:31a1c] [com.apple.network:connection] [C1 5122F0A6-78F4-4903-95C9-91800E1A8C7F Hostname#acc950c8:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancelled
+	[C1.1.1 F04B3532-DA95-4DF8-A804-1FA6E4318F70 ::1.50312<->IPv6#4835ee7a.3001]
+	Connected Path: satisfied (Path is satisfied), interface: lo0
+	Privacy Stance: Not Eligible
+	Duration: 14.835s, DNS @0.001s took 0.000s, TCP @0.001s took 0.001s
+	bytes in/out: 1383/345707, packets in/out: 2/24, rtt: 0.001s, retransmitted bytes: 0, out-of-order bytes: 0
+	ecn packets sent/acked/marked/lost: 0/0/0/0
+Child process terminated with signal 15: Terminated

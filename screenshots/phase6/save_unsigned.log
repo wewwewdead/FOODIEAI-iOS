@@ -1,0 +1,23 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND (composedMessage CONTAINS[c] "Analyze" OR composedMessage CONTAINS[c] "Save" OR composedMessage CONTAINS[c] "LiveProbe" OR composedMessage CONTAINS[c] "AppConfig")"
+Timestamp               Ty Process[PID:TID]
+2026-05-08 21:18:57.767 Df FoodieAI[11201:24ba5] (Foundation) === AppConfig ===
+2026-05-08 21:18:57.768 Df FoodieAI[11201:24ba5] (Foundation) analyzeBaseURL: http://localhost:3001
+2026-05-08 21:18:57.941 Df FoodieAI[11201:24ba5] (Foundation) [LiveProbe] food (LandingHero) photo loaded (414x736); calling analyze()
+2026-05-08 21:18:57.967 Df FoodieAI[11201:24bae] (Foundation) [Analyze] POST http://localhost:3001/analyze bytes=345184
+2026-05-08 21:18:57.984 Df FoodieAI[11201:24bae] [com.apple.network:connection] [C1 73D71F60-5DFD-482A-A24F-3F9C581B680C Hostname#51950f77:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{C58DE23C-8C10-4D56-9D34-6720DE08AB3D}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 21:19:06.587 Df FoodieAI[11201:24bb4] (Foundation) [Analyze] HTTP 200 body-bytes=1250
+2026-05-08 21:19:06.600 Df FoodieAI[11201:24bb4] (Foundation) [Analyze] decoded food=Grilled Octopus with Pineapple and Basil coach=Frida Kahlo calories=350.0 hasFood=true
+2026-05-08 21:19:06.618 Df FoodieAI[11201:24ba5] (Foundation) [LiveProbe] analyze() returned; state=ready(<UIImage:0x1060f1180 named(main: LandingHero) {414, 736} renderingMode=automatic(original)>, FoodieAI.AnalyzeResponse(analysis: FoodieAI.GeminiAnalysis(fallback: Optional(""), food: Optional("Grilled Octopus with Pineapple and Basil"), calories: Optional(350.0), carbs: Optional(40.0), sugar: Optional(30.0), benefits: Optional(["Octopus is rich in protein and omega-3 fatty acids, which support muscle health and brain function.", "Pineapple provides vitamin C, boosting immunity and promoting healthy skin.", "Basil offers antioxidants and anti-inflammatory properties that can protect your cells."]), drawbacks: Optional(["Overconsumption of grilled foods might introduce potential carcinogens; consider baking or steaming for variety.", "The natural sugars in pineapple, if consumed in excess, could impact blood sugar levels.", "Octopus can be high in cholesterol, so moderation is key for heart health; consider lean fish or chicken as healthier alternatives."]), n<…>
+2026-05-08 21:19:06.619 Df FoodieAI[11201:24ba5] (Foundation) [LiveProbe] chaining save() after .ready
+2026-05-08 21:19:06.688 Df FoodieAI[11201:24ba5] (Foundation) [Save] FAILED: notSignedIn
+2026-05-08 21:19:06.691 Df FoodieAI[11201:24ba5] (Foundation) [LiveProbe] save() returned; state=saveFailed(<UIImage:0x1060f1180 named(main: LandingHero) {414, 736} renderingMode=automatic(original)>, FoodieAI.AnalyzeResponse(analysis: FoodieAI.GeminiAnalysis(fallback: Optional(""), food: Optional("Grilled Octopus with Pineapple and Basil"), calories: Optional(350.0), carbs: Optional(40.0), sugar: Optional(30.0), benefits: Optional(["Octopus is rich in protein and omega-3 fatty acids, which support muscle health and brain function.", "Pineapple provides vitamin C, boosting immunity and promoting healthy skin.", "Basil offers antioxidants and anti-inflammatory properties that can protect your cells."]), drawbacks: Optional(["Overconsumption of grilled foods might introduce potential carcinogens; consider baking or steaming for variety.", "The natural sugars in pineapple, if consumed in excess, could impact blood sugar levels.", "Octopus can be high in cholesterol, so moderation is key for heart health; consider lean fish or chicken as healthier alternatives."]),<…>
+2026-05-08 21:19:12.582 Df FoodieAI[11201:24bb3] [com.apple.network:connection] [C1 73D71F60-5DFD-482A-A24F-3F9C581B680C Hostname#51950f77:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancel
+2026-05-08 21:19:12.582 Df FoodieAI[11201:24bb3] [com.apple.network:connection] [C1 73D71F60-5DFD-482A-A24F-3F9C581B680C Hostname#51950f77:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancelled
+	[C1.1.1 045ADEC1-8E64-43C9-BB53-F7CE6B125B08 ::1.49976<->IPv6#b8ca627e.3001]
+	Connected Path: satisfied (Path is satisfied), interface: lo0
+	Privacy Stance: Not Eligible
+	Duration: 14.598s, DNS @0.007s took 0.000s, TCP @0.008s took 0.000s
+	bytes in/out: 1542/345707, packets in/out: 2/24, rtt: 0.001s, retransmitted bytes: 0, out-of-order bytes: 0
+	ecn packets sent/acked/marked/lost: 0/0/0/0
+Child process terminated with signal 15: Terminated

@@ -1,0 +1,30 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND (composedMessage CONTAINS[c] "Save" OR composedMessage CONTAINS[c] "Analyze" OR composedMessage CONTAINS[c] "LiveProbe" OR composedMessage CONTAINS[c] "Tracker")"
+Timestamp               Ty Process[PID:TID]
+2026-05-08 22:01:59.947 Df FoodieAI[14783:32a3e] (Foundation) analyzeBaseURL: http://localhost:3001
+2026-05-08 22:02:00.052 Df FoodieAI[14783:32a3e] (Foundation) [LiveProbe] food (LandingHero) photo loaded (414x736); calling analyze()
+2026-05-08 22:02:00.074 Df FoodieAI[14783:32a48] (Foundation) [Analyze] POST http://localhost:3001/analyze bytes=345184
+2026-05-08 22:02:00.086 Df FoodieAI[14783:32a47] [com.apple.network:connection] [C1 41360D80-97C6-4CAF-B9F2-B419095757A5 Hostname#30774648:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer, context: com.apple.CFNetwork.NSURLSession.{454C8A5A-FECB-4F75-B1E8-21161591BA00}{(null)}{Y}{2}{0x0} (private), proc: 7D42F93F-EB36-3AA2-AAB4-32B481F30D94, delegated upid: 0] start
+2026-05-08 22:02:06.480 Df FoodieAI[14783:32a4c] (Foundation) [Analyze] HTTP 200 body-bytes=901
+2026-05-08 22:02:06.481 Df FoodieAI[14783:32a4c] (Foundation) [Analyze] decoded food=Grilled calamari and vegetables with basil coach=Bruce Lee calories=300.0 hasFood=true
+2026-05-08 22:02:06.487 Df FoodieAI[14783:32a3e] (Foundation) [LiveProbe] analyze() returned; state=ready(<UIImage:0x1060f5180 named(main: LandingHero) {414, 736} renderingMode=automatic(original)>, FoodieAI.AnalyzeResponse(analysis: FoodieAI.GeminiAnalysis(fallback: Optional(""), food: Optional("Grilled calamari and vegetables with basil"), calories: Optional(300.0), carbs: Optional(15.0), sugar: Optional(8.0), benefits: Optional(["Rich in lean protein for muscle growth and repair, and packed with vitamins and antioxidants from vegetables to boost immunity and skin health."]), drawbacks: Optional(["Overcooking seafood can reduce its nutrient content, and while generally healthy, a large portion could be high in sodium if not prepared carefully; consider pairing with a fresh salad for added fiber."]), nutrients: Optional(["Key nutrients include protein for muscle and tissue repair, Vitamin C from vegetables for immune support, and Omega-3 fatty acids from calamari for heart and brain health, scoring an excellent 85/100 for its balanced nutritional profile."]), <…>
+2026-05-08 22:02:06.487 Df FoodieAI[14783:32a3e] (Foundation) [LiveProbe] chaining save() after .ready
+2026-05-08 22:02:06.490 Df FoodieAI[14783:32a4c] (Foundation) [Save] auth.currentUser?.id        = d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb
+2026-05-08 22:02:06.490 Df FoodieAI[14783:32a4c] (Foundation) [Save] auth.session?.user.id       = d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb
+2026-05-08 22:02:06.490 Df FoodieAI[14783:32a4c] (Foundation) [Save] storage path being uploaded = d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb/8d08c8df-46a0-431c-97de-9c11084a9e98.jpg
+2026-05-08 22:02:06.490 Df FoodieAI[14783:32a4c] (Foundation) [Save] path leading char           = d
+2026-05-08 22:02:06.490 Df FoodieAI[14783:32a4c] (Foundation) [Save] path contains '/'           = yes
+2026-05-08 22:02:07.048 Df FoodieAI[14783:32a3e] (Foundation) [Save] uploaded image_path=d73869bb-8bb7-41fb-b7b3-3b2d6d1e39bb/8d08c8df-46a0-431c-97de-9c11084a9e98.jpg
+2026-05-08 22:02:07.609 Df FoodieAI[14783:32a3e] (Foundation) [Save] inserted food_logs.id=8C2C2F09-4780-4731-B8C1-FDAA73556382 user_id=D73869BB-8BB7-41FB-B7B3-3B2D6D1E39BB
+2026-05-08 22:02:07.622 Df FoodieAI[14783:32a3e] (Foundation) [LiveProbe] save() returned; state=saved(<UIImage:0x1060f5180 named(main: LandingHero) {414, 736} renderingMode=automatic(original)>, FoodieAI.AnalyzeResponse(analysis: FoodieAI.GeminiAnalysis(fallback: Optional(""), food: Optional("Grilled calamari and vegetables with basil"), calories: Optional(300.0), carbs: Optional(15.0), sugar: Optional(8.0), benefits: Optional(["Rich in lean protein for muscle growth and repair, and packed with vitamins and antioxidants from vegetables to boost immunity and skin health."]), drawbacks: Optional(["Overcooking seafood can reduce its nutrient content, and while generally healthy, a large portion could be high in sodium if not prepared carefully; consider pairing with a fresh salad for added fiber."]), nutrients: Optional(["Key nutrients include protein for muscle and tissue repair, Vitamin C from vegetables for immune support, and Omega-3 fatty acids from calamari for heart and brain health, scoring an excellent 85/100 for its balanced nutritional profile."]), coa<…>
+2026-05-08 22:02:12.480 Df FoodieAI[14783:32aa6] [com.apple.network:connection] [C1 41360D80-97C6-4CAF-B9F2-B419095757A5 Hostname#30774648:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancel
+2026-05-08 22:02:12.481 Df FoodieAI[14783:32aa6] [com.apple.network:connection] [C1 41360D80-97C6-4CAF-B9F2-B419095757A5 Hostname#30774648:3001 tcp, url: http://localhost:3001/analyze, definite, attribution: developer] cancelled
+	[C1.1.1 3C390C3D-DF43-45D5-83E4-8F6122A158D1 ::1.50328<->IPv6#db0c72a9.3001]
+	Connected Path: satisfied (Path is satisfied), interface: lo0
+	Privacy Stance: Not Eligible
+	Duration: 12.394s, DNS @0.001s took 0.000s, TCP @0.001s took 0.001s
+	bytes in/out: 1192/345707, packets in/out: 2/25, rtt: 0.001s, retransmitted bytes: 0, out-of-order bytes: 0
+	ecn packets sent/acked/marked/lost: 0/0/0/0
+2026-05-08 22:02:19.262 Df FoodieAI[14802:32b7f] (Foundation) analyzeBaseURL: http://localhost:3001
+2026-05-08 22:02:19.555 Df FoodieAI[14802:32b7f] (Foundation) [Tracker] todaysLogs returned 2 entries (tz=Asia/Seoul)
+Child process terminated with signal 15: Terminated

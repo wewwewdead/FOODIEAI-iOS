@@ -1,0 +1,5 @@
+getpwuid_r did not find a match for uid 501
+Filtering the log data using "process == "FoodieAI" AND composedMessage CONTAINS[c] "Tracker""
+Timestamp               Ty Process[PID:TID]
+2026-05-08 21:59:34.071 Df FoodieAI[14674:32038] (Foundation) [Tracker] todaysLogs returned 1 entries (tz=Asia/Seoul)
+Child process terminated with signal 15: Terminated
