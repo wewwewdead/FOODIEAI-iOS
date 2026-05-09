@@ -37,6 +37,24 @@ actor FoodLogService {
             .value
     }
 
+    /// Logs in a half-open date range [from, to). Caller passes absolute Dates
+    /// representing local-day boundaries (start-of-day local … start-of-next-day-after-end local).
+    /// Reuses Phase 6's filter pattern (gte/lt on eaten_at, ordered desc).
+    /// RLS handles per-user isolation.
+    func logs(from: Date, to: Date) async throws -> [FoodLog] {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        return try await client
+            .from("food_logs")
+            .select()
+            .gte("eaten_at", value: f.string(from: from))
+            .lt ("eaten_at", value: f.string(from: to))
+            .order("eaten_at", ascending: false)
+            .execute()
+            .value
+    }
+
     func delete(_ id: UUID) async throws {
         try await client
             .from("food_logs")

@@ -19,6 +19,9 @@ struct AnalysisResultView: View {
     @State private var foodNameVisible = false
     @State private var sugarVisible = false
     @State private var carbsVisible = false
+    @State private var proteinVisible = false
+    @State private var fatVisible = false
+    @State private var fiberVisible = false
 
     @State private var stage: PanelStage = .none
 
@@ -84,6 +87,37 @@ struct AnalysisResultView: View {
                     .opacity(carbsVisible ? 1 : 0)
                     .scaleEffect(carbsVisible ? 1 : 0.8)
                     .animation(.easeOut(duration: 0.5), value: carbsVisible)
+
+                // Phase 11 macros: optional. Skip the line entirely if Gemini
+                // didn't return a value (showing "0g" would misrepresent missing
+                // data as a measured zero).
+                if let protein = analysis.protein {
+                    Text("Protein: \(format(protein))g")
+                        .appFont(.body)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Color.greenCalorie)
+                        .opacity(proteinVisible ? 1 : 0)
+                        .scaleEffect(proteinVisible ? 1 : 0.8)
+                        .animation(.easeOut(duration: 0.5), value: proteinVisible)
+                }
+                if let fat = analysis.fat {
+                    Text("Fat: \(format(fat))g")
+                        .appFont(.body)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Color.greenCalorie)
+                        .opacity(fatVisible ? 1 : 0)
+                        .scaleEffect(fatVisible ? 1 : 0.8)
+                        .animation(.easeOut(duration: 0.5), value: fatVisible)
+                }
+                if let fiber = analysis.fiber {
+                    Text("Fiber: \(format(fiber))g")
+                        .appFont(.body)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Color.greenCalorie)
+                        .opacity(fiberVisible ? 1 : 0)
+                        .scaleEffect(fiberVisible ? 1 : 0.8)
+                        .animation(.easeOut(duration: 0.5), value: fiberVisible)
+                }
             }
         }
     }
@@ -175,6 +209,17 @@ struct AnalysisResultView: View {
         try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 300)
         carbsVisible = true
 
+        // Phase 11: protein @ 1.8s, fat @ 2.1s, fiber @ 2.4s relative to start.
+        // Step from carbs (1.5s) by 300ms each, matching the existing rhythm.
+        try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 300)
+        proteinVisible = true
+
+        try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 300)
+        fatVisible = true
+
+        try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 300)
+        fiberVisible = true
+
         try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 500)
         stage = .nutrients
 
@@ -218,6 +263,9 @@ struct AnalysisResultView: View {
             calories: 275,
             carbs: 35,
             sugar: 4,
+            protein: 12,
+            fat: 14,
+            fiber: 3,
             benefits: [
                 "Provides calcium for bone health",
                 "Contains lycopene from tomato sauce",

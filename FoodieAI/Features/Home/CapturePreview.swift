@@ -401,6 +401,9 @@ private enum SamplePayload {
             calories: 285,
             carbs: 36,
             sugar: 4,
+            protein: 12,
+            fat: 11,
+            fiber: 2,
             benefits: [
                 "Provides calcium for bone health",
                 "Contains lycopene from tomato sauce",

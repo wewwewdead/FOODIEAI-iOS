@@ -13,6 +13,11 @@ struct GeminiAnalysis: Codable, Hashable {
     let calories: Double?
     let carbs: Double?
     let sugar: Double?
+    /// Phase 11: requested from Gemini in grams. Optional because pre-Phase-11
+    /// server builds (and any partial Gemini output) won't include them.
+    let protein: Double?
+    let fat: Double?
+    let fiber: Double?
     let benefits: [String]?
     let drawbacks: [String]?
     let nutrients: [String]?

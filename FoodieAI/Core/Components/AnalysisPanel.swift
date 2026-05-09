@@ -5,6 +5,15 @@ import SwiftUI
 /// padding, min-height 200pt. Body is typewriter-rendered, one item at a
 /// time at 20ms/char.
 struct AnalysisPanel: View {
+    /// Phase 10: panels can render in two modes. `.typing` keeps the original
+    /// 20ms/char typewriter for the post-analyze flow; `.prefilled` shows all
+    /// items immediately with no animation, used by saved-meal expansions in
+    /// MealRow where the user already saw the typewriter once.
+    enum Mode {
+        case typing
+        case prefilled
+    }
+
     enum Kind {
         case nutrients, benefits, drawbacks
 
@@ -41,14 +50,26 @@ struct AnalysisPanel: View {
     let title: String
     let items: [String]
     let startTyping: Bool
+    let mode: Mode
 
     @StateObject private var controller: TypewriterController
 
+    /// Back-compat initializer used by AnalysisResultView and the previews.
+    /// Defaults to `.typing` mode, matching pre-Phase-10 behavior.
     init(kind: Kind, title: String, items: [String], startTyping: Bool) {
+        self.init(kind: kind, title: title, items: items,
+                  startTyping: startTyping, mode: .typing)
+    }
+
+    /// Phase 10 initializer. Pass `.prefilled` to skip the typewriter entirely.
+    /// In `.prefilled` mode, `startTyping` is ignored — items render
+    /// immediately on first appearance.
+    init(kind: Kind, title: String, items: [String], startTyping: Bool, mode: Mode) {
         self.kind = kind
         self.title = title
         self.items = items
         self.startTyping = startTyping
+        self.mode = mode
         self._controller = StateObject(wrappedValue: TypewriterController(items: items))
     }
 
@@ -66,7 +87,7 @@ struct AnalysisPanel: View {
                     .foregroundStyle(kind.textColor)
             }
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                ForEach(Array(controller.displayedText.enumerated()), id: \.offset) { _, line in
+                ForEach(Array(visibleLines.enumerated()), id: \.offset) { _, line in
                     if !line.isEmpty {
                         Text(line)
                             .appFont(.body)
@@ -86,14 +107,28 @@ struct AnalysisPanel: View {
                 .strokeBorder(Color.panelBorder, lineWidth: 8)
         )
         .onChange(of: items) { _, newItems in
+            // In .prefilled mode the typewriter is unused, but resetting
+            // keeps the controller's `items` array in sync if a parent
+            // ever swaps to .typing later. Cheap and harmless.
             controller.reset(items: newItems)
-            if startTyping { controller.start() }
+            if mode == .typing && startTyping { controller.start() }
         }
         .onChange(of: startTyping) { _, started in
+            guard mode == .typing else { return }
             if started { controller.start() } else { controller.reset() }
         }
         .onAppear {
-            if startTyping { controller.start() }
+            if mode == .typing && startTyping { controller.start() }
+        }
+    }
+
+    /// In `.typing` mode, the typewriter controller drives line content.
+    /// In `.prefilled` mode we render `items` directly — no per-character
+    /// gating, no per-item sequencing.
+    private var visibleLines: [String] {
+        switch mode {
+        case .typing:    controller.displayedText
+        case .prefilled: items
         }
     }
 }

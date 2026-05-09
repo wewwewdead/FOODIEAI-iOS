@@ -58,10 +58,6 @@ final class CaptureViewModel: ObservableObject {
     private let imageService: FoodImageService
     private let logService: FoodLogService
 
-    /// Compressed JPEG bytes captured during `analyze()`. Reused by `save()`
-    /// to avoid a second compression pass. Cleared on every `setPhoto`.
-    private var lastJPEG: Data?
-
     init(analyzer: AnalyzeService = AnalyzeService(),
          imageService: FoodImageService = FoodImageService(),
          logService: FoodLogService = FoodLogService()) {
@@ -73,23 +69,27 @@ final class CaptureViewModel: ObservableObject {
     /// Pick from the photo library or capture from the camera. Always
     /// transitions to `.picked` regardless of the previous state.
     func setPhoto(_ image: UIImage) {
-        lastJPEG = nil
         state = .picked(image)
     }
 
     /// Run /analyze on the current photo. No-op if there's no image, or if
     /// a request is already in flight.
+    ///
+    /// Phase 12: the multipart body now uses `compressMain` (1024px / 0.70).
+    /// We *don't* cache these bytes anymore — `save()` regenerates main +
+    /// thumbnail from the original `UIImage` so it can produce the smaller
+    /// thumbnail at the same time. The two paths (analyze upload vs. save
+    /// upload) don't need to be byte-identical.
     func analyze() async {
         guard let image = state.image else { return }
         if case .analyzing = state { return }
 
         state = .analyzing(image)
 
-        guard let jpeg = ImagePreparation.compress(image) else {
+        guard let jpeg = ImagePreparation.compressMain(image) else {
             state = .failed(image, .imageTooLarge)
             return
         }
-        self.lastJPEG = jpeg
 
         do {
             let response = try await analyzer.analyze(jpegData: jpeg)
@@ -111,54 +111,69 @@ final class CaptureViewModel: ObservableObject {
     /// Save the current `.ready` analysis. No-op if not in `.ready` state, or
     /// if a save is already in flight.
     ///
-    /// Pipeline:
-    ///   1. Upload the JPEG bytes captured during analyze() to Supabase
-    ///      Storage at `{auth.uid()}/{uuid}.jpg`. Recompresses if the
-    ///      bytes were dropped (e.g. cold restart).
-    ///   2. Build a `NewFoodLog` from the analysis. Note: NO `user_id` —
-    ///      the DB default + RLS handle that.
-    ///   3. Insert into `food_logs`.
-    ///   4. Transition to `.saved` (UI shows the confirmation sheet).
+    /// Phase 12 pipeline (paired-image dual-write):
+    ///   1. Generate a fresh main JPEG (1024px / 0.70) AND a thumbnail JPEG
+    ///      (256px / 0.60) from the original captured `UIImage`. The bytes
+    ///      sent to /analyze were already discarded — we recompress here
+    ///      because the thumbnail must be derived from the same source
+    ///      image and we don't want a second main compression to differ
+    ///      from the thumbnail's reference.
+    ///   2. Upload both objects to Supabase Storage in parallel via
+    ///      `uploadMealImages(...)`. They share an `imageId`; the thumb is
+    ///      `{imageId}_thumb.jpg`.
+    ///   3. Build a `NewFoodLog` carrying both paths. NO `user_id` — DB
+    ///      default + RLS handle that.
+    ///   4. Insert; transition to `.saved`.
     func save() async {
         guard case .ready(let image, let response) = state else { return }
         state = .saving(image, response)
 
-        let jpeg: Data
-        if let cached = lastJPEG {
-            jpeg = cached
-        } else if let recompressed = ImagePreparation.compress(image) {
-            jpeg = recompressed
-        } else {
+        guard let mainData  = ImagePreparation.compressMain(image),
+              let thumbData = ImagePreparation.compressThumbnail(image) else {
             state = .saveFailed(image, response, SaveError.imagePreparationFailed)
             return
         }
 
+        #if DEBUG
+        NSLog("[Save] mainBytes=%d thumbBytes=%d", mainData.count, thumbData.count)
+        #endif
+
         do {
-            let path = try await imageService.upload(jpegData: jpeg)
+            let uploaded = try await imageService.uploadMealImages(
+                mainData: mainData,
+                thumbnailData: thumbData
+            )
             #if DEBUG
-            NSLog("[Save] uploaded image_path=%@", path)
+            NSLog("[Save] uploaded main_path=%@ thumb_path=%@",
+                  uploaded.mainPath, uploaded.thumbPath)
             #endif
 
             let draft = NewFoodLog(
-                foodName:    response.analysis.food ?? "Unknown",
-                imagePath:   path,
-                calories:    response.analysis.calories ?? 0,
-                carbsG:      response.analysis.carbs ?? 0,
-                sugarG:      response.analysis.sugar ?? 0,
-                proteinG:    nil,
-                fatG:        nil,
-                fiberG:      nil,
-                benefits:    response.analysis.benefits ?? [],
-                drawbacks:   response.analysis.drawbacks ?? [],
-                nutrients:   response.analysis.nutrients ?? [],
-                coachName:   response.coach,
-                coachAdvice: response.analysis.coachAdvice
+                foodName:        response.analysis.food ?? "Unknown",
+                imagePath:       uploaded.mainPath,
+                imageThumbPath:  uploaded.thumbPath,
+                calories:        response.analysis.calories ?? 0,
+                carbsG:          response.analysis.carbs ?? 0,
+                sugarG:          response.analysis.sugar ?? 0,
+                proteinG:        response.analysis.protein,
+                fatG:            response.analysis.fat,
+                fiberG:          response.analysis.fiber,
+                benefits:        response.analysis.benefits ?? [],
+                drawbacks:       response.analysis.drawbacks ?? [],
+                nutrients:       response.analysis.nutrients ?? [],
+                coachName:       response.coach,
+                coachAdvice:     response.analysis.coachAdvice
             )
 
             let inserted = try await logService.insert(draft)
             #if DEBUG
             NSLog("[Save] inserted food_logs.id=%@ user_id=%@",
                   inserted.id.uuidString, inserted.userId.uuidString)
+            NSLog("[Save] macros: cal=%.0f carbs=%.1fg sugar=%.1fg protein=%@ fat=%@ fiber=%@",
+                  inserted.calories, inserted.carbsG, inserted.sugarG,
+                  inserted.proteinG.map { String(format: "%.1fg", $0) } ?? "nil",
+                  inserted.fatG.map     { String(format: "%.1fg", $0) } ?? "nil",
+                  inserted.fiberG.map   { String(format: "%.1fg", $0) } ?? "nil")
             #endif
 
             state = .saved(image, response, inserted)
@@ -181,21 +196,18 @@ final class CaptureViewModel: ObservableObject {
     /// Dismiss the saved-confirmation sheet and clear back to `.idle`.
     func discardSaved() {
         state = .idle
-        lastJPEG = nil
     }
 
     /// User wants to start over with a new photo. Goes back to `.idle` so
     /// the dashed drop zone shows the empty state again and the picker
     /// can be re-presented from there.
     func resetToPick() {
-        lastJPEG = nil
         state = .idle
     }
 
     /// Same as `resetToPick` for now; preserved as a separate entry point
     /// in case the design diverges (e.g. cancel-without-resetting).
     func discardCurrent() {
-        lastJPEG = nil
         state = .idle
     }
 }
