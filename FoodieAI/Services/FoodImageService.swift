@@ -94,6 +94,25 @@ actor FoodImageService {
         return path
     }
 
+    /// Delete one or more objects from the bucket. Caller passes the full
+    /// storage paths (e.g., `"{userId}/{uuid}.jpg"`). Empty input is a no-op.
+    /// The storage `food_images_delete_own` policy scopes deletes to the
+    /// caller's own folder, so this can't accidentally remove another
+    /// user's image even if a stray path were passed.
+    ///
+    /// Also evicts any cached signed URLs for the deleted paths so a
+    /// re-upload at the same path (which can't currently happen — paths
+    /// are UUID-suffixed) wouldn't serve a stale cached URL.
+    func delete(paths: [String]) async throws {
+        guard !paths.isEmpty else { return }
+        #if DEBUG
+        NSLog("[Delete] removing %d storage object(s): %@",
+              paths.count, paths.joined(separator: ", "))
+        #endif
+        _ = try await client.storage.from(bucket).remove(paths: paths)
+        for p in paths { signedURLCache.removeValue(forKey: p) }
+    }
+
     /// Short-lived signed URL for displaying a private image.
     func signedUrl(for path: String, expiresIn seconds: Int = 60 * 60) async throws -> URL {
         try await client.storage

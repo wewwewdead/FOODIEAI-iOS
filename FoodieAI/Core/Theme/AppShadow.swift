@@ -13,7 +13,13 @@ struct AppShadowLayer: Hashable {
 }
 
 enum AppShadow: String, CaseIterable, Identifiable {
+    // v1 (Phase 0)
     case nav, card, cardHover, image, upload
+    // v2 (Phase 14 — REDESIGN_DESIGN_SYSTEM.md §Shadow).
+    // Single-layer, soft, modern. Replaces the v1 multi-layer Bootstrap stack.
+    case shadowCard       // 0 6 14 rgba(0,0,0,0.05) — default card lift
+    case shadowCta        // 0 8 16 rgba(184,202,56,0.18) — colored CTA shadow
+    case shadowFloating   // 0 4 10 rgba(0,0,0,0.08) — coach badge, segmented thumb
 
     var id: String { rawValue }
 
@@ -45,6 +51,19 @@ enum AppShadow: String, CaseIterable, Identifiable {
                    radius: 27, x: 0, y: 13),
              .init(color: .black.opacity(0.30),
                    radius: 16, x: 0, y: 8)]
+
+        // v2: SwiftUI's `.shadow(color:radius:x:y:)` interprets `radius`
+        // similarly to CSS's `stdDeviation` (the blur radius). The CSS
+        // numbers from the design doc map directly into this layer model.
+        case .shadowCard:
+            [.init(color: .black.opacity(0.05),
+                   radius: 14, x: 0, y: 6)]
+        case .shadowCta:
+            [.init(color: Color(red: 184/255, green: 202/255, blue: 56/255).opacity(0.18),
+                   radius: 16, x: 0, y: 8)]
+        case .shadowFloating:
+            [.init(color: .black.opacity(0.08),
+                   radius: 10, x: 0, y: 4)]
         }
     }
 }

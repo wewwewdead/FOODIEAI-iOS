@@ -63,6 +63,69 @@ actor FoodLogService {
             .execute()
     }
 
+    /// Delete a saved meal end-to-end: the `food_logs` row first (the
+    /// source of truth that the rest of the app reads from), then a
+    /// best-effort cleanup of the main image and its thumbnail in
+    /// Storage. Image deletion failures are swallowed because:
+    ///   - the row is already gone, so nothing in the schema references
+    ///     the orphaned object,
+    ///   - storage cost for a 256-px thumbnail is negligible, and
+    ///   - we'd rather succeed at the user's stated goal (remove the log
+    ///     from their day) than fail the whole operation over a
+    ///     transient storage hiccup.
+    func delete(_ log: FoodLog,
+                imageService: FoodImageService = FoodImageService()) async throws {
+        try await delete(log.id)
+
+        var paths: [String] = []
+        if let p = log.imagePath, !p.isEmpty { paths.append(p) }
+        if let p = log.imageThumbPath, !p.isEmpty { paths.append(p) }
+        if !paths.isEmpty {
+            do {
+                try await imageService.delete(paths: paths)
+            } catch {
+                #if DEBUG
+                NSLog("[Delete] storage cleanup FAILED for %d path(s): %@",
+                      paths.count, "\(error)")
+                #endif
+            }
+        }
+    }
+
+    /// Phase 18 — set (or clear) the post-save mood label on a saved
+    /// meal. RLS scopes the row by `user_id` via the
+    /// `food_logs_update_own` policy; no client-side user check needed.
+    ///
+    /// Passing `nil` is intentional and clears any prior label — the
+    /// "Skip" path in the pulse and the Profile mood log's "clear"
+    /// affordance funnel through the same call.
+    @discardableResult
+    func setMood(_ mood: FoodLog.Mood?, on logId: UUID) async throws -> FoodLog {
+        // PostgREST's update path is happiest with an Encodable payload;
+        // a typed patch keeps the wire shape obvious and round-trips the
+        // optional cleanly (encodeIfPresent for nil drops the column,
+        // which would leave the prior value alone — so encode `nil` as
+        // explicit JSON `null` to clear).
+        struct MoodPatch: Encodable {
+            let mood: String?
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                // Always encode the key; `encode(_:forKey:)` on
+                // `String?` writes JSON null when the value is nil.
+                try c.encode(mood, forKey: .mood)
+            }
+            enum CodingKeys: String, CodingKey { case mood }
+        }
+        let patch = MoodPatch(mood: mood?.rawValue)
+        return try await client
+            .from("food_logs")
+            .update(patch, returning: .representation)
+            .eq("id", value: logId)
+            .single()
+            .execute()
+            .value
+    }
+
     /// [start, end) covering the user's local calendar day, expressed as absolute Dates.
     static func localDayBounds(now: Date = Date(),
                                timeZone: TimeZone = .current) -> (Date, Date) {

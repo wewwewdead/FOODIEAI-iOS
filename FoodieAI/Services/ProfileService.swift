@@ -110,22 +110,39 @@ actor ProfileService {
     /// Update display name and goals. Returns the updated row so the VM
     /// can swap its loaded copy. Avatar upload is deferred (Phase 0 Q5),
     /// so `avatar_url` is left untouched.
+    ///
+    /// Phase 16. `preferredCoaches` is opt-in: `nil` means "don't touch
+    /// the column" (the patch encoder omits the key); a non-nil value —
+    /// including `[]` — replaces the stored array. Callers that only
+    /// edit goals should pass `nil` so a stale empty array doesn't
+    /// silently clobber the user's preferences.
     func updateProfile(displayName: String?,
                        dailyCalorieGoal: Int,
                        dailyCarbGoalG: Int,
-                       dailySugarGoalG: Int) async throws -> Profile {
+                       dailySugarGoalG: Int,
+                       dailyProteinGoalG: Int,
+                       dailyFatGoalG: Int,
+                       dailyFiberGoalG: Int,
+                       preferredCoaches: [String]? = nil) async throws -> Profile {
         let id = try await signedInUserId()
         let patch = ProfileUpdate(
-            displayName:      displayName?.isEmpty == true ? nil : displayName,
-            dailyCalorieGoal: dailyCalorieGoal,
-            dailyCarbGoalG:   dailyCarbGoalG,
-            dailySugarGoalG:  dailySugarGoalG
+            displayName:       displayName?.isEmpty == true ? nil : displayName,
+            dailyCalorieGoal:  dailyCalorieGoal,
+            dailyCarbGoalG:    dailyCarbGoalG,
+            dailySugarGoalG:   dailySugarGoalG,
+            dailyProteinGoalG: dailyProteinGoalG,
+            dailyFatGoalG:     dailyFatGoalG,
+            dailyFiberGoalG:   dailyFiberGoalG,
+            preferredCoaches:  preferredCoaches
         )
 
         #if DEBUG
-        NSLog("[Profile] UPDATE profiles SET (display_name=%@ cal=%d carb=%d sugar=%d) WHERE id=%@",
+        NSLog("[Profile] UPDATE profiles SET (display_name=%@ cal=%d carb=%d sugar=%d protein=%d fat=%d fiber=%d coaches=%@) WHERE id=%@",
               displayName ?? "<nil>",
-              dailyCalorieGoal, dailyCarbGoalG, dailySugarGoalG, id)
+              dailyCalorieGoal, dailyCarbGoalG, dailySugarGoalG,
+              dailyProteinGoalG, dailyFatGoalG, dailyFiberGoalG,
+              preferredCoaches.map { "[\($0.joined(separator: ","))]" } ?? "<nil>",
+              id)
         #endif
 
         do {
@@ -148,6 +165,144 @@ actor ProfileService {
             #endif
             throw error
         }
+    }
+
+    /// Phase 16 — narrow API for the Coach Preferences screen. Writes
+    /// only `preferred_coaches`, leaves goals + display name untouched.
+    /// Returns the freshly-updated row so the caller can refresh any
+    /// observers (e.g., the shared ProfileStore).
+    func setPreferredCoaches(_ coaches: [String]) async throws -> Profile {
+        let id = try await signedInUserId()
+        let patch = ProfileUpdate(preferredCoaches: coaches)
+
+        #if DEBUG
+        NSLog("[Profile] UPDATE profiles SET preferred_coaches=[%@] WHERE id=%@",
+              coaches.joined(separator: ","), id)
+        #endif
+
+        let updated: Profile = try await client
+            .from("profiles")
+            .update(patch)
+            .eq("id", value: id)
+            .select()
+            .single()
+            .execute()
+            .value
+        return updated
+    }
+
+    /// Phase 17 — write notification preferences in one round-trip.
+    /// `nil` for any flag means "leave the column alone", matching the
+    /// `ProfileUpdate` opt-in encoder contract. The settings UI passes
+    /// only the field that just changed, so a master-toggle flip
+    /// doesn't perturb the meal flags' stored values.
+    func setNotificationPreferences(notificationsEnabled: Bool? = nil,
+                                    reminderBreakfast: Bool? = nil,
+                                    reminderLunch: Bool? = nil,
+                                    reminderDinner: Bool? = nil,
+                                    weeklyRecapEnabled: Bool? = nil) async throws -> Profile {
+        let id = try await signedInUserId()
+        let patch = ProfileUpdate(
+            notificationsEnabled: notificationsEnabled,
+            reminderBreakfast:    reminderBreakfast,
+            reminderLunch:        reminderLunch,
+            reminderDinner:       reminderDinner,
+            weeklyRecapEnabled:   weeklyRecapEnabled
+        )
+
+        #if DEBUG
+        NSLog("[Profile] UPDATE profiles SET (master=%@ b=%@ l=%@ d=%@ recap=%@) WHERE id=%@",
+              notificationsEnabled.map { "\($0)" } ?? "<nil>",
+              reminderBreakfast.map    { "\($0)" } ?? "<nil>",
+              reminderLunch.map        { "\($0)" } ?? "<nil>",
+              reminderDinner.map       { "\($0)" } ?? "<nil>",
+              weeklyRecapEnabled.map   { "\($0)" } ?? "<nil>",
+              id)
+        #endif
+
+        return try await client
+            .from("profiles")
+            .update(patch)
+            .eq("id", value: id)
+            .select()
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Phase 19 — single round-trip that persists every answer the
+    /// onboarding flow has collected (archetype, default macro goals,
+    /// preferred coaches, notification preferences) and stamps
+    /// `onboarding_completed_at`. Designed as one batched UPDATE so the
+    /// ring/bar denominators, coach rotation, and reminder schedule all
+    /// pick up the values atomically — no half-onboarded states where
+    /// the gate flipped but the goals didn't.
+    ///
+    /// Each parameter is opt-in (matching `ProfileUpdate`'s encoder). If
+    /// the user skipped a screen, pass `nil` for that field and the
+    /// stored value (or schema default) is left alone. The exception is
+    /// `onboardingCompletedAt` and `onboardingArchetype`, which the
+    /// caller is expected to set on every completion.
+    func completeOnboarding(archetype: Profile.Archetype,
+                            dailyCalorieGoal: Int?,
+                            dailyCarbGoalG: Int?,
+                            dailySugarGoalG: Int?,
+                            preferredCoaches: [String]?,
+                            notificationsEnabled: Bool?,
+                            reminderBreakfast: Bool?,
+                            reminderLunch: Bool?,
+                            reminderDinner: Bool?,
+                            completedAt: Date) async throws -> Profile {
+        let id = try await signedInUserId()
+        let patch = ProfileUpdate(
+            dailyCalorieGoal:     dailyCalorieGoal,
+            dailyCarbGoalG:       dailyCarbGoalG,
+            dailySugarGoalG:      dailySugarGoalG,
+            preferredCoaches:     preferredCoaches,
+            notificationsEnabled: notificationsEnabled,
+            reminderBreakfast:    reminderBreakfast,
+            reminderLunch:        reminderLunch,
+            reminderDinner:       reminderDinner,
+            onboardingCompletedAt: completedAt,
+            onboardingArchetype:   archetype
+        )
+
+        #if DEBUG
+        NSLog("[Profile] completeOnboarding archetype=%@ id=%@",
+              archetype.rawValue, id)
+        #endif
+
+        return try await client
+            .from("profiles")
+            .update(patch)
+            .eq("id", value: id)
+            .select()
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Phase 17 — quiet timezone sync. Writes the IANA identifier only
+    /// when it differs from `currentValue`. Caller is responsible for
+    /// reading the current value from the loaded profile and skipping
+    /// the call when it already matches; this method is the leaf write.
+    func setTimeZone(_ identifier: String) async throws -> Profile {
+        let id = try await signedInUserId()
+        let patch = ProfileUpdate(timeZone: identifier)
+
+        #if DEBUG
+        NSLog("[Profile] UPDATE profiles SET time_zone=%@ WHERE id=%@",
+              identifier, id)
+        #endif
+
+        return try await client
+            .from("profiles")
+            .update(patch)
+            .eq("id", value: id)
+            .select()
+            .single()
+            .execute()
+            .value
     }
 }
 

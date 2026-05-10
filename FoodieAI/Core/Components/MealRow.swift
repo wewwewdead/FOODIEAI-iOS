@@ -39,7 +39,7 @@ struct MealRow: View {
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.brandIvory)
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.lg)
@@ -95,7 +95,8 @@ struct MealRow: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 guard hasExpandableContent else { return }
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                Haptics.soft()
+                withAnimation(.appReveal) {
                     isExpanded.toggle()
                 }
             }
@@ -111,6 +112,7 @@ struct MealRow: View {
         let canViewFull = !(log.imagePath?.isEmpty ?? true)
         if canViewFull {
             Button {
+                Haptics.tap()
                 showFullImage = true
             } label: {
                 thumbnailFrame
@@ -127,7 +129,7 @@ struct MealRow: View {
     private var thumbnailFrame: some View {
         thumbnail
             .frame(width: 80, height: 80)
-            .background(Color.brandIvory)
+            .background(Color.bgSurface)
             .clipShape(RoundedRectangle(cornerRadius: AppRadius.md))
             .overlay(
                 RoundedRectangle(cornerRadius: AppRadius.md)
@@ -233,7 +235,7 @@ struct MealRow: View {
 
     private var placeholder: some View {
         ZStack {
-            Color.brandIvory
+            Color.bgSurface
             Image(systemName: failed ? "photo.badge.exclamationmark" : "photo")
                 .font(.system(size: 24, weight: .regular))
                 .foregroundStyle(Color.textMeta.opacity(0.5))
@@ -318,7 +320,7 @@ struct MealRow: View {
         }
         .padding(AppSpacing.lg)
     }
-    .background(Color.brandCream)
+    .background(Color.bgCanvas)
 }
 
 private extension FoodLog {
@@ -348,7 +350,10 @@ private extension FoodLog {
             coachName: coachName,
             coachAdvice: coachAdvice,
             eatenAt: Date(),
-            createdAt: Date()
+            createdAt: Date(),
+            origin: .analyzed,
+            sourceLogId: nil,
+            mood: nil
         )
     }
 }

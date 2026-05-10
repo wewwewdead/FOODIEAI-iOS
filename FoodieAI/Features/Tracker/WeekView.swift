@@ -33,7 +33,9 @@ struct WeekView: View {
         .refreshable { await viewModel.refresh() }
         .task { await viewModel.refresh() }
         .sheet(item: $selectedBucket) { bucket in
-            DayDetailSheet(bucket: bucket)
+            DayDetailSheet(bucket: bucket, onDeleted: {
+                Task { await viewModel.refresh() }
+            })
         }
     }
 
@@ -41,10 +43,13 @@ struct WeekView: View {
     private var content: some View {
         switch viewModel.state {
         case .loading:
-            ProgressView()
-                .controlSize(.large)
-                .tint(Color.brand)
-                .padding(.top, AppSpacing.xl3)
+            // Phase 13: skeleton header card + chart placeholder.
+            VStack(spacing: AppSpacing.lg) {
+                SkeletonShape(cornerRadius: AppRadius.lg)
+                    .frame(height: 220)
+                SkeletonShape(cornerRadius: AppRadius.lg)
+                    .frame(height: 280)
+            }
         case .loaded(let buckets, let interval):
             headerCard(buckets: buckets, interval: interval)
             chartCard(buckets: buckets)
@@ -92,8 +97,9 @@ struct WeekView: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
-                    Text(format(totals.totalCalories))
-                        .appFont(.kcal)
+                    AnimatedNumber(value: totals.totalCalories,
+                                   formatter: AnimatedNumber.integerFormatter)
+                        .font(AppFont.font(.kcal))
                         .fontWeight(.black)
                         .foregroundStyle(.white)
                     Text("calories this week")
@@ -104,26 +110,16 @@ struct WeekView: View {
                     .appFont(.body)
                     .fontWeight(.semibold)
                     .foregroundStyle(.white)
-                Text("Total sugar: \(format(totals.totalSugar))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Total carbs: \(format(totals.totalCarbs))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Total protein: \(format(totals.totalProtein))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Total fat: \(format(totals.totalFat))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Total fiber: \(format(totals.totalFiber))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
+                Group {
+                    TotalLine(label: "Total sugar",   value: totals.totalSugar)
+                    TotalLine(label: "Total carbs",   value: totals.totalCarbs)
+                    TotalLine(label: "Total protein", value: totals.totalProtein)
+                    TotalLine(label: "Total fat",     value: totals.totalFat)
+                    TotalLine(label: "Total fiber",   value: totals.totalFiber)
+                }
+                .font(AppFont.font(.body))
+                .fontWeight(.semibold)
+                .foregroundStyle(.white)
             }
         }
         .padding(.horizontal, AppSpacing.xl)
@@ -180,7 +176,7 @@ struct WeekView: View {
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.brandIvory)
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.lg)

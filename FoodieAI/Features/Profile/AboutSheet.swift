@@ -16,7 +16,7 @@ struct AboutSheet: View {
 
     var body: some View {
         ZStack {
-            Color.brandIvory.ignoresSafeArea()
+            Color.bgSurface.ignoresSafeArea()
             VStack(spacing: AppSpacing.xl2) {
                 Spacer(minLength: AppSpacing.xl)
 
@@ -58,7 +58,7 @@ struct AboutSheet: View {
 
 #if DEBUG
 #Preview("AboutSheet") {
-    Color.brandCream.ignoresSafeArea()
+    Color.bgCanvas.ignoresSafeArea()
         .sheet(isPresented: .constant(true)) {
             AboutSheet()
                 .presentationDetents([.medium])

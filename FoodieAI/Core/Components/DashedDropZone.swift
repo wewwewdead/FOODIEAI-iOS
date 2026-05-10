@@ -3,6 +3,10 @@ import SwiftUI
 /// Web equivalent: `.form__upload` / `.form__upload--empty` (UploadForm).
 /// 320×320 with two states. Picker integration is Phase 5; here we only
 /// render the visual + invoke `onTap`.
+///
+/// @deprecated Phase 14: replaced by the clean white photo card inline in
+/// `CaptureView`. Kept for now in case the post-analyze flow wants to
+/// reuse the dashed-border treatment as a one-time delight.
 struct DashedDropZone: View {
     let image: UIImage?
     let onTap: () -> Void
@@ -38,17 +42,24 @@ struct DashedDropZoneSurface: View {
                     .frame(width: Self.side, height: Self.side)
                     .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
                     .appShadow(.upload)
+                    // Phase 13: pick lands with a spring entrance. The
+                    // empty state simultaneously fades out under .appReveal
+                    // (driven by the parent .animation(value: image == nil)).
+                    .transition(
+                        .scale(scale: 0.95).combined(with: .opacity)
+                    )
                 if isPressed {
                     overlay
                         .transition(.opacity)
                 }
             } else {
                 emptyState
+                    .transition(.opacity)
             }
         }
         .frame(width: Self.side, height: Self.side)
         .animation(.appPress, value: isPressed)
-        .animation(.appPress, value: image == nil)
+        .animation(.appReveal, value: image == nil)
     }
 
     private var emptyState: some View {

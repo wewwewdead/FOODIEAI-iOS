@@ -17,7 +17,7 @@ struct LandingView: View {
                 belowHero
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(Color.brandCream.ignoresSafeArea())
+            .background(Color.bgCanvas.ignoresSafeArea())
         }
     }
 

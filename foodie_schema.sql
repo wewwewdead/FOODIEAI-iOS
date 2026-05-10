@@ -190,3 +190,6 @@ create policy "food_images_delete_own"
 --   select * from public.food_logs;
 --   select * from public.daily_food_totals;
 -- ============================================================================
+
+
+

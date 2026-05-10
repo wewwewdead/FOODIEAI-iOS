@@ -11,7 +11,7 @@ import SwiftUI
 struct TrackerFailedSample: View {
     var body: some View {
         ZStack {
-            Color.brandCream.ignoresSafeArea()
+            Color.bgCanvas.ignoresSafeArea()
 
             ScrollView {
                 VStack(spacing: AppSpacing.lg) {

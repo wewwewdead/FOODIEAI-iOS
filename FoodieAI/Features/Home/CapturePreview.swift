@@ -57,7 +57,7 @@ struct LiveAnalyzeProbeView: View {
 
     var body: some View {
         ZStack {
-            Color.brandCream.ignoresSafeArea()
+            Color.bgCanvas.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: AppSpacing.xl) {
                     DashedDropZone(image: viewModel.state.image) {}
@@ -138,7 +138,8 @@ struct LiveAnalyzeProbeView: View {
             }
         case .analyzing:
             PillButton(title: "Analyzing...", variant: .outline, isLoading: true) {}
-        case .ready, .noFood, .failed, .saving, .saved, .saveFailed:
+        case .ready, .noFood, .failed, .saving, .saved, .saveFailed,
+             .moodPulse:
             PillButton(title: "Analyze new food", variant: .outline) {}
         }
     }
@@ -146,28 +147,32 @@ struct LiveAnalyzeProbeView: View {
     @ViewBuilder
     private var resultSection: some View {
         switch viewModel.state {
-        case .ready(_, let response):
+        case .ready(let image, let response):
             AnalysisResultView(
+                image: image,
                 response: response,
                 onSave: { Task { await viewModel.save() } },
                 onCancel: { NSLog("[LiveProbe] cancel tapped") }
             )
-        case .saving(_, let response):
+        case .saving(let image, let response):
             AnalysisResultView(
+                image: image,
                 response: response,
                 isSaving: true,
                 onSave: {},
                 onCancel: {}
             )
-        case .saved(_, let response, _):
+        case .saved(let image, let response, _):
             AnalysisResultView(
+                image: image,
                 response: response,
                 onSave: {},
                 onCancel: {}
             )
-        case .saveFailed(_, let response, let error):
+        case .saveFailed(let image, let response, let error):
             VStack(spacing: AppSpacing.lg) {
                 AnalysisResultView(
+                    image: image,
                     response: response,
                     onSave: { Task { await viewModel.retrySave() } },
                     onCancel: {}
@@ -198,7 +203,7 @@ struct LiveAnalyzeProbeView: View {
                     .multilineTextAlignment(.center)
             }
             .padding(AppSpacing.lg)
-        case .idle, .picked, .analyzing:
+        case .idle, .picked, .analyzing, .moodPulse:
             EmptyView()
         }
     }
@@ -209,6 +214,10 @@ private struct SampleCaptureContainer: View {
 
     enum Stage {
         case picked, analyzing, ready, noFood, failed, panels, savedSheet
+        /// Phase 14: render the new `AnalysisResultView` in isolation
+        /// against `bgCanvas`, with no legacy DashedDropZone or
+        /// "Analyze new food" PillButton above it.
+        case resultV2
 
         init(_ raw: String) {
             switch raw {
@@ -218,6 +227,7 @@ private struct SampleCaptureContainer: View {
             case "failed":      self = .failed
             case "panels":      self = .panels
             case "saved-sheet": self = .savedSheet
+            case "result-v2":   self = .resultV2
             default:            self = .picked
             }
         }
@@ -227,11 +237,29 @@ private struct SampleCaptureContainer: View {
 
     var body: some View {
         ZStack {
-            Color.brandCream.ignoresSafeArea()
-            if stage == .savedSheet {
+            Color.bgCanvas.ignoresSafeArea()
+            if stage == .resultV2 {
+                // Phase 14: render the new AnalysisResultView alone, on
+                // the redesign canvas, with the sample image + response
+                // populated.
+                ZStack {
+                    Color.bgCanvas.ignoresSafeArea()
+                    ScrollView {
+                        AnalysisResultView(
+                            image: SamplePayload.image,
+                            response: SamplePayload.successResponse,
+                            onSave:   {},
+                            onCancel: {}
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.top, AppSpacing.lg)
+                        .padding(.bottom, AppSpacing.xl3)
+                    }
+                }
+            } else if stage == .savedSheet {
                 // Show the post-save confirmation in isolation — same
                 // .sheet(.medium) presentation the production CaptureView uses.
-                Color.brandCream.ignoresSafeArea()
+                Color.bgCanvas.ignoresSafeArea()
                     .sheet(isPresented: .constant(true)) {
                         SavedConfirmationSheet(onClose: {})
                             .presentationDetents([.medium])
@@ -269,7 +297,7 @@ private struct SampleCaptureContainer: View {
             PillButton(title: "Analyzing...", variant: .outline, isLoading: true) {}
         case .ready, .noFood, .failed:
             PillButton(title: "Analyze new food", variant: .outline) {}
-        case .panels, .savedSheet:
+        case .panels, .savedSheet, .resultV2:
             EmptyView()
         }
     }
@@ -277,10 +305,11 @@ private struct SampleCaptureContainer: View {
     @ViewBuilder
     private var resultSection: some View {
         switch stage {
-        case .picked, .analyzing, .panels, .savedSheet:
+        case .picked, .analyzing, .panels, .savedSheet, .resultV2:
             EmptyView()
         case .ready:
             AnalysisResultView(
+                image: SamplePayload.image,
                 response: SamplePayload.successResponse,
                 onSave: {},
                 onCancel: {}
@@ -369,7 +398,7 @@ private struct SamplePanelsOnlyView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .animation(.easeOut(duration: 0.5), value: stage)
+        .animation(.appEntrance, value: stage)
         .task {
             try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 200)
             stage = .nutrients

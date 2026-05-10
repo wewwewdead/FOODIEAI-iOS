@@ -30,6 +30,9 @@ settings:
       SWIFT_OPTIMIZATION_LEVEL: "-Onone"
       GCC_PREPROCESSOR_DEFINITIONS: "DEBUG=1"
       ONLY_ACTIVE_ARCH: YES
+      # Phase 17 — required for `@testable import FoodieAI` from the
+      # unit-test bundle to resolve under Xcode 16.
+      ENABLE_TESTABILITY: "YES"
 
 packages:
   Supabase:
@@ -134,6 +137,16 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.foodieai.FoodieAITests
+        # Phase 17: under Xcode 16 the unit-test bundle needs an
+        # Info.plist; letting Xcode auto-generate one is the recommended
+        # path for tests that don't carry custom plist keys. Also set
+        # PRODUCT_NAME explicitly so the resulting `.xctest` bundle
+        # gets a non-empty filename, and TEST_HOST so the test bundle
+        # links against the FoodieAI app for `@testable import`.
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_NAME: FoodieAITests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/FoodieAI.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FoodieAI"
+        BUNDLE_LOADER: "$(TEST_HOST)"
     dependencies:
       - target: FoodieAI
 

@@ -34,7 +34,7 @@ struct ProfileUpdateProbeView: View {
 
     var body: some View {
         ZStack {
-            Color.brandCream.ignoresSafeArea()
+            Color.bgCanvas.ignoresSafeArea()
             VStack(alignment: .leading, spacing: AppSpacing.lg) {
                 statusLine
                 Divider()

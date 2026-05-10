@@ -27,7 +27,22 @@ actor AnalyzeService {
         self.session = session
     }
 
-    func analyze(jpegData: Data) async throws -> AnalyzeResponse {
+    /// Phase 16. `recentMeals` and `preferredCoaches` are optional
+    /// context inputs the server uses to inform the coach quote — the
+    /// nutrition analysis itself is unaffected. Pre-Phase-16 callers
+    /// (no extra args) get the same JSON body shape they always sent.
+    ///
+    /// `recentMeals` is bounded to 14 entries client-side; the server
+    /// re-bounds defensively. Empty array → field omitted entirely so
+    /// the multipart body is byte-identical to v1.
+    ///
+    /// Phase 18: `recentMoods` adds an optional, mood-labeled subset
+    /// of recent meals (non-null `mood`). Bounded to 10 client-side;
+    /// the server re-bounds defensively. Empty array → field omitted.
+    func analyze(jpegData: Data,
+                 recentMeals: [FoodLog] = [],
+                 preferredCoaches: [String] = [],
+                 recentMoods: [FoodLog] = []) async throws -> AnalyzeResponse {
         guard jpegData.count <= Self.maxJPEGBytes else {
             throw AnalyzeError.imageTooLarge
         }
@@ -40,14 +55,30 @@ actor AnalyzeService {
         request.timeoutInterval = 60
         request.setValue("multipart/form-data; boundary=\(boundary)",
                          forHTTPHeaderField: "Content-Type")
+
+        // Build the multipart body. Image part is mandatory; the
+        // context fields are appended only when populated.
+        let boundedMeals = Array(recentMeals.prefix(14))
+        let recentMealsJSON = Self.encodeRecentMeals(boundedMeals)
+        let preferredCoachesJSON = preferredCoaches.isEmpty
+            ? nil
+            : Self.encodePreferredCoaches(preferredCoaches)
+        let boundedMoods = Array(recentMoods.prefix(10))
+        let recentMoodsJSON = Self.encodeRecentMoods(boundedMoods)
+
         request.httpBody = Self.multipartBody(
-            boundary: boundary, fieldName: "image",
-            fileName: "meal.jpg", mimeType: "image/jpeg",
-            payload: jpegData
+            boundary: boundary,
+            imagePayload: jpegData,
+            recentMealsJSON: recentMealsJSON,
+            preferredCoachesJSON: preferredCoachesJSON,
+            recentMoodsJSON: recentMoodsJSON
         )
 
         #if DEBUG
-        NSLog("[Analyze] POST %@ bytes=%d", url.absoluteString, jpegData.count)
+        NSLog("[Analyze] POST %@ bytes=%d recentMeals=%d prefs=%d recentMoods=%d",
+              url.absoluteString, jpegData.count,
+              boundedMeals.count, preferredCoaches.count,
+              boundedMoods.count)
         #endif
 
         let data: Data
@@ -74,6 +105,9 @@ actor AnalyzeService {
 
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? "<binary>"
+            #if DEBUG
+            NSLog("[Analyze] HTTP %d body=%@", http.statusCode, body)
+            #endif
             throw AnalyzeError.serverError(status: http.statusCode, body: body)
         }
 
@@ -116,22 +150,132 @@ actor AnalyzeService {
         }
     }
 
+    /// Multi-field multipart body builder. Always emits the `image`
+    /// part. Text parts are appended only when non-nil — passing nil
+    /// keeps the body byte-identical to the pre-Phase-16 single-field
+    /// shape. Phase 18 added `recentMoodsJSON` with the same opt-in
+    /// behavior.
     private static func multipartBody(boundary: String,
-                                      fieldName: String,
-                                      fileName: String,
-                                      mimeType: String,
-                                      payload: Data) -> Data {
+                                      imagePayload: Data,
+                                      recentMealsJSON: String?,
+                                      preferredCoachesJSON: String?,
+                                      recentMoodsJSON: String?) -> Data {
         var body = Data()
+        let crlf = "\r\n"
+
+        // Image part
+        body.append("--\(boundary)\(crlf)".data(using: .utf8)!)
+        body.append(
+            "Content-Disposition: form-data; name=\"image\"; filename=\"meal.jpg\"\(crlf)"
+                .data(using: .utf8)!
+        )
+        body.append("Content-Type: image/jpeg\(crlf)\(crlf)".data(using: .utf8)!)
+        body.append(imagePayload)
+        body.append(crlf.data(using: .utf8)!)
+
+        // Optional text parts
+        if let recentMealsJSON {
+            appendTextPart(to: &body, boundary: boundary,
+                           name: "recent_meals", value: recentMealsJSON)
+        }
+        if let preferredCoachesJSON {
+            appendTextPart(to: &body, boundary: boundary,
+                           name: "preferred_coaches", value: preferredCoachesJSON)
+        }
+        if let recentMoodsJSON {
+            appendTextPart(to: &body, boundary: boundary,
+                           name: "recent_moods", value: recentMoodsJSON)
+        }
+
+        body.append("--\(boundary)--\(crlf)".data(using: .utf8)!)
+        return body
+    }
+
+    private static func appendTextPart(to body: inout Data,
+                                       boundary: String,
+                                       name: String,
+                                       value: String) {
         let crlf = "\r\n"
         body.append("--\(boundary)\(crlf)".data(using: .utf8)!)
         body.append(
-            "Content-Disposition: form-data; name=\"\(fieldName)\"; filename=\"\(fileName)\"\(crlf)"
+            "Content-Disposition: form-data; name=\"\(name)\"\(crlf)"
                 .data(using: .utf8)!
         )
-        body.append("Content-Type: \(mimeType)\(crlf)\(crlf)".data(using: .utf8)!)
-        body.append(payload)
-        body.append("\(crlf)--\(boundary)--\(crlf)".data(using: .utf8)!)
-        return body
+        // No explicit Content-Type for plain text fields; multer handles
+        // them as strings on `req.body[name]` regardless.
+        body.append(crlf.data(using: .utf8)!)
+        body.append(value.data(using: .utf8)!)
+        body.append(crlf.data(using: .utf8)!)
+    }
+
+    /// JSON-encode `recent_meals` as `[{food_name, eaten_at}]`. Returns
+    /// nil when the input is empty so the caller can skip emitting the
+    /// part entirely (cleaner than sending `[]`).
+    private static func encodeRecentMeals(_ logs: [FoodLog]) -> String? {
+        guard !logs.isEmpty else { return nil }
+
+        struct Wire: Encodable {
+            let food_name: String
+            let eaten_at: String
+        }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let wires = logs.map {
+            Wire(food_name: $0.foodName, eaten_at: f.string(from: $0.eatenAt))
+        }
+        do {
+            let data = try JSONEncoder().encode(wires)
+            return String(data: data, encoding: .utf8)
+        } catch {
+            #if DEBUG
+            NSLog("[Analyze] encodeRecentMeals FAILED: %@", "\(error)")
+            #endif
+            return nil
+        }
+    }
+
+    private static func encodePreferredCoaches(_ coaches: [String]) -> String? {
+        do {
+            let data = try JSONEncoder().encode(coaches)
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+
+    /// Phase 18 — JSON-encode `recent_moods` as
+    /// `[{food_name, mood, eaten_at}]`. Caller is expected to filter
+    /// to non-null moods before calling, but we defensively skip
+    /// rows with `mood == nil` here too. Returns nil for an empty
+    /// input so the caller can omit the part.
+    private static func encodeRecentMoods(_ logs: [FoodLog]) -> String? {
+        let labeled = logs.compactMap { log -> (FoodLog, FoodLog.Mood)? in
+            guard let mood = log.mood else { return nil }
+            return (log, mood)
+        }
+        guard !labeled.isEmpty else { return nil }
+
+        struct Wire: Encodable {
+            let food_name: String
+            let mood: String
+            let eaten_at: String
+        }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let wires = labeled.map { (log, mood) in
+            Wire(food_name: log.foodName,
+                 mood: mood.rawValue,
+                 eaten_at: f.string(from: log.eatenAt))
+        }
+        do {
+            let data = try JSONEncoder().encode(wires)
+            return String(data: data, encoding: .utf8)
+        } catch {
+            #if DEBUG
+            NSLog("[Analyze] encodeRecentMoods FAILED: %@", "\(error)")
+            #endif
+            return nil
+        }
     }
 }
 

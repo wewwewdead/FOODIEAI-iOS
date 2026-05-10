@@ -25,7 +25,9 @@ struct MonthView: View {
         .refreshable { await viewModel.refresh() }
         .task { await viewModel.refresh() }
         .sheet(item: $selectedBucket) { bucket in
-            DayDetailSheet(bucket: bucket)
+            DayDetailSheet(bucket: bucket, onDeleted: {
+                Task { await viewModel.refresh() }
+            })
         }
     }
 
@@ -33,10 +35,17 @@ struct MonthView: View {
     private var content: some View {
         switch viewModel.state {
         case .loading:
-            ProgressView()
-                .controlSize(.large)
-                .tint(Color.brand)
-                .padding(.top, AppSpacing.xl3)
+            // Phase 13: skeleton header + 7×5 calendar grid.
+            VStack(spacing: AppSpacing.lg) {
+                SkeletonShape(cornerRadius: AppRadius.lg)
+                    .frame(height: 220)
+                MonthGridSkeleton()
+                    .padding(AppSpacing.md)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppRadius.lg)
+                            .fill(Color.bgSurface)
+                    )
+            }
         case .loaded(let buckets, let interval):
             headerCard(buckets: buckets, interval: interval)
             calendarCard(buckets: buckets, interval: interval)
@@ -80,6 +89,7 @@ struct MonthView: View {
         return VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack(spacing: AppSpacing.sm) {
                 Button {
+                    Haptics.tap()
                     Task { await viewModel.goToPreviousMonth() }
                 } label: {
                     Image(systemName: "chevron.left")
@@ -101,6 +111,7 @@ struct MonthView: View {
                 Spacer(minLength: 0)
 
                 Button {
+                    Haptics.tap()
                     Task { await viewModel.goToNextMonth() }
                 } label: {
                     Image(systemName: "chevron.right")
@@ -116,8 +127,9 @@ struct MonthView: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
-                    Text(format(totals.totalCalories))
-                        .appFont(.kcal)
+                    AnimatedNumber(value: totals.totalCalories,
+                                   formatter: AnimatedNumber.integerFormatter)
+                        .font(AppFont.font(.kcal))
                         .fontWeight(.black)
                         .foregroundStyle(.white)
                     Text("calories this month")
@@ -132,26 +144,16 @@ struct MonthView: View {
                     .appFont(.body)
                     .fontWeight(.semibold)
                     .foregroundStyle(.white)
-                Text("Total carbs: \(format(totals.totalCarbs))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Total sugar: \(format(totals.totalSugar))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Total protein: \(format(totals.totalProtein))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Total fat: \(format(totals.totalFat))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Total fiber: \(format(totals.totalFiber))g")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
+                Group {
+                    TotalLine(label: "Total carbs",   value: totals.totalCarbs)
+                    TotalLine(label: "Total sugar",   value: totals.totalSugar)
+                    TotalLine(label: "Total protein", value: totals.totalProtein)
+                    TotalLine(label: "Total fat",     value: totals.totalFat)
+                    TotalLine(label: "Total fiber",   value: totals.totalFiber)
+                }
+                .font(AppFont.font(.body))
+                .fontWeight(.semibold)
+                .foregroundStyle(.white)
             }
         }
         .padding(.horizontal, AppSpacing.xl)
@@ -196,7 +198,7 @@ struct MonthView: View {
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.brandIvory)
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.lg)
@@ -212,7 +214,9 @@ struct MonthView: View {
                 .frame(height: 48)
         case .day(let bucket, let isToday, let isFuture):
             Button {
-                if !isFuture { selectedBucket = bucket }
+                guard !isFuture else { return }
+                Haptics.selection()
+                selectedBucket = bucket
             } label: {
                 ZStack(alignment: .bottomTrailing) {
                     RoundedRectangle(cornerRadius: AppRadius.md)
@@ -236,15 +240,15 @@ struct MonthView: View {
                 }
                 .frame(height: 48)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CalendarCellButtonStyle())
             .disabled(isFuture)
             .accessibilityLabel(accessibilityLabel(for: bucket, isFuture: isFuture))
         }
     }
 
     private func cellFill(bucket: DailyBucket, isFuture: Bool) -> Color {
-        if isFuture { return Color.brandIvory.opacity(0.5) }
-        return bucket.hasLogs ? Color.brand.opacity(0.4) : Color.brandIvory
+        if isFuture { return Color.bgSurface.opacity(0.5) }
+        return bucket.hasLogs ? Color.brand.opacity(0.4) : Color.bgSurface
     }
 
     // MARK: - Grid math
@@ -318,5 +322,16 @@ struct MonthView: View {
     private func format(_ v: Double) -> String {
         if v == v.rounded() { return "\(Int(v))" }
         return String(format: "%.1f", v)
+    }
+}
+
+/// Phase 13: subtle press feedback for calendar cells. The default
+/// `.buttonStyle(.plain)` on a tappable rounded rect gives no visual cue
+/// that the tap registered; this scales the cell down to 0.92 on press.
+struct CalendarCellButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .animation(.appPress, value: configuration.isPressed)
     }
 }

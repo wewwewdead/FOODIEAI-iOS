@@ -15,7 +15,7 @@ struct SignInView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            Color.brandCream.ignoresSafeArea()
+            Color.bgCanvas.ignoresSafeArea()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: AppSpacing.xl) {
@@ -97,7 +97,7 @@ struct SignInView: View {
                 .font(.system(size: 18, weight: .heavy))
                 .foregroundStyle(Color.textPrimary)
                 .frame(width: 40, height: 40)
-                .background(Circle().fill(Color.brandCreamSoft))
+                .background(Circle().fill(Color.bgSurfaceSoft))
         }
         .padding(.top, AppSpacing.md)
         .padding(.leading, AppSpacing.lg)

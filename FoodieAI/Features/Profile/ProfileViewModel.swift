@@ -22,10 +22,18 @@ final class ProfileViewModel: ObservableObject {
     @Published var calorieGoalDraft: Int = 2000
     @Published var carbGoalDraft:    Int = 250
     @Published var sugarGoalDraft:   Int = 50
+    @Published var proteinGoalDraft: Int = 90
+    @Published var fatGoalDraft:     Int = 70
+    @Published var fiberGoalDraft:   Int = 28
 
     @Published private(set) var isSaving: Bool = false
     @Published private(set) var saveError: Error?
     @Published private(set) var hasUnsavedChanges: Bool = false
+
+    /// Last profile we successfully loaded or saved. ProfileView observes
+    /// this and forwards into the shared `ProfileStore` so other
+    /// screens (Tracker) re-render with the new daily goals on save.
+    @Published private(set) var lastResolvedProfile: Profile?
 
     private let profileService: ProfileService
     private let auth: AuthService
@@ -47,6 +55,7 @@ final class ProfileViewModel: ObservableObject {
             let profile = try await profileService.currentProfile()
             seed(from: profile)
             state = .loaded(profile)
+            lastResolvedProfile = profile
         } catch {
             state = .failed(error)
         }
@@ -62,15 +71,21 @@ final class ProfileViewModel: ObservableObject {
 
         do {
             let updated = try await profileService.updateProfile(
-                displayName:      displayNameDraft,
-                dailyCalorieGoal: calorieGoalDraft,
-                dailyCarbGoalG:   carbGoalDraft,
-                dailySugarGoalG:  sugarGoalDraft
+                displayName:       displayNameDraft,
+                dailyCalorieGoal:  calorieGoalDraft,
+                dailyCarbGoalG:    carbGoalDraft,
+                dailySugarGoalG:   sugarGoalDraft,
+                dailyProteinGoalG: proteinGoalDraft,
+                dailyFatGoalG:     fatGoalDraft,
+                dailyFiberGoalG:   fiberGoalDraft
             )
             seed(from: updated)
             state = .loaded(updated)
+            lastResolvedProfile = updated
+            Haptics.success()
         } catch {
             saveError = error
+            Haptics.error()
         }
     }
 
@@ -93,6 +108,9 @@ final class ProfileViewModel: ObservableObject {
         calorieGoalDraft = profile.dailyCalorieGoal
         carbGoalDraft    = profile.dailyCarbGoalG
         sugarGoalDraft   = profile.dailySugarGoalG
+        proteinGoalDraft = profile.dailyProteinGoalG
+        fatGoalDraft     = profile.dailyFatGoalG
+        fiberGoalDraft   = profile.dailyFiberGoalG
         hasUnsavedChanges = false
     }
 
@@ -100,18 +118,25 @@ final class ProfileViewModel: ObservableObject {
     /// `hasUnsavedChanges = true` whenever any draft diverges from the
     /// currently-loaded baseline.
     private func bindUnsavedChangeTracking() {
-        let drafts = Publishers.CombineLatest4(
-            $displayNameDraft, $calorieGoalDraft, $carbGoalDraft, $sugarGoalDraft
-        )
-        Publishers.CombineLatest(drafts, $state)
+        // Combine caps native combineLatest at 4 publishers; we have 7
+        // drafts now. Compose them into nested tuples — the consumer
+        // unpacks into named locals so the diff stays readable.
+        let nameAndCal       = Publishers.CombineLatest($displayNameDraft, $calorieGoalDraft)
+        let carbAndSugar     = Publishers.CombineLatest($carbGoalDraft, $sugarGoalDraft)
+        let proteinFatFiber  = Publishers.CombineLatest3($proteinGoalDraft, $fatGoalDraft, $fiberGoalDraft)
+        let allDrafts        = Publishers.CombineLatest3(nameAndCal, carbAndSugar, proteinFatFiber)
+
+        Publishers.CombineLatest(allDrafts, $state)
             .map { combined, state -> Bool in
                 guard case .loaded(let profile) = state else { return false }
-                let (name, cal, carb, sugar) = combined
-                let nameChanged = name != (profile.displayName ?? "")
-                let calChanged  = cal   != profile.dailyCalorieGoal
-                let carbChanged = carb  != profile.dailyCarbGoalG
-                let sugarChanged = sugar != profile.dailySugarGoalG
-                return nameChanged || calChanged || carbChanged || sugarChanged
+                let ((name, cal), (carb, sugar), (protein, fat, fiber)) = combined
+                return name    != (profile.displayName ?? "")
+                    || cal     != profile.dailyCalorieGoal
+                    || carb    != profile.dailyCarbGoalG
+                    || sugar   != profile.dailySugarGoalG
+                    || protein != profile.dailyProteinGoalG
+                    || fat     != profile.dailyFatGoalG
+                    || fiber   != profile.dailyFiberGoalG
             }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)

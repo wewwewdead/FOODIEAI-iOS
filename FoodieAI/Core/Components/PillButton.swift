@@ -13,7 +13,13 @@ struct PillButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        Button {
+            // Phase 13: light tap haptic on press release. Only fires when
+            // the button is actually actionable; loading/disabled states
+            // skip the haptic and the action.
+            Haptics.tap()
+            action()
+        } label: {
             label
         }
         .buttonStyle(PillButtonStyleImpl(variant: variant, isLoading: isLoading))

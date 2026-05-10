@@ -23,6 +23,51 @@ struct FoodLog: Codable, Identifiable, Hashable {
     let coachAdvice: String?
     let eatenAt: Date
     let createdAt: Date
+    /// Phase 15: how this row was created. Pre-Phase-15 rows decode as
+    /// `.analyzed` via the migration's column default.
+    let origin: Origin
+    /// Phase 15: when `origin == .relogged`, points at the row whose
+    /// analysis was copied. Nullable because the source can be deleted
+    /// (ON DELETE SET NULL) and because `.analyzed` rows never set it.
+    let sourceLogId: UUID?
+    /// Phase 18: the user's post-save reaction. NULL when the row predates
+    /// Phase 18, when the post-save pulse was dismissed without answering,
+    /// or when the user later cleared their answer. Set via
+    /// `FoodLogService.setMood(_:on:)`.
+    let mood: Mood?
+
+    /// Phase 15. String-coded so PostgREST round-trips cleanly through
+    /// the `text` column with its CHECK constraint.
+    enum Origin: String, Codable, Hashable {
+        case analyzed
+        case relogged
+    }
+
+    /// Phase 18. Three deliberately small options — five would dilute
+    /// signal. Naming is everyday, not clinical.
+    enum Mood: String, Codable, Hashable, CaseIterable {
+        case loved
+        case fine
+        case tough
+
+        /// Display emoji for the post-save pulse and the Profile mood log.
+        var emoji: String {
+            switch self {
+            case .loved: return "💚"
+            case .fine:  return "🙂"
+            case .tough: return "🌧"
+            }
+        }
+
+        /// Short label rendered under the emoji button.
+        var label: String {
+            switch self {
+            case .loved: return "Loved it"
+            case .fine:  return "It was fine"
+            case .tough: return "Tough one"
+            }
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -41,6 +86,9 @@ struct FoodLog: Codable, Identifiable, Hashable {
         case coachAdvice    = "coach_advice"
         case eatenAt        = "eaten_at"
         case createdAt      = "created_at"
+        case origin
+        case sourceLogId    = "source_log_id"
+        case mood
     }
 }
 
@@ -63,6 +111,47 @@ struct NewFoodLog: Encodable {
     let nutrients: [String]
     let coachName: String?
     let coachAdvice: String?
+    /// Phase 15. Defaults to `.analyzed` so the existing Capture →
+    /// Analyze → Save path doesn't need to change. The Quick Re-log path
+    /// passes `.relogged` + a non-nil `sourceLogId`. Sent explicitly even
+    /// though the DB has the same default — makes intent visible at the
+    /// call site.
+    let origin: FoodLog.Origin
+    let sourceLogId: UUID?
+
+    init(foodName: String,
+         imagePath: String?,
+         imageThumbPath: String?,
+         calories: Double,
+         carbsG: Double,
+         sugarG: Double,
+         proteinG: Double?,
+         fatG: Double?,
+         fiberG: Double?,
+         benefits: [String],
+         drawbacks: [String],
+         nutrients: [String],
+         coachName: String?,
+         coachAdvice: String?,
+         origin: FoodLog.Origin = .analyzed,
+         sourceLogId: UUID? = nil) {
+        self.foodName       = foodName
+        self.imagePath      = imagePath
+        self.imageThumbPath = imageThumbPath
+        self.calories       = calories
+        self.carbsG         = carbsG
+        self.sugarG         = sugarG
+        self.proteinG       = proteinG
+        self.fatG           = fatG
+        self.fiberG         = fiberG
+        self.benefits       = benefits
+        self.drawbacks      = drawbacks
+        self.nutrients      = nutrients
+        self.coachName      = coachName
+        self.coachAdvice    = coachAdvice
+        self.origin         = origin
+        self.sourceLogId    = sourceLogId
+    }
 
     enum CodingKeys: String, CodingKey {
         case foodName       = "food_name"
@@ -77,5 +166,7 @@ struct NewFoodLog: Encodable {
         case benefits, drawbacks, nutrients
         case coachName      = "coach_name"
         case coachAdvice    = "coach_advice"
+        case origin
+        case sourceLogId    = "source_log_id"
     }
 }
