@@ -29,6 +29,12 @@ final class AuthService: NSObject, ObservableObject {
     let client: SupabaseClient
     private var stateChangeTask: Task<Void, Never>?
     private var presentationProvider: PresentationContextProvider?
+    /// Safety net for the "expired cached session" case below: if the SDK
+    /// never emits a follow-up `tokenRefreshed` / `signedOut` event (no
+    /// network, refresh token revoked, etc.) we flip out of the loading
+    /// state after this deadline so RootView doesn't hang on LaunchView.
+    private var loadingTimeoutTask: Task<Void, Never>?
+    private static let loadingFallbackTimeout: UInt64 = 5_000_000_000  // 5s
 
     init(client: SupabaseClient = FoodieClient.shared) {
         self.client = client
@@ -48,20 +54,36 @@ final class AuthService: NSObject, ObservableObject {
     }
 
     private func apply(event: AuthChangeEvent, session newSession: Session?) {
-        // Filter out a stale (expired) initial session. With
-        // `emitLocalSessionAsInitialSession` enabled, the SDK emits the
-        // cached session immediately — but it may be past expiry. The
-        // following `tokenRefreshed` event will re-emit if refresh succeeds.
+        // Stale (expired) initial session: the SDK's `tokenRefreshed`
+        // event is imminent. Stay in the loading state so RootView
+        // doesn't briefly flash OnboardingFlow before the refresh lands
+        // — the bug users see on cold launch.
         if event == .initialSession, let s = newSession, s.isExpired {
             self.session = nil
-        } else {
-            self.session = newSession
+            scheduleLoadingTimeout()
+            return
         }
+
+        self.session = newSession
+        loadingTimeoutTask?.cancel()
+        loadingTimeoutTask = nil
         if isLoading { isLoading = false }
+    }
+
+    private func scheduleLoadingTimeout() {
+        loadingTimeoutTask?.cancel()
+        loadingTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.loadingFallbackTimeout)
+            await MainActor.run {
+                guard let self else { return }
+                if self.isLoading { self.isLoading = false }
+            }
+        }
     }
 
     deinit {
         stateChangeTask?.cancel()
+        loadingTimeoutTask?.cancel()
     }
 
     // MARK: - Google OAuth

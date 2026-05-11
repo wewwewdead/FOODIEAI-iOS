@@ -38,11 +38,17 @@ struct WeeklyRecap: Codable, Identifiable, Hashable {
     }
 
     /// Date-only (YYYY-MM-DD) parser used for week_start / week_end.
+    /// Local timezone on purpose: `WeekBounds` produces local-midnight
+    /// Monday/Sunday `Date`s, and the DB column is a calendar-day `date`
+    /// (no time, no zone). Formatting with UTC was shifting east-of-UTC
+    /// users' Mondays back to the prior Sunday on write, then decoding
+    /// the shifted string as UTC-midnight on read — so the recap row
+    /// stored the wrong week and the food_logs query missed everything.
     static let yyyyMMdd: DateFormatter = {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .gregorian)
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.timeZone = .current
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()

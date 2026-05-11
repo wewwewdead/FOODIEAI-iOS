@@ -212,10 +212,19 @@ struct FoodieAIApp: App {
 struct RootView: View {
     @EnvironmentObject private var auth: AuthService
     @EnvironmentObject private var profileStore: ProfileStore
+    /// Minimum splash duration. Even when auth + profile resolve in a
+    /// few hundred ms, we keep the launch screen up long enough for the
+    /// breathing animation to play through. Without this, fast cold
+    /// starts feel like a flicker.
+    @State private var minSplashElapsed = false
+
+    /// 1.8s lands between "noticeable" and "annoying" — about one and a
+    /// half breath cycles of the logo animation.
+    private static let minSplashDuration: UInt64 = 1_800_000_000
 
     var body: some View {
         Group {
-            if auth.isLoading {
+            if shouldShowSplash {
                 LaunchView()
             } else if !auth.isSignedIn {
                 OnboardingFlow()
@@ -240,30 +249,106 @@ struct RootView: View {
                 LaunchView()
             }
         }
+        .task {
+            try? await Task.sleep(nanoseconds: Self.minSplashDuration)
+            minSplashElapsed = true
+        }
         // Smooth cross-fade when auth state flips, so we don't pop hard from
         // the launch screen into a tab bar.
         .animation(.appEntrance, value: auth.isLoading)
         .animation(.appEntrance, value: auth.isSignedIn)
         .animation(.appEntrance, value: profileStore.profile?.onboardingCompletedAt)
+        .animation(.appEntrance, value: minSplashElapsed)
+    }
+
+    /// Splash is visible whenever auth is still bootstrapping OR the
+    /// minimum duration hasn't elapsed yet. The existing branches below
+    /// still own the signed-in-but-profile-loading fallback.
+    private var shouldShowSplash: Bool {
+        auth.isLoading || !minSplashElapsed
     }
 }
 
-/// Brand-cream splash with the wordmark and a small spinner. Shown only
-/// while AuthService is waiting for its first authStateChanges event.
+/// Brand-cream splash with the FoodieAI logo doing a three-part
+/// performance: a soft brand-colored halo glow behind the mark, a
+/// bouncy spring entrance, and a continuous "breath" that scales +
+/// fades in lockstep. Threads/IG-style splash idiom, but tuned to
+/// feel a touch more alive than a flat pulse.
+///
+/// Shown while AuthService is bootstrapping AND for a minimum
+/// duration thereafter (see `RootView.minSplashDuration`) so even on
+/// instant cold starts the animation gets to breathe.
 struct LaunchView: View {
+    /// Drives the entrance: scale-up from 0.5 + fade-in, controlled by
+    /// a single spring so the bounce reads as the logo "landing."
+    @State private var hasEntered = false
+    /// Drives the continuous breath. Started shortly after the
+    /// entrance settles so the two motions don't fight.
+    @State private var breathing = false
+
+    /// FoodieLogo is now a vector SVG (with Preserve Vector Data on),
+    /// so scaling during the breath animation rasterizes crisply at
+    /// any size — no PNG resampling artifacts.
+    private static let logoSize: CGFloat = 120
+
     var body: some View {
         ZStack {
             Color.bgCanvas.ignoresSafeArea()
-            VStack(spacing: AppSpacing.lg) {
-                Text("Foodie Ai.")
-                    .font(.custom(AppFont.PS.mplusMedium, size: 48))
-                    .foregroundStyle(Color.textPrimary)
-                    .dynamicTypeSize(...DynamicTypeSize.xLarge) // brand wordmark — capped
-                ProgressView()
-                    .controlSize(.regular)
-                    .tint(Color.brand)
+            halo
+            logoMark
+        }
+        .onAppear {
+            withAnimation(.interpolatingSpring(stiffness: 180, damping: 14)) {
+                hasEntered = true
+            }
+            Task {
+                // Let the entrance settle (~250ms feels right with the
+                // spring above) before kicking off the breathing loop.
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                    breathing = true
+                }
             }
         }
+        .accessibilityLabel("Loading FoodieAI")
+    }
+
+    /// Soft brand-colored radial behind the logo. Blurred + low alpha
+    /// so it reads as "glow" rather than "spotlight." Breathes a beat
+    /// wider than the logo for a parallax-ish effect.
+    private var halo: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    colors: [Color.brand.opacity(0.32), Color.brand.opacity(0)],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: Self.logoSize
+                )
+            )
+            .frame(width: Self.logoSize * 2.4, height: Self.logoSize * 2.4)
+            .blur(radius: 14)
+            .scaleEffect(breathing ? 1.08 : 0.9)
+            .opacity(hasEntered ? (breathing ? 0.95 : 0.55) : 0)
+    }
+
+    private var logoMark: some View {
+        Image("FoodieLogo")
+            .resizable()
+            .interpolation(.high)
+            .antialiased(true)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: Self.logoSize, height: Self.logoSize)
+            .scaleEffect(logoScale)
+            .opacity(hasEntered ? 1.0 : 0.0)
+    }
+
+    /// Pre-entrance: shrunken to 0.5 so the spring has somewhere to
+    /// bounce from. Post-entrance: oscillates between 0.96 and 1.04 on
+    /// the breath loop.
+    private var logoScale: CGFloat {
+        guard hasEntered else { return 0.5 }
+        return breathing ? 1.04 : 0.96
     }
 }
 
