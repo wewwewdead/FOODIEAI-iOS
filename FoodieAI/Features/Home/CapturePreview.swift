@@ -139,7 +139,7 @@ struct LiveAnalyzeProbeView: View {
         case .analyzing:
             PillButton(title: "Analyzing...", variant: .outline, isLoading: true) {}
         case .ready, .noFood, .failed, .saving, .saved, .saveFailed,
-             .moodPulse:
+             .moodPulse, .clarifying:
             PillButton(title: "Analyze new food", variant: .outline) {}
         }
     }
@@ -203,7 +203,7 @@ struct LiveAnalyzeProbeView: View {
                     .multilineTextAlignment(.center)
             }
             .padding(AppSpacing.lg)
-        case .idle, .picked, .analyzing, .moodPulse:
+        case .idle, .picked, .analyzing, .moodPulse, .clarifying:
             EmptyView()
         }
     }
@@ -448,7 +448,8 @@ private enum SamplePayload {
                 "Lycopene: antioxidant",
                 "Protein: muscle synthesis"
             ],
-            coachAdvice: "E = mc²… and a slice of pizza ≈ 285 kcal. Pace thyself."
+            coachAdvice: "E = mc²… and a slice of pizza ≈ 285 kcal. Pace thyself.",
+            portionAmbiguousItems: nil
         ),
         coach: "Albert Einstein"
     )

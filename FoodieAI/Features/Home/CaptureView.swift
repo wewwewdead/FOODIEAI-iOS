@@ -71,11 +71,15 @@ struct CaptureView: View {
                         // Idle state: hero copy + photo card.
                         // Non-idle state: result rendering takes over below.
                         switch viewModel.state {
-                        case .idle, .picked, .analyzing, .moodPulse:
+                        case .idle, .picked, .analyzing, .moodPulse, .clarifying:
                             // .moodPulse is rendered as the empty/idle
                             // hero with the mood sheet on top — the
                             // result rendering would be a misleading
                             // background while the user reflects.
+                            // .clarifying does the same — the photo
+                            // card stays the focal background while
+                            // the Quantity Clarification sheet asks
+                            // the user about portions.
                             emptyOrPickedFlow
                         case .ready, .saving, .saved, .saveFailed,
                              .noFood, .failed:
@@ -177,6 +181,12 @@ struct CaptureView: View {
             .presentationDetents([.height(280)])
             .presentationDragIndicator(.visible)
         }
+        // Quantity Clarification — sheet presentation extracted to a
+        // ViewModifier so the type-checker doesn't have to thread the
+        // whole CaptureView modifier chain through the new sheet's
+        // generic context. Adding it inline pushed
+        // `body` past Swift's expression type-check budget.
+        .modifier(ClarificationSheetModifier(viewModel: viewModel))
         // Phase 15 — Quick Re-log picker sheet.
         .sheet(isPresented: $showingRecentMeals) {
             RecentMealsSheet { picked in
@@ -629,6 +639,11 @@ struct CaptureView: View {
             // it. Keeping the bottom CTA empty avoids drawing the
             // primary "Take a photo" button while the user is mid-
             // reflection.
+            EmptyView()
+        case .clarifying:
+            // Quantity Clarification sheet owns the user's attention.
+            // No bottom CTA so the underlying photo card reads as a
+            // quiet background, not a competing affordance.
             EmptyView()
         }
     }
@@ -1116,6 +1131,48 @@ private struct FailedView: View {
         }
         .padding(AppSpacing.lg)
         .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Quantity Clarification sheet modifier
+
+/// Quantity Clarification — extracted ViewModifier so the new sheet
+/// presentation doesn't bloat the main CaptureView body's modifier
+/// chain past the Swift type-checker's budget. Same behavior as an
+/// inline `.sheet`: presents whenever `state == .clarifying(...)`,
+/// dismissal routes through `acceptOriginalAnalysis` so the user is
+/// never stuck with no usable analysis after closing.
+private struct ClarificationSheetModifier: ViewModifier {
+    @ObservedObject var viewModel: CaptureViewModel
+
+    func body(content: Content) -> some View {
+        // Fix A — the binding's `set` is a TRUE no-op. We do NOT
+        // route dismissal through `acceptOriginalAnalysis` here:
+        // doing so raced the refine Task and flipped state to
+        // `.ready` before the Task body ran, causing the guard in
+        // `refineAnalysis` to fail. Instead the sheet visibility is
+        // entirely state-driven (presents on `.clarifying`,
+        // dismisses on any other state). "Looks about right" /
+        // drag-to-dismiss call `acceptOriginalAnalysis` from inside
+        // the sheet view itself.
+        content.sheet(isPresented: Binding(
+            get: { viewModel.state.isClarifying },
+            set: { _ in /* no-op — state machine owns dismissal */ }
+        )) {
+            if case .clarifying(_, _, let items) = viewModel.state {
+                QuantityClarificationSheet(
+                    items: items,
+                    onConfirm: { quantities in
+                        Task { await viewModel.refineAnalysis(with: quantities) }
+                    },
+                    onDismiss: {
+                        viewModel.acceptOriginalAnalysis()
+                    }
+                )
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+        }
     }
 }
 

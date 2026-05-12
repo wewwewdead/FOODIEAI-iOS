@@ -247,29 +247,93 @@ actor ProfileService {
                             dailyCalorieGoal: Int?,
                             dailyCarbGoalG: Int?,
                             dailySugarGoalG: Int?,
+                            dailyProteinGoalG: Int? = nil,
+                            dailyFatGoalG: Int? = nil,
+                            dailyFiberGoalG: Int? = nil,
                             preferredCoaches: [String]?,
                             notificationsEnabled: Bool?,
                             reminderBreakfast: Bool?,
                             reminderLunch: Bool?,
                             reminderDinner: Bool?,
+                            physiology: CalorieGoalCalculator.Physiology? = nil,
                             completedAt: Date) async throws -> Profile {
         let id = try await signedInUserId()
         let patch = ProfileUpdate(
             dailyCalorieGoal:     dailyCalorieGoal,
             dailyCarbGoalG:       dailyCarbGoalG,
             dailySugarGoalG:      dailySugarGoalG,
+            dailyProteinGoalG:    dailyProteinGoalG,
+            dailyFatGoalG:        dailyFatGoalG,
+            dailyFiberGoalG:      dailyFiberGoalG,
             preferredCoaches:     preferredCoaches,
             notificationsEnabled: notificationsEnabled,
             reminderBreakfast:    reminderBreakfast,
             reminderLunch:        reminderLunch,
             reminderDinner:       reminderDinner,
             onboardingCompletedAt: completedAt,
-            onboardingArchetype:   archetype
+            onboardingArchetype:   archetype,
+            biologicalSex:        physiology?.sex,
+            ageYears:             physiology?.ageYears,
+            heightCm:             physiology?.heightCm,
+            weightKg:             physiology?.weightKg,
+            activityLevel:        physiology?.activity,
+            weightGoalDirection:  physiology?.goal
         )
 
         #if DEBUG
         NSLog("[Profile] completeOnboarding archetype=%@ id=%@",
               archetype.rawValue, id)
+        #endif
+
+        return try await client
+            .from("profiles")
+            .update(patch)
+            .eq("id", value: id)
+            .select()
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Phase 20 — persist physiology + the calorie/macro target derived
+    /// from `CalorieGoalCalculator.compute`. One UPDATE keeps the inputs
+    /// and the resulting goals atomic, so the BMR/TDEE info row in
+    /// Profile never disagrees with the displayed targets.
+    ///
+    /// Caller computes `Goals` on the client (the calculator is pure)
+    /// and passes the values in alongside the source physiology. If
+    /// users in the future need to clear physiology without setting
+    /// goals (or vice versa) we'd extend this API, but v1's only flow
+    /// is "fill out form → save everything together."
+    func setPhysiologyAndGoals(
+        sex: CalorieGoalCalculator.BiologicalSex,
+        ageYears: Int,
+        heightCm: Double,
+        weightKg: Double,
+        activity: CalorieGoalCalculator.ActivityLevel,
+        goal: CalorieGoalCalculator.GoalDirection,
+        goals: CalorieGoalCalculator.Goals
+    ) async throws -> Profile {
+        let id = try await signedInUserId()
+        let patch = ProfileUpdate(
+            dailyCalorieGoal:    goals.calories,
+            dailyCarbGoalG:      goals.carbsG,
+            dailySugarGoalG:     goals.sugarG,
+            dailyProteinGoalG:   goals.proteinG,
+            dailyFatGoalG:       goals.fatG,
+            dailyFiberGoalG:     goals.fiberG,
+            biologicalSex:       sex,
+            ageYears:            ageYears,
+            heightCm:            heightCm,
+            weightKg:            weightKg,
+            activityLevel:       activity,
+            weightGoalDirection: goal
+        )
+
+        #if DEBUG
+        NSLog("[Profile] UPDATE profiles SET physiology+goals (sex=%@ age=%d h=%.1f w=%.1f act=%@ goal=%@ cal=%d) WHERE id=%@",
+              sex.rawValue, ageYears, heightCm, weightKg,
+              activity.rawValue, goal.rawValue, goals.calories, id)
         #endif
 
         return try await client

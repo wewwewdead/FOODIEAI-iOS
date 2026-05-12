@@ -513,7 +513,8 @@ private struct DailyGoalArc: View {
                 "Lycopene: antioxidant",
                 "Protein: muscle synthesis"
             ],
-            coachAdvice: "E = mc²… and a slice of pizza ≈ 285 kcal. Pace thyself."
+            coachAdvice: "E = mc²… and a slice of pizza ≈ 285 kcal. Pace thyself.",
+            portionAmbiguousItems: nil
         ),
         coach: "Albert Einstein"
     )

@@ -17,6 +17,11 @@ final class CaptureViewModel: ObservableObject {
         case picked(UIImage)
         case analyzing(UIImage)
         case noFood(UIImage)
+        /// Quantity Clarification — first-pass analyze returned a
+        /// non-empty `portionAmbiguousItems`. Carries the original
+        /// response so we can fall back to it if the user dismisses
+        /// or the refine call fails.
+        case clarifying(UIImage, AnalyzeResponse, [GeminiAnalysis.AmbiguousItem])
         case ready(UIImage, AnalyzeResponse)
         case saving(UIImage, AnalyzeResponse)
         case saved(UIImage, AnalyzeResponse, FoodLog)
@@ -36,6 +41,8 @@ final class CaptureViewModel: ObservableObject {
                 return i
             case .saved(let i, _, _), .saveFailed(let i, _, _),
                  .moodPulse(let i, _, _):
+                return i
+            case .clarifying(let i, _, _):
                 return i
             }
         }
@@ -59,6 +66,11 @@ final class CaptureViewModel: ObservableObject {
         /// Phase 18.
         var isMoodPulse: Bool {
             if case .moodPulse = self { return true } else { return false }
+        }
+
+        /// Quantity Clarification.
+        var isClarifying: Bool {
+            if case .clarifying = self { return true } else { return false }
         }
     }
 
@@ -141,31 +153,30 @@ final class CaptureViewModel: ObservableObject {
         print("[Analyze-prep] original=\(image.size.width)x\(image.size.height) compressed-bytes=\(jpeg.count) source=\(source)")
         #endif
 
-        // Phase 16. Fetch the user's last-14-day meals and preferred
-        // coaches in parallel with image compression. All queries are
-        // best-effort: any failure resolves to an empty array so the
-        // analyze call falls back to v1 (no context) shape.
-        // Phase 18 adds the recent-moods slice for emotional context.
-        async let recentTask: [FoodLog]? = try? history.recentMealsForCoachContext()
-        async let prefsTask: [String]? = try? profileService.currentProfile().preferredCoaches
-        async let moodsTask: [FoodLog]? = try? history.recentMoodsForCoachContext()
-        let recentMeals = (await recentTask) ?? []
-        let preferredCoaches = (await prefsTask) ?? []
-        let recentMoods = (await moodsTask) ?? []
+        let context = await fetchContextForAnalyze()
 
         do {
             let response = try await analyzer.analyze(
                 jpegData: jpeg,
-                recentMeals: recentMeals,
-                preferredCoaches: preferredCoaches,
-                recentMoods: recentMoods
+                recentMeals: context.recentMeals,
+                preferredCoaches: context.preferredCoaches,
+                recentMoods: context.recentMoods
             )
             // Server emits empty-string `fallback` on success (Gemini fills the
             // structured-output field with ""); only a *non-empty* fallback
             // means "no food detected".
             if response.analysis.hasFood {
-                Haptics.prepare() // warm the engine for the upcoming save tap
-                state = .ready(image, response)
+                // Quantity Clarification — if Gemini flagged any
+                // portion-ambiguous items, pause for the user to confirm
+                // or adjust quantities before showing the result.
+                let ambiguous = response.analysis.portionAmbiguousItems ?? []
+                if !ambiguous.isEmpty {
+                    Haptics.prepare()
+                    state = .clarifying(image, response, ambiguous)
+                } else {
+                    Haptics.prepare() // warm the engine for the upcoming save tap
+                    state = .ready(image, response)
+                }
             } else {
                 Haptics.warning()
                 state = .noFood(image)
@@ -177,6 +188,131 @@ final class CaptureViewModel: ObservableObject {
             Haptics.error()
             state = .failed(image, .networkUnavailable)
         }
+    }
+
+    /// Phase 16/18 context bundle for the analyze call. All queries are
+    /// best-effort: any failure resolves to an empty array so the
+    /// analyze call falls back to v1 (no context) shape. Extracted so
+    /// the Quantity Clarification refine call can reuse the same
+    /// current-state lookup rather than threading values through the
+    /// view model's stored state.
+    private struct AnalyzeContext {
+        let recentMeals: [FoodLog]
+        let preferredCoaches: [String]
+        let recentMoods: [FoodLog]
+    }
+
+    private func fetchContextForAnalyze() async -> AnalyzeContext {
+        async let recentTask: [FoodLog]? = try? history.recentMealsForCoachContext()
+        async let prefsTask: [String]? = try? profileService.currentProfile().preferredCoaches
+        async let moodsTask: [FoodLog]? = try? history.recentMoodsForCoachContext()
+        let recentMeals = (await recentTask) ?? []
+        let preferredCoaches = (await prefsTask) ?? []
+        let recentMoods = (await moodsTask) ?? []
+        return AnalyzeContext(
+            recentMeals: recentMeals,
+            preferredCoaches: preferredCoaches,
+            recentMoods: recentMoods
+        )
+    }
+
+    // MARK: - Quantity Clarification
+
+    /// Diagnostic-only — short case label for logs so we can tell
+    /// which branch swallowed a refine call without dumping the
+    /// associated values.
+    private static func stateName(_ s: State) -> String {
+        switch s {
+        case .idle:        return ".idle"
+        case .picked:      return ".picked"
+        case .analyzing:   return ".analyzing"
+        case .noFood:      return ".noFood"
+        case .clarifying:  return ".clarifying"
+        case .ready:       return ".ready"
+        case .saving:      return ".saving"
+        case .saved:       return ".saved"
+        case .moodPulse:   return ".moodPulse"
+        case .saveFailed:  return ".saveFailed"
+        case .failed:      return ".failed"
+        }
+    }
+
+    /// User confirmed quantities. Re-run `/analyze` with the
+    /// `user_quantities` context. On success transition to `.ready`
+    /// with the refined response; on any failure fall back to the
+    /// original first-pass response — don't punish the user for a
+    /// network hiccup on the second pass.
+    func refineAnalysis(with quantities: [String: String]) async {
+        NSLog("[Clarify] refineAnalysis called with quantities=%@ currentState=%@",
+              "\(quantities)", Self.stateName(state))
+
+        // Fix A — Accept both `.clarifying` and `.ready` here. The
+        // sheet's dismiss handler can flip us to `.ready` (via
+        // acceptOriginalAnalysis) synchronously after `dismiss()`
+        // before the refine Task body runs — that's a race, not a
+        // change of intent. The user already tapped Update Analysis;
+        // honor it regardless of which state we're in by the time we
+        // get to inspect it.
+        let image: UIImage
+        let originalResponse: AnalyzeResponse
+        switch state {
+        case .clarifying(let i, let r, let items):
+            NSLog("[Clarify] guard passed, state was .clarifying with %d items",
+                  items.count)
+            image = i
+            originalResponse = r
+        case .ready(let i, let r):
+            NSLog("[Clarify] state raced to .ready before refine started; honoring refine intent anyway")
+            image = i
+            originalResponse = r
+        default:
+            NSLog("[Clarify] refineAnalysis: state was %@, bailing",
+                  Self.stateName(state))
+            return
+        }
+
+        state = .analyzing(image) // re-show the analyzing UI
+
+        guard let jpeg = ImagePreparation.compressMain(image) else {
+            NSLog("[Clarify] compression FAILED; falling back to original response")
+            state = .ready(image, originalResponse)
+            return
+        }
+
+        let pairs = quantities.map { (name: $0.key, quantity: $0.value) }
+        NSLog("[Clarify] compressed jpeg bytes=%d; about to call analyzer.analyze(userQuantities=%d)",
+              jpeg.count, pairs.count)
+        let context = await fetchContextForAnalyze()
+
+        do {
+            let refined = try await analyzer.analyze(
+                jpegData: jpeg,
+                recentMeals: context.recentMeals,
+                preferredCoaches: context.preferredCoaches,
+                recentMoods: context.recentMoods,
+                userQuantities: pairs
+            )
+            NSLog("[Clarify] refineAnalysis succeeded — refined food=%@ calories=%@ (original calories=%@)",
+                  refined.analysis.food ?? "<nil>",
+                  refined.analysis.calories.map { "\($0)" } ?? "<nil>",
+                  originalResponse.analysis.calories.map { "\($0)" } ?? "<nil>")
+            Haptics.prepare()
+            // If the refine pass somehow lost food detection, prefer
+            // the original — the user already saw it succeed once.
+            state = .ready(image, refined.analysis.hasFood ? refined : originalResponse)
+        } catch {
+            NSLog("[Clarify] refine FAILED, falling back to original: %@", "\(error)")
+            state = .ready(image, originalResponse)
+        }
+    }
+
+    /// User dismissed the clarification sheet without adjusting —
+    /// keep the first-pass analysis. Also called when the sheet is
+    /// drag-dismissed.
+    func acceptOriginalAnalysis() {
+        guard case .clarifying(let image, let response, _) = state else { return }
+        Haptics.prepare()
+        state = .ready(image, response)
     }
 
     /// Save the current `.ready` analysis. No-op if not in `.ready` state, or

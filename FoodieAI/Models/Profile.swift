@@ -33,6 +33,16 @@ struct Profile: Codable, Identifiable, Hashable {
     /// Phase 19. The user's answer to the goal-framing question.
     /// Persisted for future personalization (empty states, coach bias).
     var onboardingArchetype: Archetype?
+    /// Phase 20. Optional physiology inputs used by
+    /// `CalorieGoalCalculator` to derive personalized targets. NULL
+    /// means the user hasn't gone through the personalization flow —
+    /// the existing archetype-based defaults still apply.
+    var biologicalSex: CalorieGoalCalculator.BiologicalSex?
+    var ageYears: Int?
+    var heightCm: Double?
+    var weightKg: Double?
+    var activityLevel: CalorieGoalCalculator.ActivityLevel?
+    var weightGoalDirection: CalorieGoalCalculator.GoalDirection?
     let createdAt: Date
     let updatedAt: Date
 
@@ -55,6 +65,12 @@ struct Profile: Codable, Identifiable, Hashable {
         case timeZone               = "time_zone"
         case onboardingCompletedAt  = "onboarding_completed_at"
         case onboardingArchetype    = "onboarding_archetype"
+        case biologicalSex          = "biological_sex"
+        case ageYears               = "age_years"
+        case heightCm               = "height_cm"
+        case weightKg               = "weight_kg"
+        case activityLevel          = "activity_level"
+        case weightGoalDirection    = "weight_goal_direction"
         case createdAt              = "created_at"
         case updatedAt              = "updated_at"
     }
@@ -126,6 +142,12 @@ struct Profile: Codable, Identifiable, Hashable {
         timeZone             = try c.decodeIfPresent(String.self, forKey: .timeZone)
         onboardingCompletedAt = try c.decodeIfPresent(Date.self, forKey: .onboardingCompletedAt)
         onboardingArchetype   = try c.decodeIfPresent(Archetype.self, forKey: .onboardingArchetype)
+        biologicalSex       = try c.decodeIfPresent(CalorieGoalCalculator.BiologicalSex.self, forKey: .biologicalSex)
+        ageYears            = try c.decodeIfPresent(Int.self,    forKey: .ageYears)
+        heightCm            = try c.decodeIfPresent(Double.self, forKey: .heightCm)
+        weightKg            = try c.decodeIfPresent(Double.self, forKey: .weightKg)
+        activityLevel       = try c.decodeIfPresent(CalorieGoalCalculator.ActivityLevel.self, forKey: .activityLevel)
+        weightGoalDirection = try c.decodeIfPresent(CalorieGoalCalculator.GoalDirection.self, forKey: .weightGoalDirection)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
@@ -154,6 +176,17 @@ struct ProfileUpdate: Encodable {
     var timeZone: String? = nil
     var onboardingCompletedAt: Date? = nil
     var onboardingArchetype: Profile.Archetype? = nil
+    /// Phase 20. Physiology inputs. Same opt-in semantics as every
+    /// other field in this struct — `nil` = "don't touch the column".
+    /// No flow in v1 needs to actively clear a physiology field; a
+    /// future "reset my profile" affordance would need a different
+    /// shape (encode nil as JSON null) but isn't required yet.
+    var biologicalSex: CalorieGoalCalculator.BiologicalSex? = nil
+    var ageYears: Int? = nil
+    var heightCm: Double? = nil
+    var weightKg: Double? = nil
+    var activityLevel: CalorieGoalCalculator.ActivityLevel? = nil
+    var weightGoalDirection: CalorieGoalCalculator.GoalDirection? = nil
 
     enum CodingKeys: String, CodingKey {
         case displayName            = "display_name"
@@ -172,6 +205,12 @@ struct ProfileUpdate: Encodable {
         case timeZone               = "time_zone"
         case onboardingCompletedAt  = "onboarding_completed_at"
         case onboardingArchetype    = "onboarding_archetype"
+        case biologicalSex          = "biological_sex"
+        case ageYears               = "age_years"
+        case heightCm               = "height_cm"
+        case weightKg               = "weight_kg"
+        case activityLevel          = "activity_level"
+        case weightGoalDirection    = "weight_goal_direction"
     }
 
     /// Encode only the keys the caller actually populated. Without this,
@@ -196,5 +235,11 @@ struct ProfileUpdate: Encodable {
         try c.encodeIfPresent(timeZone,             forKey: .timeZone)
         try c.encodeIfPresent(onboardingCompletedAt, forKey: .onboardingCompletedAt)
         try c.encodeIfPresent(onboardingArchetype,   forKey: .onboardingArchetype)
+        try c.encodeIfPresent(biologicalSex,         forKey: .biologicalSex)
+        try c.encodeIfPresent(ageYears,              forKey: .ageYears)
+        try c.encodeIfPresent(heightCm,              forKey: .heightCm)
+        try c.encodeIfPresent(weightKg,              forKey: .weightKg)
+        try c.encodeIfPresent(activityLevel,         forKey: .activityLevel)
+        try c.encodeIfPresent(weightGoalDirection,   forKey: .weightGoalDirection)
     }
 }

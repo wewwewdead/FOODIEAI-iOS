@@ -22,6 +22,24 @@ struct GeminiAnalysis: Codable, Hashable {
     let drawbacks: [String]?
     let nutrients: [String]?
     let coachAdvice: String?
+    /// Quantity Clarification — items in the image where the visible
+    /// portion cannot determine the actual quantity (rice, noodles,
+    /// soup, drinks in opaque containers, etc.). Nullable because
+    /// pre-clarification servers won't return the field. Empty array
+    /// means "all portions are visually determinable" — no follow-up
+    /// needed.
+    let portionAmbiguousItems: [AmbiguousItem]?
+
+    /// Quantity Clarification — one row in `portionAmbiguousItems`.
+    /// Hashable + Identifiable so the clarification sheet can iterate
+    /// over the list directly. `id` uses the name since the server
+    /// guarantees at most one entry per food name within a single
+    /// response.
+    struct AmbiguousItem: Codable, Hashable, Identifiable {
+        let name: String
+        let assumedQuantity: String
+        var id: String { name }
+    }
 
     /// True when Gemini detected food. The server emits an *empty-string*
     /// `fallback` (not null) on the success path because Gemini's structured

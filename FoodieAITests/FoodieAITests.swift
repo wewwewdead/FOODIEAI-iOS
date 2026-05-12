@@ -141,3 +141,75 @@ final class EatingTimeInferenceTests: XCTestCase {
         return logs
     }
 }
+
+// MARK: - Phase 20 — CalorieGoalCalculator
+
+final class CalorieGoalCalculatorTests: XCTestCase {
+    /// Worked example #1 from the Phase 20 spec: 30yo male, 175 cm,
+    /// 75 kg, moderately active, lose weight → 2133 kcal target.
+    func test_male_30_175cm_75kg_moderate_lose() {
+        let goals = CalorieGoalCalculator.compute(.init(
+            sex: .male, ageYears: 30, heightCm: 175, weightKg: 75,
+            activity: .moderate, goal: .lose
+        ))
+        XCTAssertEqual(goals.bmr, 1699)
+        XCTAssertEqual(goals.tdee, 2633)
+        XCTAssertEqual(goals.calories, 2133)
+        XCTAssertEqual(goals.carbsG, 267)
+        XCTAssertEqual(goals.proteinG, 133)
+        XCTAssertEqual(goals.fatG, 59)
+        XCTAssertEqual(goals.fiberG, 30)
+        XCTAssertEqual(goals.sugarG, 53)
+        XCTAssertFalse(goals.wasFloored)
+    }
+
+    /// Worked example #2 from the Phase 20 spec: 28yo female, 162 cm,
+    /// 60 kg, lightly active, maintain → 1803 kcal target.
+    func test_female_28_162cm_60kg_light_maintain() {
+        let goals = CalorieGoalCalculator.compute(.init(
+            sex: .female, ageYears: 28, heightCm: 162, weightKg: 60,
+            activity: .light, goal: .maintain
+        ))
+        XCTAssertEqual(goals.bmr, 1312)
+        XCTAssertEqual(goals.tdee, 1803)
+        XCTAssertEqual(goals.calories, 1803)
+        XCTAssertEqual(goals.carbsG, 225)
+        XCTAssertEqual(goals.proteinG, 113)
+        XCTAssertEqual(goals.fatG, 50)
+        XCTAssertEqual(goals.fiberG, 25)
+        XCTAssertEqual(goals.sugarG, 45)
+        XCTAssertFalse(goals.wasFloored)
+    }
+
+    /// Floor check: a tiny, very sedentary user with a 500 kcal deficit
+    /// would compute well below the 1200 kcal female minimum. We clamp
+    /// and surface `wasFloored` so the UI can explain the safe minimum.
+    func test_floors_at_safe_minimum_for_female() {
+        let goals = CalorieGoalCalculator.compute(.init(
+            sex: .female, ageYears: 60, heightCm: 150, weightKg: 45,
+            activity: .sedentary, goal: .lose
+        ))
+        XCTAssertEqual(goals.calories, 1200)
+        XCTAssertTrue(goals.wasFloored)
+    }
+
+    /// `unspecified` must land strictly between male and female for an
+    /// otherwise-identical input — confirms the averaged BMR constant
+    /// is applied correctly rather than silently defaulting to one sex.
+    func test_unspecified_uses_averaged_constant() {
+        let male = CalorieGoalCalculator.compute(.init(
+            sex: .male, ageYears: 30, heightCm: 170, weightKg: 70,
+            activity: .moderate, goal: .maintain
+        ))
+        let female = CalorieGoalCalculator.compute(.init(
+            sex: .female, ageYears: 30, heightCm: 170, weightKg: 70,
+            activity: .moderate, goal: .maintain
+        ))
+        let unspec = CalorieGoalCalculator.compute(.init(
+            sex: .unspecified, ageYears: 30, heightCm: 170, weightKg: 70,
+            activity: .moderate, goal: .maintain
+        ))
+        XCTAssertGreaterThan(unspec.calories, female.calories)
+        XCTAssertLessThan(unspec.calories, male.calories)
+    }
+}

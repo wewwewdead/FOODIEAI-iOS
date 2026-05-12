@@ -39,10 +39,16 @@ actor AnalyzeService {
     /// Phase 18: `recentMoods` adds an optional, mood-labeled subset
     /// of recent meals (non-null `mood`). Bounded to 10 client-side;
     /// the server re-bounds defensively. Empty array → field omitted.
+    /// Quantity Clarification — `userQuantities` carries user-resolved
+    /// portions from the clarification sheet. Empty array → field omitted
+    /// from the multipart body so the pre-clarification body shape is
+    /// preserved byte-for-byte. When present, the server folds these
+    /// amounts into the prompt and recomputes the whole plate's macros.
     func analyze(jpegData: Data,
                  recentMeals: [FoodLog] = [],
                  preferredCoaches: [String] = [],
-                 recentMoods: [FoodLog] = []) async throws -> AnalyzeResponse {
+                 recentMoods: [FoodLog] = [],
+                 userQuantities: [(name: String, quantity: String)] = []) async throws -> AnalyzeResponse {
         guard jpegData.count <= Self.maxJPEGBytes else {
             throw AnalyzeError.imageTooLarge
         }
@@ -65,20 +71,23 @@ actor AnalyzeService {
             : Self.encodePreferredCoaches(preferredCoaches)
         let boundedMoods = Array(recentMoods.prefix(10))
         let recentMoodsJSON = Self.encodeRecentMoods(boundedMoods)
+        let boundedQuantities = Array(userQuantities.prefix(8))
+        let userQuantitiesJSON = Self.encodeUserQuantities(boundedQuantities)
 
         request.httpBody = Self.multipartBody(
             boundary: boundary,
             imagePayload: jpegData,
             recentMealsJSON: recentMealsJSON,
             preferredCoachesJSON: preferredCoachesJSON,
-            recentMoodsJSON: recentMoodsJSON
+            recentMoodsJSON: recentMoodsJSON,
+            userQuantitiesJSON: userQuantitiesJSON
         )
 
         #if DEBUG
-        NSLog("[Analyze] POST %@ bytes=%d recentMeals=%d prefs=%d recentMoods=%d",
+        NSLog("[Analyze] POST %@ bytes=%d recentMeals=%d prefs=%d recentMoods=%d userQuantities=%d",
               url.absoluteString, jpegData.count,
               boundedMeals.count, preferredCoaches.count,
-              boundedMoods.count)
+              boundedMoods.count, boundedQuantities.count)
         #endif
 
         let data: Data
@@ -159,7 +168,8 @@ actor AnalyzeService {
                                       imagePayload: Data,
                                       recentMealsJSON: String?,
                                       preferredCoachesJSON: String?,
-                                      recentMoodsJSON: String?) -> Data {
+                                      recentMoodsJSON: String?,
+                                      userQuantitiesJSON: String?) -> Data {
         var body = Data()
         let crlf = "\r\n"
 
@@ -185,6 +195,10 @@ actor AnalyzeService {
         if let recentMoodsJSON {
             appendTextPart(to: &body, boundary: boundary,
                            name: "recent_moods", value: recentMoodsJSON)
+        }
+        if let userQuantitiesJSON {
+            appendTextPart(to: &body, boundary: boundary,
+                           name: "user_quantities", value: userQuantitiesJSON)
         }
 
         body.append("--\(boundary)--\(crlf)".data(using: .utf8)!)
@@ -239,6 +253,28 @@ actor AnalyzeService {
             let data = try JSONEncoder().encode(coaches)
             return String(data: data, encoding: .utf8)
         } catch {
+            return nil
+        }
+    }
+
+    /// Quantity Clarification — JSON-encode `user_quantities` as
+    /// `[{name, quantity}]`. Returns nil for an empty input so the
+    /// caller can omit the multipart part entirely (the server treats
+    /// a missing field identically to an empty array).
+    private static func encodeUserQuantities(_ pairs: [(name: String, quantity: String)]) -> String? {
+        guard !pairs.isEmpty else { return nil }
+        struct Wire: Encodable {
+            let name: String
+            let quantity: String
+        }
+        let wires = pairs.map { Wire(name: $0.name, quantity: $0.quantity) }
+        do {
+            let data = try JSONEncoder().encode(wires)
+            return String(data: data, encoding: .utf8)
+        } catch {
+            #if DEBUG
+            NSLog("[Analyze] encodeUserQuantities FAILED: %@", "\(error)")
+            #endif
             return nil
         }
     }

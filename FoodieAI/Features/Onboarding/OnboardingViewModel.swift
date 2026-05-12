@@ -20,13 +20,17 @@ final class OnboardingViewModel: ObservableObject {
         case hero          = 0
         case signIn        = 1
         case archetype     = 2
-        case coaches       = 3
-        case notifications = 4
-        case completing    = 5
+        /// Phase 20. Optional "About you" step — physiology inputs for
+        /// the calorie/macro calculator. Always rendered; the user can
+        /// skip it (physiology stays NULL, archetype defaults apply).
+        case physiology    = 3
+        case coaches       = 4
+        case notifications = 5
+        case completing    = 6
         /// Sentinel that tells `OnboardingFlow` it should yield — the
         /// gate values are persisted; RootView will route to MainTabView
         /// on its next render.
-        case finished      = 6
+        case finished      = 7
     }
 
     @Published var step: Step {
@@ -51,6 +55,12 @@ final class OnboardingViewModel: ObservableObject {
     /// whether the system prompt itself was granted — both resolutions
     /// answer the in-app question). `false` after "Not now".
     @Published var notificationsAccepted: Bool? = nil
+
+    /// Phase 20. Physiology answers, populated by
+    /// `OnboardingPhysiologyStepView` if the user chooses to
+    /// personalize. `nil` after a skip; `complete()` then leaves the
+    /// physiology columns and archetype-derived goals untouched.
+    @Published var physiology: CalorieGoalCalculator.Physiology? = nil
 
     @Published private(set) var isCompleting: Bool = false
     @Published var completionError: String? = nil
@@ -78,7 +88,8 @@ final class OnboardingViewModel: ObservableObject {
         switch step {
         case .hero:           step = .archetype
         case .signIn:         step = .archetype
-        case .archetype:      step = .coaches
+        case .archetype:      step = .physiology
+        case .physiology:     step = .coaches
         case .coaches:        step = .notifications
         case .notifications:  step = .completing
         case .completing:     step = .finished
@@ -90,7 +101,8 @@ final class OnboardingViewModel: ObservableObject {
         switch step {
         case .hero, .signIn, .completing, .finished: break
         case .archetype:      step = .hero
-        case .coaches:        step = .archetype
+        case .physiology:     step = .archetype
+        case .coaches:        step = .physiology
         case .notifications:  step = .coaches
         }
     }
@@ -163,7 +175,20 @@ final class OnboardingViewModel: ObservableObject {
         #endif
 
         let resolvedArchetype = archetype ?? .aware
-        let goals = resolvedArchetype.defaultGoals
+        // Phase 20: if the user filled in physiology, recompute every
+        // goal field from it and persist the inputs alongside. Otherwise
+        // fall back to the archetype defaults so users who skip the
+        // personalization step still get sensible numbers.
+        let computedGoals: CalorieGoalCalculator.Goals? = physiology.map {
+            CalorieGoalCalculator.compute($0)
+        }
+        let archetypeDefaults = resolvedArchetype.defaultGoals
+        let calorieGoal:  Int = computedGoals?.calories  ?? archetypeDefaults.calories
+        let carbGoal:     Int = computedGoals?.carbsG    ?? archetypeDefaults.carbs
+        let sugarGoal:    Int = computedGoals?.sugarG    ?? archetypeDefaults.sugar
+        let proteinGoal:  Int? = computedGoals?.proteinG
+        let fatGoal:      Int? = computedGoals?.fatG
+        let fiberGoal:    Int? = computedGoals?.fiberG
         let now = Date()
 
         // The notification preference fields piggyback the master gate.
@@ -182,14 +207,18 @@ final class OnboardingViewModel: ObservableObject {
         do {
             let updated = try await service.completeOnboarding(
                 archetype:            resolvedArchetype,
-                dailyCalorieGoal:     goals.calories,
-                dailyCarbGoalG:       goals.carbs,
-                dailySugarGoalG:      goals.sugar,
+                dailyCalorieGoal:     calorieGoal,
+                dailyCarbGoalG:       carbGoal,
+                dailySugarGoalG:      sugarGoal,
+                dailyProteinGoalG:    proteinGoal,
+                dailyFatGoalG:        fatGoal,
+                dailyFiberGoalG:      fiberGoal,
                 preferredCoaches:     coachesPayload,
                 notificationsEnabled: masterEnabled,
                 reminderBreakfast:    mealReminders,
                 reminderLunch:        mealReminders,
                 reminderDinner:       mealReminders,
+                physiology:           physiology,
                 completedAt:          now
             )
             #if DEBUG

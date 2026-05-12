@@ -44,6 +44,9 @@ struct OnboardingFlow: View {
             case .archetype:
                 OnboardingArchetypeView(vm: vm)
                     .transition(.opacity)
+            case .physiology:
+                OnboardingPhysiologyStepView(vm: vm)
+                    .transition(.opacity)
             case .coaches:
                 OnboardingCoachStepView(vm: vm)
                     .transition(.opacity)
