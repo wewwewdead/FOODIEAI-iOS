@@ -220,22 +220,35 @@ struct AnalysisResultView: View {
     /// "Today" / "Yesterday" / weekday name within the last week, then
     /// "Mar 14" beyond that. Mirrors the conversational tone of the
     /// chip itself.
+    ///
+    /// The two formatters are cached statically because `DateFormatter`
+    /// allocation/parse is expensive (CFCalendar + ICU bootstrap) and
+    /// this helper runs every time the result view re-renders.
     private func lastTimeLabel(_ date: Date) -> String {
         let cal = Calendar.current
         if cal.isDateInToday(date)     { return "today" }
         if cal.isDateInYesterday(date) { return "yesterday" }
 
-        let f = DateFormatter()
-        f.locale = .current
-
         if let weekAgo = cal.date(byAdding: .day, value: -7, to: Date()),
            date >= weekAgo {
-            f.dateFormat = "EEEE"
-            return f.string(from: date)
+            return Self.weekdayFormatter.string(from: date)
         }
-        f.dateFormat = "MMM d"
-        return f.string(from: date)
+        return Self.shortDateFormatter.string(from: date)
     }
+
+    private static let weekdayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = "EEEE"
+        return f
+    }()
+
+    private static let shortDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = "MMM d"
+        return f
+    }()
 
     // MARK: - Hero number + small progress arc
 

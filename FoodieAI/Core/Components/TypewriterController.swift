@@ -28,23 +28,58 @@ final class TypewriterController: ObservableObject {
 
     /// Begin typing from current position. Idempotent — calling twice while
     /// already typing has no effect.
+    ///
+    /// The character loop snapshots `items` and `perCharSeconds` at start
+    /// time and uses a *weak* self reference inside each character write,
+    /// so the controller is not held alive by its own stored Task for the
+    /// duration of a long quote. A long typewriter doesn't pin the
+    /// controller across navigation/state changes — the next user
+    /// interaction can release it immediately.
     func start() {
         guard task == nil || task?.isCancelled == true else { return }
         guard !isDone else { return }
+        let snapshotItems = items
+        let snapshotPerChar = perCharSeconds
         task = Task { [weak self] in
-            guard let self else { return }
-            for (idx, item) in items.enumerated() {
-                // Skip already-displayed prefix (in case of mid-typing pause).
-                let already = displayedText.indices.contains(idx) ? displayedText[idx].count : 0
+            // Read the prefix counts once up front so the loop body
+            // doesn't have to keep dereferencing self for read-only
+            // bookkeeping.
+            let initialPrefix: [Int] = await MainActor.run { [weak self] in
+                guard let self else { return [] }
+                return snapshotItems.enumerated().map { idx, _ in
+                    self.displayedText.indices.contains(idx)
+                        ? self.displayedText[idx].count
+                        : 0
+                }
+            }
+            guard !initialPrefix.isEmpty else { return }
+
+            for (idx, item) in snapshotItems.enumerated() {
+                let already = idx < initialPrefix.count ? initialPrefix[idx] : 0
                 let chars = Array(item)
                 guard already < chars.count else { continue }
                 for cIdx in already..<chars.count {
                     if Task.isCancelled { return }
-                    displayedText[idx].append(chars[cIdx])
-                    try? await Task.sleep(nanoseconds: UInt64(perCharSeconds * 1_000_000_000))
+                    let nextChar = chars[cIdx]
+                    // Strong reference is scoped to this block only —
+                    // released before the next Task.sleep suspension,
+                    // so the controller can deinit mid-loop if needed.
+                    if let strong = self {
+                        guard idx < strong.displayedText.count else { return }
+                        strong.displayedText[idx].append(nextChar)
+                    } else {
+                        return
+                    }
+                    do {
+                        try await Task.sleep(
+                            nanoseconds: UInt64(snapshotPerChar * 1_000_000_000)
+                        )
+                    } catch {
+                        return
+                    }
                 }
             }
-            isDone = true
+            if let strong = self { strong.isDone = true }
         }
     }
 

@@ -79,11 +79,13 @@ actor ProfileService {
         }
     }
 
-    /// Self-heal entry point — log loudly so this surfacing in production
-    /// is a signal to investigate trigger health, not a routine path.
+    /// Self-heal entry point — log loudly in DEBUG so this surfacing is
+    /// a signal to investigate trigger health, not a routine path. In
+    /// release builds we suppress the user UUID from stdout — the
+    /// self-heal still runs identically.
     private func selfHealMissingProfile(id: String) async throws -> Profile {
-        print("[Profile] self-heal: trigger-skipped row, inserting defaults for \(id)")
         #if DEBUG
+        print("[Profile] self-heal: trigger-skipped row, inserting defaults for \(id)")
         NSLog("[Profile] self-heal INSERT profiles (id=%@)", id)
         #endif
 

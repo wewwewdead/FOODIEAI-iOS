@@ -21,6 +21,16 @@ actor AnalyzeService {
     /// shipping bytes that we know will 413.
     static let maxJPEGBytes = 9_500_000
 
+    /// Shared formatter for the `recent_meals` / `recent_moods` wire
+    /// fields. `ISO8601DateFormatter` is thread-safe and configured
+    /// once; this avoids re-initializing it (an ICU + locale bootstrap)
+    /// on every analyze call.
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
     init(baseURL: URL = AppConfig.analyzeBaseURL,
          session: URLSession = .shared) {
         self.baseURL = baseURL
@@ -232,8 +242,7 @@ actor AnalyzeService {
             let food_name: String
             let eaten_at: String
         }
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let f = Self.iso8601Formatter
         let wires = logs.map {
             Wire(food_name: $0.foodName, eaten_at: f.string(from: $0.eatenAt))
         }
@@ -296,8 +305,7 @@ actor AnalyzeService {
             let mood: String
             let eaten_at: String
         }
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let f = Self.iso8601Formatter
         let wires = labeled.map { (log, mood) in
             Wire(food_name: log.foodName,
                  mood: mood.rawValue,

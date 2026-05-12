@@ -39,6 +39,16 @@ final class ProfileViewModel: ObservableObject {
     private let auth: AuthService
     private var cancellables = Set<AnyCancellable>()
 
+    /// Flips to `true` only after a profile fetch *succeeds*. A failed
+    /// first attempt leaves it `false` so a subsequent reattach
+    /// (or a manual "Try again") can still drive a real load.
+    private var hasLoadedSuccessfully = false
+
+    /// Re-entrancy guard. `.task` can fire while a prior `load()` is
+    /// still inflight (rapid tab switches, navigation pop+push); this
+    /// keeps us from issuing duplicate concurrent network calls.
+    private var isLoadingProfile = false
+
     init(profileService: ProfileService = ProfileService(),
          auth: AuthService) {
         self.profileService = profileService
@@ -46,16 +56,43 @@ final class ProfileViewModel: ObservableObject {
         bindUnsavedChangeTracking()
     }
 
+#if DEBUG
+    deinit {
+        print("✅ ProfileViewModel deinit")
+    }
+#endif
+
     // MARK: - Public API
 
+    /// First-attach loader. `.task` re-fires whenever SwiftUI reattaches
+    /// the view (tab switches, navigation pushes), which would otherwise
+    /// re-trigger network fetch + draft reseed + loading flicker. Guard
+    /// on the *success* flag so a failed first attempt can still retry;
+    /// the failed-state UI calls `load()` directly for explicit retry.
+    func loadIfNeeded() async {
+        guard !hasLoadedSuccessfully else { return }
+        await load()
+    }
+
     func load() async {
+        guard !isLoadingProfile else { return }
+        isLoadingProfile = true
+        defer { isLoadingProfile = false }
+
         state = .loading
         saveError = nil
         do {
             let profile = try await profileService.currentProfile()
+            try Task.checkCancellation()
             seed(from: profile)
             state = .loaded(profile)
             lastResolvedProfile = profile
+            hasLoadedSuccessfully = true
+        } catch is CancellationError {
+            // SwiftUI cancelled `.task` (tab switch, view teardown).
+            // Leave state alone so we don't paint a failed banner over
+            // a transient cancel — a future reattach drives reload.
+            return
         } catch {
             state = .failed(error)
         }
@@ -83,6 +120,8 @@ final class ProfileViewModel: ObservableObject {
             state = .loaded(updated)
             lastResolvedProfile = updated
             Haptics.success()
+        } catch is CancellationError {
+            return
         } catch {
             saveError = error
             Haptics.error()
@@ -140,7 +179,9 @@ final class ProfileViewModel: ObservableObject {
             }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .assign(to: \.hasUnsavedChanges, on: self)
+            .sink { [weak self] value in
+                self?.hasUnsavedChanges = value
+            }
             .store(in: &cancellables)
     }
 }

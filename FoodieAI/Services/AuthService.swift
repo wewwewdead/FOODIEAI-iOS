@@ -43,12 +43,23 @@ final class AuthService: NSObject, ObservableObject {
 
     /// Subscribe to auth state changes. Call once at app launch from
     /// `FoodieAIApp.body.task`. Idempotent.
+    ///
+    /// Capture `client` separately so the async sequence iteration does
+    /// not hold a strong reference to `self` for its entire lifetime.
+    /// `self` is only briefly re-resolved per emitted event via
+    /// `if let strongSelf = self`, so cancellation/dealloc can break
+    /// the loop between events.
     func bootstrap() async {
         if stateChangeTask != nil { return }
+        let client = self.client
         stateChangeTask = Task { [weak self] in
-            guard let self else { return }
-            for await (event, session) in self.client.auth.authStateChanges {
-                self.apply(event: event, session: session)
+            for await (event, session) in client.auth.authStateChanges {
+                if Task.isCancelled { break }
+                if let strongSelf = self {
+                    strongSelf.apply(event: event, session: session)
+                } else {
+                    break
+                }
             }
         }
     }
@@ -73,7 +84,11 @@ final class AuthService: NSObject, ObservableObject {
     private func scheduleLoadingTimeout() {
         loadingTimeoutTask?.cancel()
         loadingTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.loadingFallbackTimeout)
+            do {
+                try await Task.sleep(nanoseconds: Self.loadingFallbackTimeout)
+            } catch {
+                return
+            }
             await MainActor.run {
                 guard let self else { return }
                 if self.isLoading { self.isLoading = false }

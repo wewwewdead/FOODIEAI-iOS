@@ -19,9 +19,11 @@ struct FoodieAIApp: App {
         // requirement) — done here in app init.
         NotificationRouter.shared.register()
 
-        // Print to stdout AND NSLog to the unified log so the diagnostic is
-        // visible from Xcode console, `xcrun simctl spawn ... log stream`,
-        // and Console.app — whichever you're watching.
+        // Config diagnostics are useful while developing (visible in Xcode
+        // console, `xcrun simctl spawn ... log stream`, Console.app) but
+        // include host names and the anon-key *length* — not secrets, but
+        // not signal we want in shipped logs either. Gate on DEBUG.
+        #if DEBUG
         print("=== AppConfig ===")
         print("supabaseURL:", AppConfig.supabaseURL.absoluteString)
         print("supabaseURL.host:", AppConfig.supabaseURL.host ?? "nil")
@@ -36,7 +38,6 @@ struct FoodieAIApp: App {
         NSLog("analyzeBaseURL: %@", AppConfig.analyzeBaseURL.absoluteString)
         NSLog("=================")
 
-        #if DEBUG
         FontDebug.logRegisteredFamilies()
         #endif
     }

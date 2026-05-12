@@ -41,7 +41,7 @@ struct ProfileView: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .task {
-            await viewModel.load()
+            await viewModel.loadIfNeeded()
         }
         .onChange(of: viewModel.lastResolvedProfile) { _, newProfile in
             // Broadcast every successful load/save into the shared store

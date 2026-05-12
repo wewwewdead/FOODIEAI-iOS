@@ -143,7 +143,17 @@ final class CaptureViewModel: ObservableObject {
 
         state = .analyzing(image)
 
-        guard let jpeg = ImagePreparation.compressMain(image) else {
+        // Image resize + JPEG encode is CPU-bound. Running it on the
+        // MainActor (this view model's default) janks the analyzing-aura
+        // animation that's appearing at the same moment. UIGraphicsImage-
+        // Renderer + UIImage.draw(in:) are documented as thread-safe on
+        // modern iOS; hop to a userInitiated detached task so the main
+        // thread stays free for the Siri-aura animation kick-off.
+        let jpeg = await Task.detached(priority: .userInitiated) {
+            ImagePreparation.compressMain(image)
+        }.value
+
+        guard let jpeg else {
             state = .failed(image, .imageTooLarge)
             return
         }
@@ -181,6 +191,12 @@ final class CaptureViewModel: ObservableObject {
                 Haptics.warning()
                 state = .noFood(image)
             }
+        } catch is CancellationError {
+            // The fire-and-forget analyze Task got cancelled (e.g., the
+            // user discarded mid-flight). Restore the previous `.picked`
+            // affordance instead of painting a fake "Something went
+            // wrong" — the user didn't fail anything.
+            state = .picked(image)
         } catch let err as AnalyzeError {
             Haptics.error()
             state = .failed(image, err)
@@ -243,8 +259,10 @@ final class CaptureViewModel: ObservableObject {
     /// original first-pass response — don't punish the user for a
     /// network hiccup on the second pass.
     func refineAnalysis(with quantities: [String: String]) async {
+        #if DEBUG
         NSLog("[Clarify] refineAnalysis called with quantities=%@ currentState=%@",
               "\(quantities)", Self.stateName(state))
+        #endif
 
         // Fix A — Accept both `.clarifying` and `.ready` here. The
         // sheet's dismiss handler can flip us to `.ready` (via
@@ -257,31 +275,44 @@ final class CaptureViewModel: ObservableObject {
         let originalResponse: AnalyzeResponse
         switch state {
         case .clarifying(let i, let r, let items):
+            #if DEBUG
             NSLog("[Clarify] guard passed, state was .clarifying with %d items",
                   items.count)
+            #endif
             image = i
             originalResponse = r
         case .ready(let i, let r):
+            #if DEBUG
             NSLog("[Clarify] state raced to .ready before refine started; honoring refine intent anyway")
+            #endif
             image = i
             originalResponse = r
         default:
+            #if DEBUG
             NSLog("[Clarify] refineAnalysis: state was %@, bailing",
                   Self.stateName(state))
+            #endif
             return
         }
 
         state = .analyzing(image) // re-show the analyzing UI
 
-        guard let jpeg = ImagePreparation.compressMain(image) else {
+        let jpeg = await Task.detached(priority: .userInitiated) {
+            ImagePreparation.compressMain(image)
+        }.value
+        guard let jpeg else {
+            #if DEBUG
             NSLog("[Clarify] compression FAILED; falling back to original response")
+            #endif
             state = .ready(image, originalResponse)
             return
         }
 
         let pairs = quantities.map { (name: $0.key, quantity: $0.value) }
+        #if DEBUG
         NSLog("[Clarify] compressed jpeg bytes=%d; about to call analyzer.analyze(userQuantities=%d)",
               jpeg.count, pairs.count)
+        #endif
         let context = await fetchContextForAnalyze()
 
         do {
@@ -292,16 +323,20 @@ final class CaptureViewModel: ObservableObject {
                 recentMoods: context.recentMoods,
                 userQuantities: pairs
             )
+            #if DEBUG
             NSLog("[Clarify] refineAnalysis succeeded — refined food=%@ calories=%@ (original calories=%@)",
                   refined.analysis.food ?? "<nil>",
                   refined.analysis.calories.map { "\($0)" } ?? "<nil>",
                   originalResponse.analysis.calories.map { "\($0)" } ?? "<nil>")
+            #endif
             Haptics.prepare()
             // If the refine pass somehow lost food detection, prefer
             // the original — the user already saw it succeed once.
             state = .ready(image, refined.analysis.hasFood ? refined : originalResponse)
         } catch {
+            #if DEBUG
             NSLog("[Clarify] refine FAILED, falling back to original: %@", "\(error)")
+            #endif
             state = .ready(image, originalResponse)
         }
     }
@@ -335,8 +370,19 @@ final class CaptureViewModel: ObservableObject {
         guard case .ready(let image, let response) = state else { return }
         state = .saving(image, response)
 
-        guard let mainData  = ImagePreparation.compressMain(image),
-              let thumbData = ImagePreparation.compressThumbnail(image) else {
+        // Generate main + thumb JPEGs concurrently on a background
+        // thread; the two passes are independent and CPU-heavy enough
+        // (HEIC → JPEG re-encode at two sizes) that running them on the
+        // MainActor visibly hitched the "Save to today" press response.
+        let mainTask = Task.detached(priority: .userInitiated) {
+            ImagePreparation.compressMain(image)
+        }
+        let thumbTask = Task.detached(priority: .userInitiated) {
+            ImagePreparation.compressThumbnail(image)
+        }
+        let mainData  = await mainTask.value
+        let thumbData = await thumbTask.value
+        guard let mainData, let thumbData else {
             state = .saveFailed(image, response, SaveError.imagePreparationFailed)
             return
         }

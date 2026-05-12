@@ -44,6 +44,12 @@ final class TrackerViewModel: ObservableObject {
     private let recapService: WeeklyRecapService
     private let timeZone: TimeZone
 
+    /// Re-entrancy guard. `refresh()` is called from `.task` and
+    /// `.refreshable`; rapid tab switches + pull-to-refresh can stack
+    /// concurrent requests against the same Supabase session. Drop the
+    /// duplicate rather than racing two writes into `state`.
+    private var isRefreshing = false
+
     /// Phase 16. Account age threshold (in days) below which we don't
     /// generate or surface observations. Avoids pre-loading editorial
     /// cards onto a fresh account before the user has earned any
@@ -65,6 +71,10 @@ final class TrackerViewModel: ObservableObject {
     }
 
     func refresh() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         // Don't flash `.loading` over an existing loaded state — pull-to-refresh
         // should keep the rows visible while the new fetch is in flight.
         if case .loaded = state {
@@ -112,6 +122,12 @@ final class TrackerViewModel: ObservableObject {
                 patterns: resolvedPatterns,
                 hasExisting: observation != nil
             )
+        } catch is CancellationError {
+            // SwiftUI cancelled `.task` (segment switch / tab churn).
+            // Leave `state` and side-channel arrays alone — a follow-up
+            // refresh will reconcile. Painting `.failed(CancellationError)`
+            // here would flash a fake error banner.
+            return
         } catch {
             #if DEBUG
             NSLog("[Tracker] refresh FAILED: %@", "\(error)")

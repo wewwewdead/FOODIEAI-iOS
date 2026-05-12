@@ -1,4 +1,5 @@
 import UIKit
+import ImageIO
 
 /// Pure helper — no network. Resize a `UIImage` so its long edge is at most
 /// `maxLongEdge` (no upscaling), then JPEG-encode at `quality`.
@@ -77,6 +78,45 @@ enum ImagePreparation {
         return renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: newSize))
         }
+    }
+
+    /// Memory-efficient downsample directly from `Data` (e.g., the bytes
+    /// returned by `PhotosPickerItem.loadTransferable(type: Data.self)`).
+    /// Uses `CGImageSourceCreateThumbnailAtIndex` so the full-resolution
+    /// pixel buffer never lands in memory — the source is parsed, then
+    /// only the thumbnail at `maxLongEdge` is decoded. Honors EXIF
+    /// orientation via `kCGImageSourceCreateThumbnailWithTransform`.
+    ///
+    /// Thread-safe; safe to call from a background task.
+    ///
+    /// Caps the picker-side image at 2048pt long edge so a 12 MP HEIC
+    /// (≈ 4032×3024, ~50 MB decoded) is reduced to a ~2048×1536 buffer
+    /// (~12 MB decoded) before it ever lands in the view model. The
+    /// downstream `compressMain` / `compressThumbnail` passes still
+    /// downsize to their existing targets (1024 / 256) so the saved
+    /// JPEGs are byte-equivalent to the pre-Phase-21 pipeline.
+    static func downsampledImage(from data: Data,
+                                 maxLongEdge: CGFloat = 2048) -> UIImage? {
+        let sourceOpts: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithData(
+            data as CFData, sourceOpts as CFDictionary
+        ) else {
+            return nil
+        }
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways:   true,
+            kCGImageSourceShouldCacheImmediately:           true,
+            kCGImageSourceCreateThumbnailWithTransform:     true,
+            kCGImageSourceThumbnailMaxPixelSize:            maxLongEdge
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(
+            source, 0, thumbOpts as CFDictionary
+        ) else {
+            return nil
+        }
+        return UIImage(cgImage: cg)
     }
 
     /// Bakes the EXIF orientation into pixels. iPhone camera captures

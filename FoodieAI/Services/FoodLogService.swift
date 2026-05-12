@@ -4,6 +4,15 @@ import Supabase
 actor FoodLogService {
     private let client: SupabaseClient
 
+    /// Shared formatter for `eaten_at` filter bounds. `ISO8601DateFormatter`
+    /// is thread-safe; configuring it once avoids re-bootstrapping ICU
+    /// on every Tracker refresh / range query.
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
     init(client: SupabaseClient = FoodieClient.shared) {
         self.client = client
     }
@@ -24,8 +33,7 @@ actor FoodLogService {
     /// the daily_food_totals view (which buckets by UTC and can disagree near midnight).
     func todaysLogs(timeZone: TimeZone = .current) async throws -> [FoodLog] {
         let (start, end) = Self.localDayBounds(timeZone: timeZone)
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let f = Self.iso8601Formatter
 
         return try await client
             .from("food_logs")
@@ -42,8 +50,7 @@ actor FoodLogService {
     /// Reuses Phase 6's filter pattern (gte/lt on eaten_at, ordered desc).
     /// RLS handles per-user isolation.
     func logs(from: Date, to: Date) async throws -> [FoodLog] {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let f = Self.iso8601Formatter
 
         return try await client
             .from("food_logs")

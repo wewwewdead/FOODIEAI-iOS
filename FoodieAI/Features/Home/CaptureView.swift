@@ -145,10 +145,25 @@ struct CaptureView: View {
         .onChange(of: photosSelection) { _, newItem in
             guard let newItem else { return }
             Task {
-                if let data = try? await newItem.loadTransferable(type: Data.self),
-                   let image = UIImage(data: data) {
-                    viewModel.setPhoto(image, source: .library)
+                // Load the picker's bytes, then hand them off to a
+                // background task that downsamples via ImageIO without
+                // ever decoding the full-resolution buffer into memory.
+                // A 12 MP HEIC that would otherwise inflate to ~50 MB
+                // decoded lands as a ~2048pt-edge UIImage instead, which
+                // the existing compressMain/compressThumbnail passes
+                // still resize to their target sizes for upload.
+                if let data = try? await newItem.loadTransferable(type: Data.self) {
+                    let image = await Task.detached(priority: .userInitiated) {
+                        ImagePreparation.downsampledImage(from: data)
+                            ?? UIImage(data: data)
+                    }.value
+                    if let image {
+                        viewModel.setPhoto(image, source: .library)
+                    }
                 }
+                // Clear the selection so the same image can be repicked
+                // and so PhotosUI releases its internal reference to the
+                // PHAsset.
                 photosSelection = nil
             }
         }
@@ -270,7 +285,15 @@ struct CaptureView: View {
                     .padding(.horizontal, AppSpacing.lg)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .task(id: toast.id) {
-                        try? await Task.sleep(nanoseconds: 1_600_000_000)
+                        // `try?` would swallow CancellationError but
+                        // still run the clear, so a newly-arrived toast
+                        // (id flips) would be cleared by the *prior*
+                        // task's continuation. Bail explicitly on cancel.
+                        do {
+                            try await Task.sleep(nanoseconds: 1_600_000_000)
+                        } catch {
+                            return
+                        }
                         withAnimation(.appReveal) {
                             viewModel.clearRelogToast()
                         }
@@ -791,18 +814,26 @@ private struct DelightfulImageEntry: View {
             landed = true
         }
         Task {
-            // Beat 2 — soft land haptic just before the bounce settles.
-            try? await Task.sleep(nanoseconds: 320_000_000)
-            await MainActor.run { Haptics.soft() }
+            // Cancellation-aware: if the view is torn down mid-entrance
+            // (the photo card was rebuilt with a different image), bail
+            // immediately rather than firing late haptics + state writes
+            // against a defunct @State storage.
+            do {
+                // Beat 2 — soft land haptic just before the bounce settles.
+                try await Task.sleep(nanoseconds: 320_000_000)
+                await MainActor.run { Haptics.soft() }
 
-            // Beat 3 — stamp pulse, then release back to identity.
-            try? await Task.sleep(nanoseconds:  80_000_000)
-            await MainActor.run {
-                withAnimation(.appStamp) { stamping = true }
-            }
-            try? await Task.sleep(nanoseconds: 180_000_000)
-            await MainActor.run {
-                withAnimation(.appPress) { stamping = false }
+                // Beat 3 — stamp pulse, then release back to identity.
+                try await Task.sleep(nanoseconds:  80_000_000)
+                await MainActor.run {
+                    withAnimation(.appStamp) { stamping = true }
+                }
+                try await Task.sleep(nanoseconds: 180_000_000)
+                await MainActor.run {
+                    withAnimation(.appPress) { stamping = false }
+                }
+            } catch {
+                return
             }
         }
     }
