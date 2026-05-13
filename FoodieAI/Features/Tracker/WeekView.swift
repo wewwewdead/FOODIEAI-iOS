@@ -14,6 +14,13 @@ import Charts
 struct WeekView: View {
     @ObservedObject var viewModel: WeekViewModel
     @State private var selectedBucket: DailyBucket?
+    // Measured plot-area frame of the calories chart. Used to align the
+    // tappable day-cell row beneath the chart so each cell sits under its
+    // corresponding bar — the Y-axis labels (0/1000/2000/3000) push the plot
+    // area to the right inside the card, so a full-width HStack would not
+    // align with the bars otherwise.
+    @State private var plotLeading: CGFloat = 0
+    @State private var plotWidth: CGFloat = 0
 
     private let calendar: Calendar = {
         var c = Calendar.current
@@ -52,7 +59,7 @@ struct WeekView: View {
             }
         case .loaded(let buckets, let interval):
             headerCard(buckets: buckets, interval: interval)
-            chartCard(buckets: buckets)
+            chartCard(buckets: buckets, interval: interval)
         case .failed(let error):
             VStack(spacing: AppSpacing.md) {
                 Text("Couldn't load this week")
@@ -139,8 +146,14 @@ struct WeekView: View {
 
     // MARK: - Chart card
 
-    private func chartCard(buckets: [DailyBucket]) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+    private func chartCard(buckets: [DailyBucket], interval: DateInterval) -> some View {
+        // Pin the X domain to the full week so bars align with the 7-cell
+        // day-label row below — otherwise Charts auto-fits the domain to the
+        // observed data range, and a partial week (e.g. Sun–Wed) spreads its
+        // bars across the entire plot width.
+        let xDomain = interval.start ... interval.end
+
+        return VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Daily calories")
                 .appFont(.bodyLG)
                 .fontWeight(.heavy)
@@ -155,6 +168,7 @@ struct WeekView: View {
                 .opacity(bucket.hasLogs ? 1.0 : 0.3)
                 .cornerRadius(4)
             }
+            .chartXScale(domain: xDomain)
             .chartXAxis(.hidden) // replaced by tappable day-cell row below
             .chartYAxis {
                 AxisMarks(position: .leading) { value in
@@ -165,12 +179,33 @@ struct WeekView: View {
                 }
             }
             .frame(height: 200)
+            .chartOverlay { proxy in
+                GeometryReader { geo in
+                    let frame = geo[proxy.plotAreaFrame]
+                    Color.clear
+                        .onAppear {
+                            plotLeading = frame.minX
+                            plotWidth = frame.width
+                        }
+                        .onChange(of: frame) { _, new in
+                            plotLeading = new.minX
+                            plotWidth = new.width
+                        }
+                }
+            }
 
             // Tappable day cells — also serve as the X-axis label row.
-            HStack(spacing: AppSpacing.xs) {
-                ForEach(buckets) { bucket in
-                    dayCell(for: bucket)
+            // Aligned to the chart's measured plot area so each cell sits
+            // under its bar.
+            HStack(spacing: 0) {
+                Spacer().frame(width: plotLeading)
+                HStack(spacing: 0) {
+                    ForEach(buckets) { bucket in
+                        dayCell(for: bucket)
+                    }
                 }
+                .frame(width: max(plotWidth, 0))
+                Spacer(minLength: 0)
             }
         }
         .padding(AppSpacing.md)
