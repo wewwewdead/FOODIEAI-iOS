@@ -153,12 +153,18 @@ struct MealCard: View {
     }
 
     private var metaLine: String {
+        let t = Self.timeFormatter.string(from: log.eatenAt)
+        return "\(t) · \(format(log.calories)) cal"
+    }
+
+    /// Cached `DateFormatter` — see `MealRow.timeFormatter` for the same
+    /// reasoning (ICU/calendar bootstrap is expensive, rendered per row).
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = .current
         f.dateFormat = "h:mm a"
-        let t = f.string(from: log.eatenAt)
-        return "\(t) · \(format(log.calories)) cal"
-    }
+        return f
+    }()
 
     private var macrosLine: String {
         // Compact 3-macro line; protein/fat/fiber drop here so the row

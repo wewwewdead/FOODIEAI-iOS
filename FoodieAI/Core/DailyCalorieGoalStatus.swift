@@ -2,7 +2,7 @@ import Foundation
 
 /// Snapshot of where the user sits against their daily calorie goal.
 ///
-/// Centralizes the math + guards already used (ad-hoc) by `goalWarningState`
+/// Centralizes the math + guards already used (ad-hoc) by `GoalWarningState.resolve`
 /// so the scan-warning flow on Home and the end-of-day reminder on Tracker
 /// don't drift from the progress ring / macro bars.
 ///
@@ -50,7 +50,7 @@ struct DailyCalorieGoalStatus: Equatable {
             consumed: safeConsumed,
             goal: goal,
             progress: progress,
-            warningState: goalWarningState(consumed: safeConsumed, goal: goal),
+            warningState: GoalWarningState.resolve(consumed: safeConsumed, goal: goal),
             remaining: max(0, goal - safeConsumed),
             exceededBy: max(0, safeConsumed - goal),
             hasValidGoal: true

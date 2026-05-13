@@ -156,35 +156,13 @@ struct CaptureView: View {
         // source picker when today's totals are at/near the daily
         // calorie goal. "Scan anyway" arms `bypassCalorieWarningOnce`
         // so the immediate follow-up picker open isn't re-gated.
-        .confirmationDialog(
-            calorieScanWarning.map(scanWarningTitle) ?? "",
-            isPresented: Binding(
-                get: { calorieScanWarning != nil },
-                set: { presented in
-                    if !presented { calorieScanWarning = nil }
-                }
-            ),
-            titleVisibility: .visible,
-            presenting: calorieScanWarning
-        ) { kind in
-            Button("Scan anyway") {
-                calorieScanWarning = nil
+        .modifier(CalorieScanWarningModifier(
+            kind: $calorieScanWarning,
+            onScanAnyway: {
                 bypassCalorieWarningOnce = true
                 showingSourceDialog = true
             }
-            Button("View tracker") {
-                calorieScanWarning = nil
-                NotificationRouter.shared.requestTab(1)
-            }
-            Button("Cancel", role: .cancel) {
-                calorieScanWarning = nil
-            }
-            // Silence the implicit-binding warning for unused `kind`;
-            // the case is already encoded in the title.
-            let _ = kind
-        } message: { kind in
-            Text(scanWarningMessage(kind))
-        }
+        ))
         // Phase 20 — pre-fetch today's calorie status once on appear
         // so `requestScan()` can evaluate synchronously on the first
         // CTA press. The fetch is best-effort: a transient failure
@@ -231,7 +209,11 @@ struct CaptureView: View {
                         ImagePreparation.downsampledImage(from: data)
                             ?? UIImage(data: data)
                     }.value
-                    if let image {
+                    // `data` (potentially tens of MB for a 12 MP HEIC)
+                    // is released here as the enclosing `if let` falls
+                    // out of scope — only the downsampled `UIImage`
+                    // survives into setPhoto.
+                    if !Task.isCancelled, let image {
                         viewModel.setPhoto(image, source: .library)
                     }
                 }
@@ -357,29 +339,7 @@ struct CaptureView: View {
         // Phase 15 — re-log success / failure toast. Sits above the
         // bottom CTA so it's visible without overlapping the primary
         // affordance. Auto-fades after 1.6s.
-        .overlay(alignment: .bottom) {
-            if let toast = viewModel.relogToast {
-                RelogToastView(toast: toast)
-                    .padding(.bottom, 96) // clear of the pinned PrimaryButton
-                    .padding(.horizontal, AppSpacing.lg)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .task(id: toast.id) {
-                        // `try?` would swallow CancellationError but
-                        // still run the clear, so a newly-arrived toast
-                        // (id flips) would be cleared by the *prior*
-                        // task's continuation. Bail explicitly on cancel.
-                        do {
-                            try await Task.sleep(nanoseconds: 1_600_000_000)
-                        } catch {
-                            return
-                        }
-                        withAnimation(.appReveal) {
-                            viewModel.clearRelogToast()
-                        }
-                    }
-            }
-        }
-        .animation(.motionBase, value: viewModel.relogToast?.id)
+        .modifier(RelogToastModifier(viewModel: viewModel))
     }
 
     // MARK: - Top bar (wordmark + avatar)
@@ -467,33 +427,45 @@ struct CaptureView: View {
             Haptics.tap()
             requestScan()
         } label: {
-            ZStack {
-                RoundedRectangle(cornerRadius: AppRadius.xl2)
-                    .fill(Color.bgSurface)
-                    .overlay(
+            // `Color.clear.aspectRatio(1, .fit)` reserves a guaranteed
+            // 1:1 layout slot at the parent's width, INDEPENDENT of
+            // child sizes — the previous `ZStack { … }.aspectRatio(…)`
+            // pattern let a tall input UIImage push the ZStack past the
+            // proposed square because `scaledToFill` renders beyond the
+            // layout frame. Putting the ZStack inside `.overlay { … }`
+            // bounds it to the cleared square; outer `.clipped()` is the
+            // final visual safety net so nothing draws past the corners.
+            Color.clear
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    ZStack {
                         RoundedRectangle(cornerRadius: AppRadius.xl2)
-                            .strokeBorder(Color.borderHairline, lineWidth: 1)
-                    )
-                    .appShadow(.shadowCard)
+                            .fill(Color.bgSurface)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: AppRadius.xl2)
+                                    .strokeBorder(Color.borderHairline, lineWidth: 1)
+                            )
+                            .appShadow(.shadowCard)
 
-                if let image = viewModel.state.image {
-                    DelightfulImageEntry(image: image)
-                        .id(ObjectIdentifier(image))
-                    if viewModel.state.isAnalyzing {
-                        AnalyzingImageAura()
-                            .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
-                            .transition(.opacity)
-                            .allowsHitTesting(false)
+                        if let image = viewModel.state.image {
+                            DelightfulImageEntry(image: image)
+                                .id(ObjectIdentifier(image))
+                            if viewModel.state.isAnalyzing {
+                                AnalyzingImageAura()
+                                    .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
+                                    .transition(.opacity)
+                                    .allowsHitTesting(false)
+                            }
+                        } else {
+                            photoCardEmptyContent
+                                .transition(
+                                    .scale(scale: 1.06).combined(with: .opacity)
+                                )
+                        }
                     }
-                } else {
-                    photoCardEmptyContent
-                        .transition(
-                            .scale(scale: 1.06).combined(with: .opacity)
-                        )
                 }
-            }
-            .aspectRatio(1, contentMode: .fit)
-            .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
+                .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
@@ -792,16 +764,16 @@ struct CaptureView: View {
     }
 
     /// Title / body / action labels for the calorie-goal warning dialog.
-    /// Pulled into static helpers so the confirmationDialog literals
-    /// stay readable.
-    private func scanWarningTitle(_ kind: ScanWarningKind) -> String {
+    /// Static so `CalorieScanWarningModifier` can reuse them without a
+    /// view-instance reference.
+    fileprivate static func scanWarningTitle(_ kind: ScanWarningKind) -> String {
         switch kind {
         case .reached:     return "You've reached your calorie goal for today."
         case .approaching: return "You're close to your calorie goal."
         }
     }
 
-    private func scanWarningMessage(_ kind: ScanWarningKind) -> String {
+    fileprivate static func scanWarningMessage(_ kind: ScanWarningKind) -> String {
         switch kind {
         case .reached:
             return "Scanning another meal may put you further over your target."
@@ -831,6 +803,7 @@ struct CaptureView: View {
 /// `.easeInOut` repeating forever, defined in `AppAnimation.swift`).
 private struct BreathingCameraHalo: View {
     @State private var breathing: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -851,6 +824,9 @@ private struct BreathingCameraHalo: View {
                 .scaleEffect(breathing ? 0.98 : 1.0)
         }
         .onAppear {
+            // Reduce Motion: don't start the breathing loop. Halo stays
+            // at rest; the camera icon still reads as the affordance.
+            guard !reduceMotion else { return }
             withAnimation(.appBreathing) {
                 breathing = true
             }
@@ -930,24 +906,42 @@ private struct DelightfulImageEntry: View {
     let image: UIImage
     @State private var landed: Bool = false
     @State private var stamping: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Image(uiImage: image)
             .resizable()
             .scaledToFill()
+            // Without this frame cap, a tall input UIImage reports its
+            // intrinsic pixel size as its layout size and the parent
+            // photo card grows to fit, blowing past the screen. The
+            // frame forces the image to accept the parent's proposed
+            // size; `.clipped()` enforces the bounds in layout terms
+            // before the rounded-rect clip handles the visual edge.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
             .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
             .scaleEffect(scale)
-            .rotationEffect(.degrees(landed ? 0 : -6))
+            // Reduce Motion: skip the rotation tilt so the image fades in
+            // straight rather than swinging into place.
+            .rotationEffect(.degrees(reduceMotion ? 0 : (landed ? 0 : -6)))
             .opacity(landed ? 1 : 0)
             .onAppear { runEntrance() }
     }
 
     private var scale: CGFloat {
+        if reduceMotion { return 1.0 }
         if !landed { return 0.55 }
         return stamping ? 1.04 : 1.0
     }
 
     private func runEntrance() {
+        // Reduce Motion: opacity-only entrance, no bounce, no stamp, no
+        // haptic — keeps the user oriented but quiet.
+        if reduceMotion {
+            withAnimation(.appReduced) { landed = true }
+            return
+        }
         // Beat 1 — bounce in.
         withAnimation(.appBouncy) {
             landed = true
@@ -986,35 +980,58 @@ private struct DelightfulImageEntry: View {
 /// decorative only; the actual analyze state remains driven by
 /// `CaptureViewModel.State.analyzing`.
 private struct AnalyzingImageAura: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
-        TimelineView(.animation) { timeline in
-            let seconds = timeline.date.timeIntervalSinceReferenceDate
+        Group {
+            if reduceMotion {
+                // Static aura: a quiet dim + the analyzing badge. No
+                // TimelineView, no continuous redraw — the Siri-style
+                // motion is purely decorative and the analyzing state
+                // is communicated by the badge.
+                ZStack {
+                    Color.black.opacity(0.22)
+                    LinearGradient(
+                        colors: [Color.clear, Color.ink.opacity(0.34)],
+                        startPoint: .center, endPoint: .bottom
+                    )
+                    analyzingBadge
+                        .padding(AppSpacing.md)
+                        .frame(maxWidth: .infinity,
+                               maxHeight: .infinity,
+                               alignment: .bottomTrailing)
+                }
+            } else {
+                TimelineView(.animation) { timeline in
+                    let seconds = timeline.date.timeIntervalSinceReferenceDate
 
-            ZStack {
-                Color.black.opacity(0.16)
+                    ZStack {
+                        Color.black.opacity(0.16)
 
-                SiriFluidGlow(time: seconds)
-                    .blur(radius: 26)
-                    .opacity(0.82)
-                    .blendMode(.screen)
+                        SiriFluidGlow(time: seconds)
+                            .blur(radius: 26)
+                            .opacity(0.82)
+                            .blendMode(.screen)
 
-                SiriWaveRibbons(time: seconds)
-                    .blendMode(.screen)
+                        SiriWaveRibbons(time: seconds)
+                            .blendMode(.screen)
 
-                LinearGradient(
-                    colors: [
-                        Color.clear,
-                        Color.ink.opacity(0.34)
-                    ],
-                    startPoint: .center,
-                    endPoint: .bottom
-                )
+                        LinearGradient(
+                            colors: [
+                                Color.clear,
+                                Color.ink.opacity(0.34)
+                            ],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
 
-                analyzingBadge
-                    .padding(AppSpacing.md)
-                    .frame(maxWidth: .infinity,
-                           maxHeight: .infinity,
-                           alignment: .bottomTrailing)
+                        analyzingBadge
+                            .padding(AppSpacing.md)
+                            .frame(maxWidth: .infinity,
+                                   maxHeight: .infinity,
+                                   alignment: .bottomTrailing)
+                    }
+                }
             }
         }
         .accessibilityHidden(true)
@@ -1039,20 +1056,26 @@ private struct AnalyzingImageAura: View {
 private struct AnalyzingDot: View {
     let delay: Double
     @State private var isLifted = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Circle()
             .fill(Color.white)
             .frame(width: 6, height: 6)
-            .scaleEffect(isLifted ? 1.35 : 0.75)
-            .opacity(isLifted ? 1 : 0.48)
+            .scaleEffect(reduceMotion ? 1.0 : (isLifted ? 1.35 : 0.75))
+            .opacity(reduceMotion ? 0.85 : (isLifted ? 1 : 0.48))
             .animation(
-                .easeInOut(duration: 0.62)
-                    .repeatForever(autoreverses: true)
-                    .delay(delay),
+                reduceMotion
+                    ? nil
+                    : .easeInOut(duration: 0.62)
+                        .repeatForever(autoreverses: true)
+                        .delay(delay),
                 value: isLifted
             )
-            .onAppear { isLifted = true }
+            .onAppear {
+                guard !reduceMotion else { return }
+                isLifted = true
+            }
     }
 }
 
@@ -1312,6 +1335,76 @@ private struct FailedView: View {
 /// inline `.sheet`: presents whenever `state == .clarifying(...)`,
 /// dismissal routes through `acceptOriginalAnalysis` so the user is
 /// never stuck with no usable analysis after closing.
+/// Phase 20 calorie-goal scan warning, lifted out of CaptureView's main
+/// modifier chain so the type-checker doesn't have to thread three more
+/// closures + a presenting-binding through the rest of the body.
+private struct CalorieScanWarningModifier: ViewModifier {
+    @Binding var kind: CaptureView.ScanWarningKind?
+    let onScanAnyway: () -> Void
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            kind.map(CaptureView.scanWarningTitle) ?? "",
+            isPresented: Binding(
+                get: { kind != nil },
+                set: { presented in
+                    if !presented { kind = nil }
+                }
+            ),
+            titleVisibility: .visible,
+            presenting: kind
+        ) { _ in
+            Button("Scan anyway") {
+                kind = nil
+                onScanAnyway()
+            }
+            Button("View tracker") {
+                kind = nil
+                NotificationRouter.shared.requestTab(1)
+            }
+            Button("Cancel", role: .cancel) {
+                kind = nil
+            }
+        } message: { kind in
+            Text(CaptureView.scanWarningMessage(kind))
+        }
+    }
+}
+
+/// Phase 15 re-log toast overlay + auto-fade Task, extracted so the
+/// trailing `.overlay { … }` + `.animation` modifiers no longer count
+/// against CaptureView's main expression complexity budget.
+private struct RelogToastModifier: ViewModifier {
+    @ObservedObject var viewModel: CaptureViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottom) {
+                if let toast = viewModel.relogToast {
+                    RelogToastView(toast: toast)
+                        .padding(.bottom, 96) // clear of the pinned PrimaryButton
+                        .padding(.horizontal, AppSpacing.lg)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .task(id: toast.id) {
+                            // `try?` would swallow CancellationError but
+                            // still run the clear, so a newly-arrived toast
+                            // (id flips) would be cleared by the *prior*
+                            // task's continuation. Bail explicitly on cancel.
+                            do {
+                                try await Task.sleep(nanoseconds: 1_600_000_000)
+                            } catch {
+                                return
+                            }
+                            withAnimation(.appReveal) {
+                                viewModel.clearRelogToast()
+                            }
+                        }
+                }
+            }
+            .animation(.motionBase, value: viewModel.relogToast?.id)
+    }
+}
+
 private struct ClarificationSheetModifier: ViewModifier {
     @ObservedObject var viewModel: CaptureViewModel
 

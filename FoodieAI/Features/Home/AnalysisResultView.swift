@@ -36,6 +36,12 @@ struct AnalysisResultView: View {
     let onCancel: () -> Void
 
     @State private var showingAllMacros: Bool = false
+    /// Cascade reveal — set true on appear so the detected title and
+    /// macro chips fade up in sequence after the photo card lands. Driven
+    /// by a single state flag (not a per-element Task) so SwiftUI handles
+    /// the timeline via per-modifier `.delay()`; nothing to cancel.
+    @State private var cascadeOn: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Phase 15 — repeat detection. Populated by a non-blocking
     /// `MealHistoryService.priorOccurrences(of:)` query in `.task`.
@@ -75,8 +81,17 @@ struct AnalysisResultView: View {
             eyebrowHeader
             photoCard
             detectedBlock
+                .opacity(cascadeOn ? 1 : 0)
+                .offset(y: cascadeOn ? 0 : 10)
+                .animation(cascadeAnim(delay: 0.15), value: cascadeOn)
             heroBlock
+                .opacity(cascadeOn ? 1 : 0)
+                .offset(y: cascadeOn ? 0 : 10)
+                .animation(cascadeAnim(delay: 0.25), value: cascadeOn)
             macroChipsRow
+                .opacity(cascadeOn ? 1 : 0)
+                .offset(y: cascadeOn ? 0 : 8)
+                .animation(cascadeAnim(delay: 0.35), value: cascadeOn)
 
             // Scroll anchor: CaptureView scrolls to this point when the
             // /analyze request returns, so the typewriter cascade fills
@@ -90,9 +105,24 @@ struct AnalysisResultView: View {
             saveBlock
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            // Idempotent: only flips on once, so re-renders (e.g. the
+            // typewriter ticking) don't re-fire the cascade.
+            guard !cascadeOn else { return }
+            cascadeOn = true
+        }
         .task(id: analysis.food ?? "") {
             await loadPriorOccurrences()
         }
+    }
+
+    /// Cascade reveal curve: the existing `.motionReveal` spring with a
+    /// per-section delay so detected title → calories → macro chips land
+    /// one after the other. Reduce Motion swaps to a flat fade.
+    private func cascadeAnim(delay: Double) -> Animation {
+        reduceMotion
+            ? .appReduced
+            : .motionReveal.delay(delay)
     }
 
     // MARK: - Phase 15 — repeat detection
@@ -109,6 +139,11 @@ struct AnalysisResultView: View {
                 self.priorCount = priors.count
                 self.lastPriorDate = priors.first?.eatenAt
             }
+        } catch is CancellationError {
+            // SwiftUI cancelled `.task` (food name changed, view torn
+            // down). Don't paint a fake "no priors" state — the next
+            // task run will repopulate it.
+            return
         } catch {
             #if DEBUG
             NSLog("[Repeat] priorOccurrences failed: %@", "\(error)")

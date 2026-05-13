@@ -91,4 +91,37 @@ extension Animation {
     /// photo placeholder breathing, primary-button gentle attention pulse.
     /// 2.4s period autoreversing easeInOut.
     static let appBreathing: Animation = .easeInOut(duration: 2.4).repeatForever(autoreverses: true)
+
+    /// Cross-screen `matchedGeometryEffect` morphs (e.g., the onboarding
+    /// primary CTA morphing from "Get started" on the hero to "Continue"
+    /// on the archetype screen). Slightly slower than `.appEntrance` and
+    /// nearly critically damped so the moving element reads as "fluid"
+    /// — it travels, doesn't bounce.
+    static let appMorph: Animation = .spring(response: 0.62, dampingFraction: 0.88)
+
+    // MARK: - Reduce Motion
+
+    /// Calm replacement curve used when the system Reduce Motion accessibility
+    /// flag is enabled. Opacity-only fades, no springs, no overshoot. Picked
+    /// to be short enough that the UI still acknowledges state changes but
+    /// short of anything that would feel like "motion."
+    static let appReduced: Animation = .easeInOut(duration: 0.18)
+
+    /// Picks `full` or a calmer variant based on Reduce Motion. Pass `nil`
+    /// for `reduced` to fall back to `.appReduced` (the default opacity-only
+    /// curve) — useful when the call site doesn't have a specific quieter
+    /// curve in mind. Pass `.none` (i.e. `Optional<Animation>.some(nil)` via
+    /// the `noneIfReduced` variant) to disable animation entirely.
+    static func appMotion(_ full: Animation, reduceMotion: Bool,
+                          reduced: Animation? = nil) -> Animation {
+        guard reduceMotion else { return full }
+        return reduced ?? .appReduced
+    }
+
+    /// Same as `appMotion` but returns `nil` (no animation) under Reduce
+    /// Motion. Use with `.animation(Animation.appMotionOrNone(.appBouncy, ...), value: …)`
+    /// when even a fade would feel extra — e.g., ambient breathing loops.
+    static func appMotionOrNone(_ full: Animation, reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : full
+    }
 }

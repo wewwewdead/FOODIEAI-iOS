@@ -9,19 +9,19 @@ enum GoalWarningState: Equatable {
     case safe
     case approaching
     case reached
-}
 
-/// progress = consumed / goal, with goal-0 / negative-input / NaN
-/// guarded. Thresholds (per spec):
-///   safe:        progress < 0.80
-///   approaching: 0.80 ≤ progress < 1.00
-///   reached:     progress ≥ 1.00
-func goalWarningState(consumed: Double, goal: Double) -> GoalWarningState {
-    guard goal > 0, consumed.isFinite, goal.isFinite else { return .safe }
-    let p = max(consumed, 0) / goal
-    if p >= 1.0 { return .reached }
-    if p >= 0.80 { return .approaching }
-    return .safe
+    /// progress = consumed / goal, with goal-0 / negative-input / NaN
+    /// guarded. Thresholds (per spec):
+    ///   safe:        progress < 0.80
+    ///   approaching: 0.80 ≤ progress < 1.00
+    ///   reached:     progress ≥ 1.00
+    static func resolve(consumed: Double, goal: Double) -> GoalWarningState {
+        guard goal > 0, consumed.isFinite, goal.isFinite else { return .safe }
+        let p = max(consumed, 0) / goal
+        if p >= 1.0 { return .reached }
+        if p >= 0.80 { return .approaching }
+        return .safe
+    }
 }
 
 /// Phase 14: a single macro row on Tracker.
@@ -51,6 +51,12 @@ struct MacroProgressBar: View {
     let tint: Color
 
     @State private var fillProgress: Double = 0
+    /// One-shot reached pulse: scales the fill bar's tint up briefly when
+    /// the goal first crosses into `.reached`. Latched so refreshes that
+    /// remain in `.reached` don't replay it.
+    @State private var didFlashReached: Bool = false
+    @State private var reachedPulse: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var clampedProgress: Double {
         guard goal > 0 else { return 0 }
@@ -58,7 +64,7 @@ struct MacroProgressBar: View {
     }
 
     private var warningState: GoalWarningState {
-        goalWarningState(consumed: value, goal: goal)
+        GoalWarningState.resolve(consumed: value, goal: goal)
     }
 
     /// Safe → existing tint. Approaching → `.error` blended over the
@@ -113,6 +119,7 @@ struct MacroProgressBar: View {
                         .fill(fillColor)
                         .frame(width: max(0, geo.size.width * fillProgress),
                                height: 6)
+                        .scaleEffect(y: reachedPulse ? 1.55 : 1.0, anchor: .center)
                         .animation(.easeInOut(duration: 0.2),
                                    value: warningState)
                 }
@@ -135,13 +142,36 @@ struct MacroProgressBar: View {
         )
         .onAppear {
             // Phase 14 delight: bar visibly overshoots before settling.
-            withAnimation(.appBouncy.delay(0.05)) {
+            // Reduce Motion swaps the bouncy spring for a calm ease so the
+            // fill still animates from 0 → target (the user needs the
+            // visual delta to read the value), just without the overshoot.
+            let curve: Animation = reduceMotion
+                ? .appReduced
+                : .appBouncy.delay(0.05)
+            withAnimation(curve) {
                 fillProgress = clampedProgress
             }
+            // Latch reached-on-first-paint so we don't fire the pulse for
+            // a goal that was already met when the screen appeared — only
+            // celebrate the *transition* into reached, not the steady state.
+            if warningState == .reached { didFlashReached = true }
         }
         .onChange(of: clampedProgress) { _, new in
-            withAnimation(.appBouncy) {
+            withAnimation(reduceMotion ? .appReduced : .appBouncy) {
                 fillProgress = new
+            }
+        }
+        .onChange(of: warningState) { _, state in
+            // Single-shot pulse when the goal flips into reached. Skipped
+            // entirely under Reduce Motion.
+            guard !reduceMotion,
+                  state == .reached,
+                  !didFlashReached else { return }
+            didFlashReached = true
+            Task { @MainActor in
+                withAnimation(.appStamp) { reachedPulse = true }
+                try? await Task.sleep(nanoseconds: 220_000_000)
+                withAnimation(.appPress) { reachedPulse = false }
             }
         }
     }

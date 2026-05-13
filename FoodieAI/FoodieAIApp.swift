@@ -286,6 +286,7 @@ struct LaunchView: View {
     /// Drives the continuous breath. Started shortly after the
     /// entrance settles so the two motions don't fight.
     @State private var breathing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// FoodieLogo is now a vector SVG (with Preserve Vector Data on),
     /// so scaling during the breath animation rasterizes crisply at
@@ -302,6 +303,9 @@ struct LaunchView: View {
             withAnimation(.interpolatingSpring(stiffness: 180, damping: 14)) {
                 hasEntered = true
             }
+            // Reduce Motion: hold the breathing loop. The entrance still
+            // fires (the logo needs to land) but we don't pulse forever.
+            guard !reduceMotion else { return }
             Task {
                 // Let the entrance settle (~250ms feels right with the
                 // spring above) before kicking off the breathing loop.

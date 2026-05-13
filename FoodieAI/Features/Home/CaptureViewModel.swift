@@ -99,6 +99,13 @@ final class CaptureViewModel: ObservableObject {
         }
     }
 
+    /// Phase 18 — auto-transition `.saved → .moodPulse` is a delayed
+    /// task. Stored so we can cancel it if the user resets/discards/
+    /// records-a-mood/skips before the 1.2s sleep fires, instead of
+    /// letting the late wake-up race against a state that has already
+    /// moved on.
+    private var moodPulseTask: Task<Void, Never>?
+
     private let analyzer: AnalyzeService
     private let imageService: FoodImageService
     private let logService: FoodLogService
@@ -152,6 +159,11 @@ final class CaptureViewModel: ObservableObject {
         let jpeg = await Task.detached(priority: .userInitiated) {
             ImagePreparation.compressMain(image)
         }.value
+
+        // If the user discarded / reset while compression was running,
+        // we're no longer in `.analyzing`. Don't overwrite the fresh
+        // state (`.idle` / `.picked`) with a stale `.failed` / `.ready`.
+        guard case .analyzing = state, !Task.isCancelled else { return }
 
         guard let jpeg else {
             state = .failed(image, .imageTooLarge)
@@ -300,6 +312,12 @@ final class CaptureViewModel: ObservableObject {
         let jpeg = await Task.detached(priority: .userInitiated) {
             ImagePreparation.compressMain(image)
         }.value
+
+        // Same guard as `analyze()`: if state has moved away from the
+        // re-analyzing window while compression was running, do not
+        // stomp it.
+        guard case .analyzing = state, !Task.isCancelled else { return }
+
         guard let jpeg else {
             #if DEBUG
             NSLog("[Clarify] compression FAILED; falling back to original response")
@@ -382,6 +400,11 @@ final class CaptureViewModel: ObservableObject {
         }
         let mainData  = await mainTask.value
         let thumbData = await thumbTask.value
+
+        // User discarded mid-save; don't paint `.saveFailed` over the
+        // already-cleared state.
+        guard case .saving = state, !Task.isCancelled else { return }
+
         guard let mainData, let thumbData else {
             state = .saveFailed(image, response, SaveError.imagePreparationFailed)
             return
@@ -500,6 +523,8 @@ final class CaptureViewModel: ObservableObject {
     /// logged in DEBUG.
     func recordMood(_ mood: FoodLog.Mood) async {
         guard case .moodPulse(_, _, let log) = state else { return }
+        moodPulseTask?.cancel()
+        moodPulseTask = nil
         state = .idle
         do {
             _ = try await logService.setMood(mood, on: log.id)
@@ -517,7 +542,11 @@ final class CaptureViewModel: ObservableObject {
 
     /// User tapped Skip or drag-dismissed the pulse — no DB write.
     func skipMoodPulse() {
-        if case .moodPulse = state { state = .idle }
+        if case .moodPulse = state {
+            moodPulseTask?.cancel()
+            moodPulseTask = nil
+            state = .idle
+        }
     }
 
     /// Phase 18 — the user backgrounded the app while the mood pulse
@@ -531,6 +560,8 @@ final class CaptureViewModel: ObservableObject {
             #if DEBUG
             NSLog("[Mood] pulse cancelled by background")
             #endif
+            moodPulseTask?.cancel()
+            moodPulseTask = nil
             state = .idle
         default:
             break
@@ -542,8 +573,13 @@ final class CaptureViewModel: ObservableObject {
     /// sheet themselves (state already moved to `.moodPulse` or further)
     /// or backgrounding before the timer fires (`.idle`). Idempotent.
     private func scheduleMoodPulseTransition(for logId: UUID) {
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 1200)
+        moodPulseTask?.cancel()
+        moodPulseTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 1200)
+            } catch {
+                return
+            }
             guard let self else { return }
             // Only fire if we're still showing the saved state for the
             // same row — any other state means the user (or background
@@ -558,13 +594,21 @@ final class CaptureViewModel: ObservableObject {
     /// the dashed drop zone shows the empty state again and the picker
     /// can be re-presented from there.
     func resetToPick() {
+        moodPulseTask?.cancel()
+        moodPulseTask = nil
         state = .idle
     }
 
     /// Same as `resetToPick` for now; preserved as a separate entry point
     /// in case the design diverges (e.g. cancel-without-resetting).
     func discardCurrent() {
+        moodPulseTask?.cancel()
+        moodPulseTask = nil
         state = .idle
+    }
+
+    deinit {
+        moodPulseTask?.cancel()
     }
 
     // MARK: - Phase 15: Quick re-log

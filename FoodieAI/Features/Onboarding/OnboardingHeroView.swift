@@ -16,6 +16,16 @@ import SwiftUI
 struct OnboardingHeroView: View {
     @EnvironmentObject private var auth: AuthService
     @ObservedObject var vm: OnboardingViewModel
+    /// Shared CTA namespace from `OnboardingFlow`. When the user advances
+    /// from hero → archetype the "Get started" pill matched-geometry
+    /// morphs into the "Continue" pill on the next screen. Optional so
+    /// previews still build with a stand-alone namespace.
+    var ctaNamespace: Namespace.ID? = nil
+
+    /// Stable id used by both this view's primary CTA and
+    /// `OnboardingArchetypeView`'s Continue button. One per logical
+    /// button — adding a second match here would tear the morph.
+    static let ctaMatchedID = "onboardingPrimaryCTA"
 
     var body: some View {
         GeometryReader { proxy in
@@ -67,6 +77,7 @@ struct OnboardingHeroView: View {
                               leadingSystemImage: "sparkles") {
                     vm.startFromHero(isSignedIn: auth.isSignedIn)
                 }
+                .matchedCTA(Self.ctaMatchedID, in: ctaNamespace)
 
                 if !auth.isSignedIn {
                     Button {
@@ -92,6 +103,22 @@ struct OnboardingHeroView: View {
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.xl)
         .padding(.bottom, AppSpacing.xl2)
+    }
+}
+
+// MARK: - Matched-CTA helper
+
+/// Applies `matchedGeometryEffect` only when a namespace is provided.
+/// Optional so previews and any non-flow caller can drop the
+/// `ctaNamespace` arg without restructuring the call site.
+extension View {
+    @ViewBuilder
+    func matchedCTA(_ id: String, in namespace: Namespace.ID?) -> some View {
+        if let namespace {
+            self.matchedGeometryEffect(id: id, in: namespace)
+        } else {
+            self
+        }
     }
 }
 

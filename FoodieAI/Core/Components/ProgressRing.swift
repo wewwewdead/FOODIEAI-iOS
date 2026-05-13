@@ -20,6 +20,13 @@ struct ProgressRing: View {
     var ringRadius: CGFloat = 92
 
     @State private var arcProgress: Double = 0
+    @State private var didFlashReached: Bool = false
+    @State private var reachedPulse: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var warningState: GoalWarningState {
+        GoalWarningState.resolve(consumed: value, goal: goal)
+    }
 
     private var rawProgress: Double {
         guard goal > 0 else { return 0 }
@@ -101,6 +108,7 @@ struct ProgressRing: View {
                 )
             }
             .frame(width: diameter, height: diameter)
+            .scaleEffect(reachedPulse ? 1.035 : 1.0)
             .appShadow(.shadowFloating)
 
             VStack(spacing: 2) {
@@ -124,24 +132,48 @@ struct ProgressRing: View {
         .onAppear {
             // Phase 14 delight: bouncy fill so the arc visibly overshoots
             // its target before settling — feels alive, not just a value.
-            withAnimation(.appBouncy.delay(0.1)) {
+            // Reduce Motion keeps the count-up (the user needs to see the
+            // arc grow to read the value) but swaps the overshoot for a
+            // calm ease.
+            let curve: Animation = reduceMotion ? .appReduced : .appBouncy.delay(0.1)
+            withAnimation(curve) {
                 arcProgress = clampedProgress
             }
+            if warningState == .reached { didFlashReached = true }
         }
         .onChange(of: clampedProgress) { _, new in
-            withAnimation(.appBouncy) {
+            withAnimation(reduceMotion ? .appReduced : .appBouncy) {
                 arcProgress = new
+            }
+        }
+        .onChange(of: warningState) { _, state in
+            // Single-shot scale pulse the first time we enter `.reached`.
+            // Skipped under Reduce Motion and skipped if reached on first
+            // paint (e.g. revisiting a day already at goal).
+            guard !reduceMotion,
+                  state == .reached,
+                  !didFlashReached else { return }
+            didFlashReached = true
+            Task { @MainActor in
+                withAnimation(.appStamp) { reachedPulse = true }
+                try? await Task.sleep(nanoseconds: 260_000_000)
+                withAnimation(.appPress) { reachedPulse = false }
             }
         }
     }
 
     /// Tabular-style integer formatter with thousands separator: 1247 → "1,247".
-    private static func kFormatter(_ v: Double) -> String {
-        if v.isNaN || v.isInfinite { return "—" }
+    private static let numberFormatter: NumberFormatter = {
         let f = NumberFormatter()
         f.numberStyle = .decimal
         f.maximumFractionDigits = 0
-        return f.string(from: NSNumber(value: v.rounded())) ?? "\(Int(v.rounded()))"
+        return f
+    }()
+
+    private static func kFormatter(_ v: Double) -> String {
+        guard v.isFinite else { return "—" }
+        return numberFormatter.string(from: NSNumber(value: v.rounded()))
+            ?? "\(Int(v.rounded()))"
     }
 }
 

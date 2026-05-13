@@ -31,6 +31,8 @@ struct ConfettiBurst: View {
     /// Default 130 fits inside a 280pt-wide focal area on iPhone.
     var spread: CGFloat = 130
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private let particles: [Particle]
 
     init(active: Bool, count: Int = 22, spread: CGFloat = 130) {
@@ -42,18 +44,23 @@ struct ConfettiBurst: View {
 
     var body: some View {
         ZStack {
-            ForEach(particles) { p in
-                particleShape(p)
-                    .frame(width: p.size, height: p.size * p.aspect)
-                    .foregroundStyle(p.color)
-                    .rotationEffect(active ? p.endRotation : .degrees(0))
-                    .offset(active ? p.offset : .zero)
-                    .opacity(active ? 0 : 1)
-                    .animation(
-                        .spring(response: 1.0, dampingFraction: 0.85)
-                            .delay(p.delay),
-                        value: active
-                    )
+            // Reduce Motion suppresses the burst entirely — celebration is
+            // delivered by the checkmark stamp + haptic instead. Returning
+            // an empty ZStack keeps the parent layout untouched.
+            if !reduceMotion {
+                ForEach(particles) { p in
+                    particleShape(p)
+                        .frame(width: p.size, height: p.size * p.aspect)
+                        .foregroundStyle(p.color)
+                        .rotationEffect(active ? p.endRotation : .degrees(0))
+                        .offset(active ? p.offset : .zero)
+                        .opacity(active ? 0 : 1)
+                        .animation(
+                            .spring(response: 1.0, dampingFraction: 0.85)
+                                .delay(p.delay),
+                            value: active
+                        )
+                }
             }
         }
         .allowsHitTesting(false)

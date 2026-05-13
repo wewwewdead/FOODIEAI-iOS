@@ -30,12 +30,40 @@ final class CalorieReminderService {
     static let inAppReminderStartHour: Int = 22
     static let inAppReminderEndHour:   Int = 24 // exclusive upper bound
 
+    /// Coalescing state for the fetch-based `recompute()`. Foreground,
+    /// save-success, delete, and profile-goal changes can each fire an
+    /// overlapping recompute within milliseconds of each other. Rather
+    /// than dropping the duplicate (which would let stale totals win —
+    /// e.g. foreground-recompute starts, user saves a meal, save-success
+    /// recompute is dropped, and the original foreground decision based
+    /// on pre-save totals is what lands), we *coalesce*: only one fetch
+    /// runs at a time, but if any new call arrives during the await, the
+    /// active recompute loops once more with fresh data before returning.
+    private var isFetchRecomputing = false
+    private var needsAnotherFetch = false
+
+    /// Monotonic generation counter. Every recompute call (fetch or
+    /// direct-data) bumps this, and an in-flight fetch only applies its
+    /// decision if the generation it claimed is still current. Prevents
+    /// the classic stale-async race: an older fetch finishes *after* a
+    /// newer direct-data call and overwrites the fresh decision with
+    /// stale totals.
+    private var latestGeneration: UInt64 = 0
+
     init(logService: FoodLogService = FoodLogService(),
          profileService: ProfileService = ProfileService(),
          scheduler: NotificationScheduler? = nil) {
         self.logService = logService
         self.profileService = profileService
         self.scheduler = scheduler ?? .shared
+    }
+
+    /// Bump and return the new generation. Called from both recompute
+    /// entry points and once per coalesced fetch pass. `&+=` so we never
+    /// trap on overflow in the (astronomically unlikely) 2^64th call.
+    private func nextGeneration() -> UInt64 {
+        latestGeneration &+= 1
+        return latestGeneration
     }
 
     // MARK: - Decision helpers (pure)
@@ -90,10 +118,86 @@ final class CalorieReminderService {
     ///
     /// All callers are fire-and-forget — any failure resolves to "leave
     /// whatever the scheduler had alone."
+    ///
+    /// Concurrency model: only one fetch runs at a time. If another call
+    /// arrives mid-fetch (foreground + save-success arriving back-to-back
+    /// is the common case), we set `needsAnotherFetch` and the active
+    /// loop performs one more pass with fresh data before returning. This
+    /// guarantees the freshest event lands in the final decision, while
+    /// avoiding duplicate concurrent network round-trips.
     func recompute(now: Date = Date(),
                    timeZone: TimeZone = .current) async {
-        let status = await currentStatus(now: now, timeZone: timeZone)
+        if isFetchRecomputing {
+            needsAnotherFetch = true
+            #if DEBUG
+            NSLog("[CalorieReminder] recompute coalesced — re-run queued")
+            #endif
+            return
+        }
 
+        isFetchRecomputing = true
+        defer { isFetchRecomputing = false }
+
+        repeat {
+            needsAnotherFetch = false
+            let generation = nextGeneration()
+            let status = await currentStatus(now: now, timeZone: timeZone)
+
+            // Stale-result guard: if a `recompute(consumed:goal:)` call
+            // bumped the generation while we were fetching, its decision
+            // is authoritative (caller had fresher data than we do).
+            // Skip applying our stale fetch — but still honour
+            // `needsAnotherFetch` so a queued plain recompute() runs.
+            guard generation == latestGeneration else {
+                #if DEBUG
+                NSLog("[CalorieReminder] dropping stale fetch (gen=%llu latest=%llu)",
+                      generation, latestGeneration)
+                #endif
+                continue
+            }
+
+            await applyReminderDecision(
+                status: status, now: now, timeZone: timeZone
+            )
+        } while needsAnotherFetch
+    }
+
+    /// Bypass the data fetch when the caller already has fresh totals on
+    /// hand (e.g. TrackerViewModel just finished a refresh). Skips one
+    /// round-trip per save/delete cycle.
+    ///
+    /// Never gated by the fetch coalescing — the caller's data is, by
+    /// definition, fresher than anything an in-flight fetch could
+    /// produce. Bumps the generation so any concurrent fetch's stale
+    /// result is discarded rather than overwriting this decision.
+    func recompute(consumed: Double,
+                   goal: Double,
+                   now: Date = Date(),
+                   timeZone: TimeZone = .current) async {
+        _ = nextGeneration()
+        let status = DailyCalorieGoalStatus.compute(consumed: consumed, goal: goal)
+        #if DEBUG
+        NSLog("[CalorieReminder] direct-data apply gen=%llu state=%@ consumed=%.0f goal=%.0f",
+              latestGeneration, "\(status.warningState)", status.consumed, status.goal)
+        #endif
+        await applyReminderDecision(
+            status: status, now: now, timeZone: timeZone
+        )
+    }
+
+    // MARK: - Shared decision
+
+    /// Single place where `DailyCalorieGoalStatus` becomes a
+    /// schedule/cancel call. Kept private so both recompute paths funnel
+    /// through identical logic — keeps the fetch and direct-data paths
+    /// from drifting.
+    ///
+    /// `scheduleUnderCalorieReminder` already removes any prior pending
+    /// request with the same identifier before adding a new one, so
+    /// repeated apply calls never spawn duplicates.
+    private func applyReminderDecision(status: DailyCalorieGoalStatus,
+                                       now: Date,
+                                       timeZone: TimeZone) async {
         guard status.hasValidGoal else {
             // No goal → can't reason about "under"; cancel any stale
             // pending notification so we don't ship the user a number
@@ -110,29 +214,6 @@ final class CalorieReminderService {
         }
 
         // Under goal → schedule (one-shot for the next 22:00).
-        await scheduler.scheduleUnderCalorieReminder(
-            remaining: status.remaining,
-            now: now,
-            timeZone: timeZone
-        )
-    }
-
-    /// Bypass the data fetch when the caller already has fresh totals on
-    /// hand (e.g. TrackerViewModel just finished a refresh). Skips one
-    /// round-trip per save/delete cycle.
-    func recompute(consumed: Double,
-                   goal: Double,
-                   now: Date = Date(),
-                   timeZone: TimeZone = .current) async {
-        let status = DailyCalorieGoalStatus.compute(consumed: consumed, goal: goal)
-        guard status.hasValidGoal else {
-            scheduler.cancelUnderCalorieReminder()
-            return
-        }
-        guard status.warningState != .reached else {
-            scheduler.cancelUnderCalorieReminder()
-            return
-        }
         await scheduler.scheduleUnderCalorieReminder(
             remaining: status.remaining,
             now: now,

@@ -11,6 +11,9 @@ import SwiftUI
 ///     separate "Skip this" link — the buttons are the resolutions.
 struct OnboardingNotificationStepView: View {
     @ObservedObject var vm: OnboardingViewModel
+    /// Shared CTA namespace from `OnboardingFlow`. The primary pill
+    /// morphs in from the coaches step into "Yes, send nudges" here.
+    var ctaNamespace: Namespace.ID? = nil
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -75,6 +78,7 @@ struct OnboardingNotificationStepView: View {
                 vm.notificationsAccepted = true
                 vm.advance()
             }
+            .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
 
             Button {
                 Haptics.tap()

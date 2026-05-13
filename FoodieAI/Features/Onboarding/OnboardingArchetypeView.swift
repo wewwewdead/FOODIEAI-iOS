@@ -13,6 +13,11 @@ import SwiftUI
 /// blocked.
 struct OnboardingArchetypeView: View {
     @ObservedObject var vm: OnboardingViewModel
+    /// Shared CTA namespace from `OnboardingFlow`. Receives the matched
+    /// geometry from the hero's "Get started" button so the pill morphs
+    /// from its hero-position into the floating Continue stack. Optional
+    /// so previews still build.
+    var ctaNamespace: Namespace.ID? = nil
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -26,7 +31,11 @@ struct OnboardingArchetypeView: View {
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.top, AppSpacing.xl3)
-                .padding(.bottom, AppSpacing.lg)
+                // Reserve clearance for the floating Continue + Skip stack
+                // pinned at the bottom (60pt button + ~36pt skip + spacing
+                // + safe-area), otherwise the last option ("Just curious")
+                // sits under the CTA on short or wide-aspect screens.
+                .padding(.bottom, 160)
             }
 
             BackChevron(action: { Haptics.tap(); vm.back() })
@@ -36,6 +45,7 @@ struct OnboardingArchetypeView: View {
                               isDisabled: vm.archetype == nil) {
                     vm.advance()
                 }
+                .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
                 Button {
                     Haptics.tap()
                     vm.skipArchetype()

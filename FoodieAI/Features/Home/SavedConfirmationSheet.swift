@@ -27,6 +27,7 @@ struct SavedConfirmationSheet: View {
     @State private var buttonVisible: Bool = false
     /// Phase 14 delight: confetti burst fires as the checkmark lands.
     @State private var confettiActive: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -86,6 +87,24 @@ struct SavedConfirmationSheet: View {
     }
 
     private func runEntrance() async {
+        if reduceMotion {
+            // Quiet path: opacity-only fade, no overshoot, no radial
+            // burst, no confetti. Haptic still fires so the user has
+            // tactile confirmation; title and button reveal together
+            // so the user can act immediately.
+            withAnimation(.appReduced) {
+                checkmarkScale = 1
+                checkmarkOpacity = 1
+                burstScale = 1.0
+                burstOpacity = 0
+                titleVisible = true
+                buttonVisible = true
+            }
+            try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 120)
+            Haptics.success()
+            return
+        }
+
         try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 80)
 
         // Checkmark scale-pop and opacity-fade in the same frame so the

@@ -12,6 +12,9 @@ import SwiftUI
 ///     answer); "Skip this" leaves coaches empty and advances.
 struct OnboardingCoachStepView: View {
     @ObservedObject var vm: OnboardingViewModel
+    /// Shared CTA namespace from `OnboardingFlow` so the primary pill
+    /// morphs in/out of this step alongside the rest of onboarding.
+    var ctaNamespace: Namespace.ID? = nil
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -36,6 +39,7 @@ struct OnboardingCoachStepView: View {
                               : "Continue (\(vm.preferredCoaches.count) starred)") {
                     vm.advance()
                 }
+                .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
                 Button {
                     Haptics.tap()
                     vm.advance()

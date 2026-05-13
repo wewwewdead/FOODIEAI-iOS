@@ -264,12 +264,19 @@ struct MealRow: View {
     // MARK: - Meta line
 
     private var metaLine: String {
-        let timeFmt = DateFormatter()
-        timeFmt.locale = .current
-        timeFmt.dateFormat = "h:mm a"
-        let time = timeFmt.string(from: log.eatenAt)
+        let time = Self.timeFormatter.string(from: log.eatenAt)
         return "\(time) • \(format(log.calories)) cal • \(format(log.sugarG))g sugar • \(format(log.carbsG))g carbs"
     }
+
+    /// Cached — `DateFormatter` allocation is expensive (CFCalendar +
+    /// ICU bootstrap) and this row renders inside the Tracker scroll
+    /// view, so a fresh allocation per row is pure waste.
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = "h:mm a"
+        return f
+    }()
 
     private func format(_ v: Double) -> String {
         if v == v.rounded() { return "\(Int(v))" }

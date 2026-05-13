@@ -22,6 +22,10 @@ import SwiftUI
 /// earlier answer without losing context.
 struct OnboardingPhysiologyStepView: View {
     @ObservedObject var vm: OnboardingViewModel
+    /// Shared CTA namespace from `OnboardingFlow`. Same id chains the
+    /// morph through every onboarding step — and through this view's
+    /// own intro → form → preview phase transitions.
+    var ctaNamespace: Namespace.ID? = nil
 
     private enum Phase: Equatable {
         case intro
@@ -55,7 +59,10 @@ struct OnboardingPhysiologyStepView: View {
 
             BackChevron(action: backTapped)
         }
-        .animation(.appEntrance, value: phaseKey)
+        // Same `.appMorph` curve as the cross-screen flow so the
+        // intro → form → preview pill morph reads as one continuous
+        // animation language with the parent step transitions.
+        .animation(.appMorph, value: phaseKey)
         .onAppear(perform: hydrateFromVM)
     }
 
@@ -79,6 +86,7 @@ struct OnboardingPhysiologyStepView: View {
                                   leadingSystemImage: "slider.horizontal.3") {
                         phase = .form
                     }
+                    .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
                     Button {
                         Haptics.tap()
                         // Leave vm.physiology nil; archetype defaults remain.
@@ -281,6 +289,7 @@ struct OnboardingPhysiologyStepView: View {
                       isDisabled: !isFormValid) {
             calculateAndShowPreview()
         }
+        .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
     }
 
     // MARK: - Preview
@@ -337,6 +346,7 @@ struct OnboardingPhysiologyStepView: View {
                     PrimaryButton(title: "Use these targets") {
                         persistAndAdvance()
                     }
+                    .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
                     Button {
                         Haptics.tap()
                         phase = .form

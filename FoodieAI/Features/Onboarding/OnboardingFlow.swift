@@ -17,6 +17,10 @@ struct OnboardingFlow: View {
     @EnvironmentObject private var auth: AuthService
     @EnvironmentObject private var profileStore: ProfileStore
     @StateObject private var vm: OnboardingViewModel
+    /// Shared namespace so the primary CTA can morph (matched geometry)
+    /// between hero ("Get started") and archetype ("Continue"). One id
+    /// per logical button is enough — see `OnboardingHeroView.ctaMatchedID`.
+    @Namespace private var ctaNamespace
 
     init() {
         // The view model decides its initial step lazily — see
@@ -36,23 +40,42 @@ struct OnboardingFlow: View {
         ZStack {
             switch vm.step {
             case .hero:
-                OnboardingHeroView(vm: vm)
-                    .transition(.opacity)
+                OnboardingHeroView(vm: vm, ctaNamespace: ctaNamespace)
+                    // Outgoing hero fades a touch faster than the
+                    // incoming archetype fades in. Letting the morphing
+                    // CTA stay opaque a beat longer than its surrounding
+                    // content reads as the pill "flying" between screens.
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.38)),
+                        removal:   .opacity.animation(.easeIn(duration: 0.22))
+                    ))
             case .signIn:
                 SignInView(onBack: { vm.step = .hero })
                     .transition(.opacity)
             case .archetype:
-                OnboardingArchetypeView(vm: vm)
-                    .transition(.opacity)
+                OnboardingArchetypeView(vm: vm, ctaNamespace: ctaNamespace)
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.38)),
+                        removal:   .opacity.animation(.easeIn(duration: 0.22))
+                    ))
             case .physiology:
-                OnboardingPhysiologyStepView(vm: vm)
-                    .transition(.opacity)
+                OnboardingPhysiologyStepView(vm: vm, ctaNamespace: ctaNamespace)
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.38)),
+                        removal:   .opacity.animation(.easeIn(duration: 0.22))
+                    ))
             case .coaches:
-                OnboardingCoachStepView(vm: vm)
-                    .transition(.opacity)
+                OnboardingCoachStepView(vm: vm, ctaNamespace: ctaNamespace)
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.38)),
+                        removal:   .opacity.animation(.easeIn(duration: 0.22))
+                    ))
             case .notifications:
-                OnboardingNotificationStepView(vm: vm)
-                    .transition(.opacity)
+                OnboardingNotificationStepView(vm: vm, ctaNamespace: ctaNamespace)
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.38)),
+                        removal:   .opacity.animation(.easeIn(duration: 0.22))
+                    ))
             case .completing:
                 OnboardingCompletingView(vm: vm)
                     .transition(.opacity)
@@ -63,7 +86,10 @@ struct OnboardingFlow: View {
                 Color.bgCanvas.ignoresSafeArea()
             }
         }
-        .animation(.appEntrance, value: vm.step)
+        // `.appMorph` is the fluid-spring curve specifically tuned for
+        // cross-screen `matchedGeometryEffect` traversals (slightly slower
+        // than `.appEntrance`, near-critically damped — see AppAnimation).
+        .animation(.appMorph, value: vm.step)
         .onAppear { bootstrap() }
         .onChange(of: auth.isSignedIn) { _, signedIn in
             if signedIn { vm.signInDidComplete() }

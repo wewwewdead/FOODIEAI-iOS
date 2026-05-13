@@ -12,6 +12,7 @@ struct SkeletonShape: View {
 
     @State private var travel: CGFloat = -1
     @State private var width: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius)
@@ -38,6 +39,10 @@ struct SkeletonShape: View {
                         // gradient slides from -width to +width, never visible
                         // outside the rect.
                         width = geo.size.width
+                        // Reduce Motion: leave the shimmer parked. The
+                        // base color already reads as a placeholder; the
+                        // moving sheen is purely decorative.
+                        guard !reduceMotion else { return }
                         withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
                             travel = 1
                         }

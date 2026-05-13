@@ -36,6 +36,12 @@ struct TodayView: View {
     /// a NavigationStack so RecapView's NavigationLinks (Past recaps)
     /// have a host without bleeding navigation state into the tab bar.
     @State private var showingRecap: Bool = false
+    /// Tracks whether we've ever drawn the meal list with data, so the
+    /// per-row stagger only plays on the first load. Pull-to-refresh and
+    /// subsequent inserts use the cheaper opacity transition instead of
+    /// re-rippling every row's bouncy spring.
+    @State private var hasShownInitialMeals: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Phase 20 — end-of-day under-calorie reminder dismissal flag.
     /// Lives for the current view-model session; pull-to-refresh
@@ -219,7 +225,7 @@ struct TodayView: View {
     @ViewBuilder
     private var ringBlock: some View {
         let calories = caloriesFromState
-        let calorieState = goalWarningState(
+        let calorieState = GoalWarningState.resolve(
             consumed: calories, goal: profileStore.calorieGoal
         )
         VStack(spacing: AppSpacing.sm) {
@@ -245,7 +251,7 @@ struct TodayView: View {
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.vertical, AppSpacing.md)
-        .animation(.easeInOut(duration: 0.2), value: calorieState)
+        .animation(.appReduced, value: calorieState)
     }
 
     // MARK: - Macro bars
@@ -405,12 +411,17 @@ struct TodayView: View {
                         insertion: .opacity.combined(with: .move(edge: .top)),
                         removal: .opacity
                     ))
+                    // First-load stagger only. Subsequent refreshes /
+                    // inserts use a flat reveal — the per-row delay was
+                    // re-rippling every row on every refresh, which both
+                    // jankified pull-to-refresh and looked like a bug.
                     .animation(
-                        .appBouncy.delay(Double(idx) * 0.04),
+                        rowAnimation(index: idx),
                         value: logs.count
                     )
                 }
             }
+            .onAppear { hasShownInitialMeals = true }
         case .failed(let error):
             VStack(spacing: AppSpacing.md) {
                 Image(systemName: "exclamationmark.triangle")
@@ -456,6 +467,19 @@ struct TodayView: View {
             return logs.count
         }
         return 0
+    }
+
+    // MARK: - Row animation
+
+    /// First paint: bouncy with a small per-index delay so the rows
+    /// cascade in. After the first paint: a calm reveal (or nothing under
+    /// Reduce Motion) so refreshes and inserts don't replay the cascade.
+    private func rowAnimation(index: Int) -> Animation? {
+        if reduceMotion { return .appReduced }
+        if !hasShownInitialMeals {
+            return .appBouncy.delay(Double(index) * 0.04)
+        }
+        return .appReveal
     }
 
     // MARK: - Date formatting

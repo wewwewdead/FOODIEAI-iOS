@@ -13,6 +13,7 @@ struct BouncingBadge: View {
     var style: Style
 
     @State private var animate = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Text(text)
@@ -27,12 +28,21 @@ struct BouncingBadge: View {
                     }
                 }
             )
-            .offset(y: animate ? -3 : 3)
+            // Reduce Motion: hold the badge at rest (no offset, no loop) so
+            // the surrounding screen doesn't have a perpetually moving
+            // element nagging the user.
+            .offset(y: reduceMotion ? 0 : (animate ? -3 : 3))
             .animation(
-                .easeInOut(duration: duration(for: style)).repeatForever(autoreverses: true),
+                reduceMotion
+                    ? nil
+                    : .easeInOut(duration: duration(for: style))
+                        .repeatForever(autoreverses: true),
                 value: animate
             )
-            .onAppear { animate = true }
+            .onAppear {
+                guard !reduceMotion else { return }
+                animate = true
+            }
             .accessibilityLabel(text)
     }
 

@@ -6,8 +6,8 @@ import UIKit
 /// `UNUserNotificationCenter`. Everything that schedules, suppresses,
 /// or cancels a notification routes through here.
 ///
-/// Notification cap: at most **4** scheduled at a time
-///   (3 meal reminders + 1 weekly recap).
+/// Notification cap: at most **5** scheduled at a time
+///   (3 meal reminders + 1 weekly recap + 1 daily under-calorie reminder).
 /// The system allows up to 64; we're well under, but the cap is
 /// documented here so any future addition is intentional.
 ///
@@ -32,7 +32,7 @@ final class NotificationScheduler {
 
     /// Limits documented in the file header. Used in DEBUG asserts to
     /// catch any accidental over-scheduling during development.
-    static let maxScheduledNotifications = 4
+    static let maxScheduledNotifications = 5
 
     // MARK: - Identifiers
 
@@ -521,7 +521,7 @@ final class NotificationScheduler {
                   prefix, req.identifier, req.content.title, trig)
         }
         if pending.count > Self.maxScheduledNotifications {
-            NSLog("⚠️ Phase 17 cap exceeded: %d > %d",
+            NSLog("⚠️ Notification cap exceeded: %d > %d (3 meal + 1 weekly recap + 1 under-calorie)",
                   pending.count, Self.maxScheduledNotifications)
         }
     }
