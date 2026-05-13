@@ -444,6 +444,14 @@ final class CaptureViewModel: ObservableObject {
                     .suppressWindow(for: inserted.eatenAt)
             }
 
+            // Phase 20: a fresh meal moves the under/over calorie line.
+            // Re-evaluate the end-of-day under-calorie reminder so the
+            // pending notification reflects the new total (or gets
+            // cancelled if this save pushed us over the goal).
+            Task {
+                await CalorieReminderService.shared.recompute()
+            }
+
             // Phase 18: auto-transition `.saved` → `.moodPulse` after
             // 1.2s. The SavedConfirmationSheet's appearance choreography
             // (checkmark stamp + haptic) lands at ~t+550ms; 1.2s gives

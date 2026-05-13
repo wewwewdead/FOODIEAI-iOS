@@ -37,6 +37,15 @@ final class NotificationRouter: NSObject, ObservableObject {
     /// of the same value still trigger downstream `.onChange`.
     func clearTabRequest() { requestedTab = nil }
     func clearRecapRequest() { requestedRecap = false }
+
+    /// Phase 20. Programmatic tab routing for in-app shortcuts (e.g.
+    /// the "View tracker" button on the calorie-goal scan warning).
+    /// Routes through the same `requestedTab` publisher the
+    /// notification-tap path uses so the tab host has one source of
+    /// truth.
+    func requestTab(_ index: Int) {
+        requestedTab = index
+    }
 }
 
 extension NotificationRouter: UNUserNotificationCenterDelegate {

@@ -120,6 +120,13 @@ final class ProfileViewModel: ObservableObject {
             state = .loaded(updated)
             lastResolvedProfile = updated
             Haptics.success()
+            // Phase 20: calorie goal may have changed; re-evaluate the
+            // end-of-day under-calorie reminder so a pending notification
+            // reflects the new target (or gets cancelled if the new goal
+            // is now below today's consumed).
+            Task {
+                await CalorieReminderService.shared.recompute()
+            }
         } catch is CancellationError {
             return
         } catch {

@@ -45,6 +45,35 @@ struct CaptureView: View {
     /// guard so it doesn't fight the coach picker for the same slot.
     @State private var showingNotificationPermission = false
 
+    /// Phase 20 — calorie-goal scan warning. Surfaces a confirmation
+    /// dialog before the photo source picker when today's consumed
+    /// calories are already at or near the daily goal. Non-blocking:
+    /// the user can always proceed via "Scan anyway."
+    @State private var calorieScanWarning: ScanWarningKind? = nil
+    /// Set to `true` after the user picks "Scan anyway" for the current
+    /// session of pressing the CTA, so we don't re-prompt them on the
+    /// follow-up source-dialog tap. Cleared whenever the warning fires
+    /// fresh again (next CTA press from idle).
+    @State private var bypassCalorieWarningOnce: Bool = false
+    /// Loaded lazily on demand: the Home tab doesn't query today's
+    /// totals as part of its normal idle render, so we only fetch when
+    /// the user actually presses "Take a photo" or the photo card. The
+    /// fetch is cheap (~one network round-trip) and we cache the result
+    /// for the rest of this CaptureView session so the second tap is
+    /// instant.
+    @State private var cachedCalorieStatus: DailyCalorieGoalStatus? = nil
+
+    enum ScanWarningKind: Identifiable {
+        case approaching
+        case reached
+        var id: String {
+            switch self {
+            case .approaching: return "approaching"
+            case .reached: return "reached"
+            }
+        }
+    }
+
     /// True once the `/analyze` request has returned with a usable
     /// response and the result view is on screen. Used to auto-scroll
     /// the typewriter cascade into view as the analysis lands.
@@ -122,6 +151,51 @@ struct CaptureView: View {
             }
             Button("Choose from Library") { presentLibraryPicker() }
             Button("Cancel", role: .cancel) {}
+        }
+        // Phase 20 — calorie-goal scan warning. Surfaces before the
+        // source picker when today's totals are at/near the daily
+        // calorie goal. "Scan anyway" arms `bypassCalorieWarningOnce`
+        // so the immediate follow-up picker open isn't re-gated.
+        .confirmationDialog(
+            calorieScanWarning.map(scanWarningTitle) ?? "",
+            isPresented: Binding(
+                get: { calorieScanWarning != nil },
+                set: { presented in
+                    if !presented { calorieScanWarning = nil }
+                }
+            ),
+            titleVisibility: .visible,
+            presenting: calorieScanWarning
+        ) { kind in
+            Button("Scan anyway") {
+                calorieScanWarning = nil
+                bypassCalorieWarningOnce = true
+                showingSourceDialog = true
+            }
+            Button("View tracker") {
+                calorieScanWarning = nil
+                NotificationRouter.shared.requestTab(1)
+            }
+            Button("Cancel", role: .cancel) {
+                calorieScanWarning = nil
+            }
+            // Silence the implicit-binding warning for unused `kind`;
+            // the case is already encoded in the title.
+            let _ = kind
+        } message: { kind in
+            Text(scanWarningMessage(kind))
+        }
+        // Phase 20 — pre-fetch today's calorie status once on appear
+        // so `requestScan()` can evaluate synchronously on the first
+        // CTA press. The fetch is best-effort: a transient failure
+        // resolves to `.invalid` (no warning), which is the safe
+        // default for an action that should never be blocked.
+        .task(id: viewModel.state.isIdle) {
+            // Re-fetch when the flow returns to idle (after a save),
+            // so the next scan attempt evaluates the freshly-updated
+            // totals — the just-inserted meal counts now.
+            let status = await CalorieReminderService.shared.currentStatus()
+            cachedCalorieStatus = status
         }
         .sheet(item: $pickerSheet) { sheet in
             switch sheet {
@@ -229,6 +303,11 @@ struct CaptureView: View {
             // Edge: success sheet dismissed (.saved → .idle).
             // Guard against the no-op idle→idle case.
             guard !wasIdle, isIdle else { return }
+            // Phase 20 — a fresh return to idle ends the current "scan
+            // attempt." Re-arm the calorie-goal warning so the next
+            // press evaluates honestly rather than riding the prior
+            // "Scan anyway" decision.
+            bypassCalorieWarningOnce = false
             // Coach picker (Phase 16) wins the slot if it hasn't been
             // shown — newer users hit it first; the notification
             // permission sheet (Phase 17) is gated on save count and
@@ -386,7 +465,7 @@ struct CaptureView: View {
     private var photoCard: some View {
         Button {
             Haptics.tap()
-            showingSourceDialog = true
+            requestScan()
         } label: {
             ZStack {
                 RoundedRectangle(cornerRadius: AppRadius.xl2)
@@ -588,7 +667,7 @@ struct CaptureView: View {
             case .noFood:
                 NoFoodView(onTryAnother: {
                     viewModel.resetToPick()
-                    showingSourceDialog = true
+                    requestScan()
                 })
                 .padding(.top, AppSpacing.xl2)
                 .transition(.opacity)
@@ -599,7 +678,7 @@ struct CaptureView: View {
                     onRetry: { Task { await viewModel.analyze() } },
                     onTryAnother: {
                         viewModel.resetToPick()
-                        showingSourceDialog = true
+                        requestScan()
                     }
                 )
                 .padding(.top, AppSpacing.xl2)
@@ -637,7 +716,7 @@ struct CaptureView: View {
             PrimaryButton(title: "Take a photo",
                           leadingSystemImage: "camera.fill") {
                 Haptics.tap()
-                showingSourceDialog = true
+                requestScan()
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, AppSpacing.md)
@@ -668,6 +747,66 @@ struct CaptureView: View {
             // No bottom CTA so the underlying photo card reads as a
             // quiet background, not a competing affordance.
             EmptyView()
+        }
+    }
+
+    // MARK: - Calorie-goal scan warning (Phase 20)
+
+    /// Entry point for a fresh photo-source dialog. Checks today's
+    /// calorie status first; if the user is approaching/over their
+    /// daily goal we surface a friendly confirmation before opening
+    /// the picker. Non-blocking — the user can always pick "Scan
+    /// anyway." The bypass flag is consumed so the very next press
+    /// re-evaluates honestly.
+    ///
+    /// If the cache hasn't landed yet (first press during the appear
+    /// fetch), we fall through to the picker rather than block the user
+    /// on a network round-trip. The pre-fetch in `.task` is fast enough
+    /// for this race to be exceedingly rare; the in-app reminder on
+    /// Tracker remains the reliable guidance path.
+    private func requestScan() {
+        if bypassCalorieWarningOnce {
+            bypassCalorieWarningOnce = false
+            showingSourceDialog = true
+            return
+        }
+
+        if let cached = cachedCalorieStatus,
+           let kind = Self.scanWarningKind(for: cached) {
+            calorieScanWarning = kind
+            return
+        }
+
+        showingSourceDialog = true
+    }
+
+    private static func scanWarningKind(
+        for status: DailyCalorieGoalStatus
+    ) -> ScanWarningKind? {
+        guard status.hasValidGoal else { return nil }
+        switch status.warningState {
+        case .reached:     return .reached
+        case .approaching: return .approaching
+        case .safe:        return nil
+        }
+    }
+
+    /// Title / body / action labels for the calorie-goal warning dialog.
+    /// Pulled into static helpers so the confirmationDialog literals
+    /// stay readable.
+    private func scanWarningTitle(_ kind: ScanWarningKind) -> String {
+        switch kind {
+        case .reached:     return "You've reached your calorie goal for today."
+        case .approaching: return "You're close to your calorie goal."
+        }
+    }
+
+    private func scanWarningMessage(_ kind: ScanWarningKind) -> String {
+        switch kind {
+        case .reached:
+            return "Scanning another meal may put you further over your target."
+        case .approaching:
+            return "You can still log it — just a heads up."
         }
     }
 

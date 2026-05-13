@@ -158,6 +158,13 @@ final class TrackerViewModel: ObservableObject {
             #endif
         }
         await refresh()
+        // Phase 20: deleting a meal can drop the user back under their
+        // calorie goal — re-evaluate the end-of-day under-calorie
+        // notification so a pending reminder is reinstated (or kept
+        // cancelled) based on the new totals.
+        Task {
+            await CalorieReminderService.shared.recompute()
+        }
     }
 
     /// Phase 16. Mark the active observation as dismissed and clear it

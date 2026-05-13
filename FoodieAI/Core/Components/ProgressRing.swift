@@ -33,6 +33,28 @@ struct ProgressRing: View {
 
     private var diameter: CGFloat { ringRadius * 2 }
 
+    /// Arc gradient stops. Safe → brand → muted-brand. Approaching →
+    /// brand fades toward `.error` as progress climbs through [0.80, 1.00).
+    /// Reached → solid `.error` (both stops). Canvas redraws imperatively
+    /// so this resolves once per render with no animation loop.
+    private var arcGradientStops: [Color] {
+        let defaultStops: [Color] = [
+            .brand,
+            Color(red: 141/255, green: 161/255, blue: 44/255)
+        ]
+        guard goal > 0 else { return defaultStops }
+        let p = max(value, 0) / goal
+        if p >= 1.0 { return [.error, .error] }
+        if p >= 0.80 {
+            let t = (p - 0.80) / 0.20
+            return [
+                .brand.opacity(1 - t * 0.6),
+                Color.error.opacity(0.35 + t * 0.40)
+            ]
+        }
+        return defaultStops
+    }
+
     var body: some View {
         ZStack {
             // Two-canvas layering: background hairline ring + animated
@@ -71,10 +93,7 @@ struct ProgressRing: View {
                 context.stroke(
                     arcPath,
                     with: .linearGradient(
-                        Gradient(colors: [
-                            .brand,
-                            Color(red: 141/255, green: 161/255, blue: 44/255) // #8DA12C
-                        ]),
+                        Gradient(colors: arcGradientStops),
                         startPoint: CGPoint(x: 0, y: 0),
                         endPoint: CGPoint(x: size.width, y: size.height)
                     ),

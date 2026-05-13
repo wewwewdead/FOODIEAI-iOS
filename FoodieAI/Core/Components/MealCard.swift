@@ -24,6 +24,11 @@ import SwiftUI
 struct MealCard: View {
     let log: FoodLog
     let onTap: () -> Void
+    /// When true, the food name may wrap to two lines and the row grows
+    /// to fit. Used by `ExpandableMealCard` so a long name like "Korean
+    /// meal with spicy pork stew" reads fully once the card is opened
+    /// without changing collapsed-row layout elsewhere.
+    var expandsName: Bool = false
 
     @State private var imageURL: URL?
     @State private var failed: Bool = false
@@ -47,7 +52,9 @@ struct MealCard: View {
                         Text(log.foodName)
                             .appFont(.title2)
                             .foregroundStyle(Color.ink)
-                            .lineLimit(1)
+                            .lineLimit(expandsName ? nil : 1)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: expandsName)
                         Text(metaLine)
                             .appFont(.caption)
                             .foregroundStyle(Color.inkLight)
@@ -72,7 +79,7 @@ struct MealCard: View {
         }
         .padding(.horizontal, AppSpacing.sm + 2)
         .padding(.vertical, AppSpacing.sm + 2)
-        .frame(height: 76)
+        .frame(minHeight: 76)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)

@@ -42,6 +42,12 @@ final class NotificationScheduler {
         static let dinnerRecurring    = "reminder.dinner.recurring"
         static let recapWeekly        = "recap.weekly"
 
+        /// End-of-day under-calorie reminder. One-shot, replaced each time
+        /// the user saves/deletes a meal or changes their calorie goal. The
+        /// identifier is stable across reschedules so cancel-and-replace
+        /// never spawns duplicates (see `scheduleUnderCalorieReminder`).
+        static let underCalorieReminder = "daily_under_calorie_reminder"
+
         /// One-shot replacement for today's cancelled recurring reminder.
         /// Fires tomorrow at the same time as today's recurring would have.
         static func suppressed(for window: MealWindow) -> String {
@@ -273,6 +279,128 @@ final class NotificationScheduler {
             NSLog("[Notif] weekly-recap schedule FAILED: %@", "\(error)")
             #endif
         }
+    }
+
+    // MARK: - Under-calorie reminder (Phase 20)
+
+    /// Default trigger hour for the end-of-day under-calorie reminder.
+    /// 22:00 local time gives roughly two hours before midnight — enough
+    /// room to log a missed meal without nagging during dinner.
+    static let underCalorieReminderHour = 22
+
+    /// Schedule a one-shot under-calorie reminder at the next 22:00 local
+    /// time. Idempotent — any prior pending request with the same
+    /// identifier is removed first so the user never sees duplicates.
+    ///
+    /// `remaining` is plumbed into the body copy so the user sees a
+    /// concrete number, not a generic nudge. Caller is responsible for
+    /// only invoking this when the user is actually under goal; this
+    /// method does NOT re-evaluate the calorie status.
+    ///
+    /// If notification authorization isn't granted, this is a no-op
+    /// (UNUserNotificationCenter rejects `add` silently in that case
+    /// anyway, but the explicit check avoids spurious DEBUG noise).
+    func scheduleUnderCalorieReminder(remaining: Double,
+                                      now: Date = Date(),
+                                      timeZone: TimeZone = .current) async {
+        // Authorization check — skip the work if we wouldn't be allowed
+        // to deliver. `provisional` and `authorized` are both deliverable.
+        let status = await authorizationStatus()
+        guard status == .authorized || status == .provisional else {
+            #if DEBUG
+            NSLog("[Notif] underCalorie: skip schedule — auth=%d", status.rawValue)
+            #endif
+            // Make sure no stale request lingers from a previous grant.
+            center.removePendingNotificationRequests(
+                withIdentifiers: [Identifier.underCalorieReminder]
+            )
+            return
+        }
+
+        // Always remove first; we replace rather than mutate.
+        center.removePendingNotificationRequests(
+            withIdentifiers: [Identifier.underCalorieReminder]
+        )
+
+        // Build the next 22:00 local-time fire date. If `now` is already
+        // past 22:00, advance one day — we don't fire an immediate
+        // notification while the app is active.
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let today = cal.startOfDay(for: now)
+        guard var fireDate = cal.date(
+            bySettingHour: Self.underCalorieReminderHour,
+            minute: 0, second: 0, of: today
+        ) else { return }
+        if fireDate <= now {
+            guard let tomorrow = cal.date(byAdding: .day, value: 1, to: fireDate) else {
+                return
+            }
+            fireDate = tomorrow
+        }
+
+        var fireComps = cal.dateComponents(
+            [.year, .month, .day, .hour, .minute], from: fireDate
+        )
+        fireComps.timeZone = timeZone
+
+        // One-shot, not repeating: the next day's schedule needs a fresh
+        // re-evaluation (the user might already be on track tomorrow).
+        let trigger = UNCalendarNotificationTrigger(
+            dateMatching: fireComps, repeats: false
+        )
+
+        let content = UNMutableNotificationContent()
+        content.title = "Still under your calorie goal"
+        content.body  = Self.underCalorieBody(remaining: remaining)
+        content.sound = .default
+        content.userInfo = ["kind": "under_calorie_reminder"]
+
+        let request = UNNotificationRequest(
+            identifier: Identifier.underCalorieReminder,
+            content: content,
+            trigger: trigger
+        )
+
+        do {
+            try await center.add(request)
+            #if DEBUG
+            NSLog("[Notif] underCalorie scheduled for %@ (remaining=%.0f)",
+                  "\(fireDate)", remaining)
+            #endif
+        } catch {
+            #if DEBUG
+            NSLog("[Notif] underCalorie schedule FAILED: %@", "\(error)")
+            #endif
+        }
+    }
+
+    /// Cancel any pending under-calorie reminder. Safe to call when none
+    /// is scheduled — `removePendingNotificationRequests` is a no-op for
+    /// unknown identifiers.
+    func cancelUnderCalorieReminder() {
+        center.removePendingNotificationRequests(
+            withIdentifiers: [Identifier.underCalorieReminder]
+        )
+    }
+
+    /// Round the remaining calories to a friendly multiple so the body
+    /// reads naturally. Avoids "423.7 calories left" while keeping the
+    /// number honest enough to be actionable.
+    private static func underCalorieBody(remaining: Double) -> String {
+        // Round to the nearest 10 above 100, nearest 5 below — picks a
+        // number a human would say out loud.
+        let value = max(0, remaining)
+        let rounded: Int
+        if value >= 100 {
+            rounded = Int((value / 10).rounded()) * 10
+        } else {
+            rounded = Int((value / 5).rounded()) * 5
+        }
+        if rounded <= 0 {
+            return "You still have room left today. Want to log your last meal?"
+        }
+        return "You have about \(rounded) calories left today. Want to log your last meal?"
     }
 
     // MARK: - Internal scheduling

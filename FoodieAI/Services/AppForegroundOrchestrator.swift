@@ -104,6 +104,13 @@ final class AppForegroundOrchestrator {
         // 3. Reschedule notifications. Reads inference + the (possibly
         //    just-updated) profile.
         await rescheduleNotifications(profile: profile, deviceTZ: timeZone)
+
+        // 4. Recompute the end-of-day under-calorie reminder based on the
+        //    latest totals + goal. Best-effort: never blocks the UI, never
+        //    fails the foreground pass.
+        await CalorieReminderService.shared.recompute(
+            now: now, timeZone: timeZone
+        )
     }
 
     // MARK: - Step 1: timezone

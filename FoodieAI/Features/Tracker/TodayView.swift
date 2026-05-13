@@ -37,11 +37,18 @@ struct TodayView: View {
     /// have a host without bleeding navigation state into the tab bar.
     @State private var showingRecap: Bool = false
 
+    /// Phase 20 — end-of-day under-calorie reminder dismissal flag.
+    /// Lives for the current view-model session; pull-to-refresh
+    /// recomputes visibility from the current totals + time, so a
+    /// genuine refresh re-surfaces the card if conditions still hold.
+    @State private var underCalorieReminderDismissed: Bool = false
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: AppSpacing.xl2) {
                 dateHeader
                 weeklyRecapBanner
+                underCalorieReminderCard
                 ringBlock
                 macroBars
                 patternsSection
@@ -54,6 +61,10 @@ struct TodayView: View {
         }
         .background(Color.bgCanvas)
         .refreshable {
+            // Explicit refresh re-arms the inline reminder so a user
+            // who pulled the screen down genuinely *wants* to see the
+            // current end-of-day state, not yesterday's dismissal.
+            underCalorieReminderDismissed = false
             await viewModel.refresh()
         }
         .task {
@@ -141,6 +152,56 @@ struct TodayView: View {
         }
     }
 
+    // MARK: - Under-calorie reminder (Phase 20)
+
+    /// Inline reminder card. Visible only when:
+    ///   - local time is in the 22:00–23:59 window
+    ///   - the user has a valid daily calorie goal
+    ///   - they're still under goal (consumed < goal)
+    ///   - they haven't dismissed it this session (or just refreshed)
+    ///
+    /// Uses the same surface treatment (BgSurface + hairline + shadow)
+    /// as the weekly recap banner so it reads as a peer card, not a
+    /// banner ad. Tapping the body switches to Home; the inline ×
+    /// dismisses without action.
+    @ViewBuilder
+    private var underCalorieReminderCard: some View {
+        if !underCalorieReminderDismissed,
+           let status = currentCalorieStatus,
+           CalorieReminderService.shouldShowEndOfDayUnderGoalReminder(
+               now: Date(), status: status
+           )
+        {
+            UnderCalorieReminderCard(
+                remaining: status.remaining,
+                onScan: {
+                    Haptics.tap()
+                    underCalorieReminderDismissed = true
+                    notifRouter.requestTab(0)
+                },
+                onDismiss: {
+                    Haptics.tap()
+                    withAnimation(.appReveal) {
+                        underCalorieReminderDismissed = true
+                    }
+                }
+            )
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+    }
+
+    /// Pull a `DailyCalorieGoalStatus` out of the tracker view model's
+    /// current state. `nil` when the data isn't loaded yet, which
+    /// hides the card — we don't surface a reminder against an
+    /// indeterminate goal.
+    private var currentCalorieStatus: DailyCalorieGoalStatus? {
+        guard case .loaded(_, let totals) = viewModel.state else { return nil }
+        return DailyCalorieGoalStatus.compute(
+            consumed: totals.totalCalories,
+            goal: profileStore.calorieGoal
+        )
+    }
+
     // MARK: - Date header
 
     private var dateHeader: some View {
@@ -158,15 +219,33 @@ struct TodayView: View {
     @ViewBuilder
     private var ringBlock: some View {
         let calories = caloriesFromState
-        VStack(spacing: 0) {
+        let calorieState = goalWarningState(
+            consumed: calories, goal: profileStore.calorieGoal
+        )
+        VStack(spacing: AppSpacing.sm) {
             ProgressRing(
                 value: calories,
                 goal: profileStore.calorieGoal,
                 label: "Calories"
             )
+            switch calorieState {
+            case .safe:
+                EmptyView()
+            case .approaching:
+                Text("Approaching your calorie goal")
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+                    .transition(.opacity)
+            case .reached:
+                Text("Calorie goal reached")
+                    .appFont(.caption)
+                    .foregroundStyle(Color.error)
+                    .transition(.opacity)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.vertical, AppSpacing.md)
+        .animation(.easeInOut(duration: 0.2), value: calorieState)
     }
 
     // MARK: - Macro bars
@@ -460,5 +539,100 @@ private struct PatternCard: View {
         case .streak:        return .accentWarm
         case .moodCluster:   return .inkMute
         }
+    }
+}
+
+// MARK: - Under-calorie reminder card (Phase 20)
+
+/// Inline card surfaced on the Today screen between 22:00 and 23:59
+/// local time when the user is still under their daily calorie goal.
+///
+/// Visual treatment mirrors the weekly recap banner — BgSurface fill,
+/// hairline border, shadowCard — so it reads as a peer of the existing
+/// Today cards rather than a banner or modal. The leading icon uses
+/// `accentCool` to nudge a softer, "evening" feel without introducing
+/// a new color.
+///
+/// `onScan` routes to the Home tab via the shared NotificationRouter
+/// (the same channel notification taps use), so the user lands on the
+/// capture flow with one tap. `onDismiss` only clears the card for
+/// this session — pull-to-refresh re-arms visibility if conditions
+/// still hold.
+private struct UnderCalorieReminderCard: View {
+    let remaining: Double
+    let onScan: () -> Void
+    let onDismiss: () -> Void
+
+    private var remainingLabel: String {
+        let value = max(0, remaining)
+        let rounded: Int
+        if value >= 100 {
+            rounded = Int((value / 10).rounded()) * 10
+        } else {
+            rounded = Int((value / 5).rounded()) * 5
+        }
+        if rounded <= 0 {
+            return "a little room"
+        }
+        return "about \(rounded) calories"
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            ZStack {
+                Circle()
+                    .fill(Color.brandSoft)
+                    .frame(width: 36, height: 36)
+                Image(systemName: "moon.stars")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentCool)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("You're still under your calorie goal")
+                    .appFont(.bodyEmphasis)
+                    .foregroundStyle(Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("You have \(remainingLabel) left today.")
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(action: onScan) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 11, weight: .heavy))
+                        Text("Scan a meal")
+                            .appFont(.captionStrong)
+                    }
+                    .foregroundStyle(Color.brandDeep)
+                    .padding(.top, 2)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Scan a meal")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .heavy))
+                    .foregroundStyle(Color.inkLight)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss reminder")
+        }
+        .padding(AppSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.borderHairline, lineWidth: 1)
+        )
+        .appShadow(.shadowCard)
+        .accessibilityElement(children: .contain)
     }
 }

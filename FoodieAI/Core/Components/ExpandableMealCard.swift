@@ -42,15 +42,19 @@ struct ExpandableMealCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            MealCard(log: log) {
-                guard hasExpandableContent else { return }
-                Haptics.soft()
-                // Phase 14 delight: bouncy expansion — overshoots before
-                // settling so the reveal feels alive.
-                withAnimation(.appBouncy) {
-                    isExpanded.toggle()
-                }
-            }
+            MealCard(
+                log: log,
+                onTap: {
+                    guard hasExpandableContent else { return }
+                    Haptics.soft()
+                    // Phase 14 delight: bouncy expansion — overshoots before
+                    // settling so the reveal feels alive.
+                    withAnimation(.appBouncy) {
+                        isExpanded.toggle()
+                    }
+                },
+                expandsName: isExpanded
+            )
             .contextMenu {
                 if onDelete != nil {
                     Button(role: .destructive) {
