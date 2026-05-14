@@ -51,6 +51,7 @@ struct FoodieAIApp: App {
                 .environmentObject(auth)
                 .environmentObject(profileStore)
                 .environmentObject(NotificationRouter.shared)
+                .environmentObject(FavoritesStore.shared)
                 .task { await auth.bootstrap() }
                 .onChange(of: auth.isSignedIn) { _, signedIn in
                     // Phase 17: kick the foreground orchestrator the

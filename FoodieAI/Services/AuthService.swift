@@ -35,6 +35,12 @@ final class AuthService: NSObject, ObservableObject {
     /// state after this deadline so RootView doesn't hang on LaunchView.
     private var loadingTimeoutTask: Task<Void, Never>?
     private static let loadingFallbackTimeout: UInt64 = 5_000_000_000  // 5s
+    /// Shorter grace for the "initial session is nil" case below. The SDK
+    /// can emit `.initialSession(nil)` before a follow-up `.signedIn` lands
+    /// (delayed keychain load, OAuth callback still in flight, etc.). Hold
+    /// the loading state briefly so RootView doesn't flash OnboardingFlow
+    /// in between — the bug users see on cold launch.
+    private static let nilInitialSessionGrace: UInt64 = 1_200_000_000  // 1.2s
 
     init(client: SupabaseClient = FoodieClient.shared) {
         self.client = client
@@ -71,7 +77,18 @@ final class AuthService: NSObject, ObservableObject {
         // — the bug users see on cold launch.
         if event == .initialSession, let s = newSession, s.isExpired {
             self.session = nil
-            scheduleLoadingTimeout()
+            scheduleLoadingTimeout(nanoseconds: Self.loadingFallbackTimeout)
+            return
+        }
+
+        // Nil initial session: most of the time the user is genuinely
+        // signed out, but the SDK can also emit this before a follow-up
+        // `.signedIn` lands (delayed keychain load, OAuth callback being
+        // processed, fresh-install race). Hold loading briefly so we
+        // don't flash OnboardingFlow → LaunchView → MainTabView.
+        if event == .initialSession, newSession == nil {
+            self.session = nil
+            scheduleLoadingTimeout(nanoseconds: Self.nilInitialSessionGrace)
             return
         }
 
@@ -81,11 +98,11 @@ final class AuthService: NSObject, ObservableObject {
         if isLoading { isLoading = false }
     }
 
-    private func scheduleLoadingTimeout() {
+    private func scheduleLoadingTimeout(nanoseconds: UInt64) {
         loadingTimeoutTask?.cancel()
         loadingTimeoutTask = Task { [weak self] in
             do {
-                try await Task.sleep(nanoseconds: Self.loadingFallbackTimeout)
+                try await Task.sleep(nanoseconds: nanoseconds)
             } catch {
                 return
             }

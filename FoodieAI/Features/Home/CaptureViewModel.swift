@@ -99,13 +99,6 @@ final class CaptureViewModel: ObservableObject {
         }
     }
 
-    /// Phase 18 — auto-transition `.saved → .moodPulse` is a delayed
-    /// task. Stored so we can cancel it if the user resets/discards/
-    /// records-a-mood/skips before the 1.2s sleep fires, instead of
-    /// letting the late wake-up race against a state that has already
-    /// moved on.
-    private var moodPulseTask: Task<Void, Never>?
-
     private let analyzer: AnalyzeService
     private let imageService: FoodImageService
     private let logService: FoodLogService
@@ -457,6 +450,13 @@ final class CaptureViewModel: ObservableObject {
             // visual — not here on row insert.
             state = .saved(image, response, inserted)
 
+            // Retention polish — mark today as logged in the local
+            // rhythm store so the Home daily check-in card reflects
+            // continuity without a server round-trip. Idempotent: the
+            // first save of the day writes; subsequent saves on the
+            // same local calendar day are a no-op.
+            LoggingRhythmStore.shared.markToday()
+
             // Phase 17: increment the local saves counter (drives
             // permission-sheet timing) and suppress today's reminder
             // for the matching meal window so we don't nudge a user
@@ -475,14 +475,12 @@ final class CaptureViewModel: ObservableObject {
                 await CalorieReminderService.shared.recompute()
             }
 
-            // Phase 18: auto-transition `.saved` → `.moodPulse` after
-            // 1.2s. The SavedConfirmationSheet's appearance choreography
-            // (checkmark stamp + haptic) lands at ~t+550ms; 1.2s gives
-            // the user a moment with the success state before the
-            // mood question lands. If the user closes the success
-            // sheet earlier, `discardSaved()` performs the same
-            // `.saved → .moodPulse` transition — both paths converge.
-            scheduleMoodPulseTransition(for: inserted.id)
+            // Phase 18: the `.saved → .moodPulse` transition is driven
+            // entirely by `discardSaved()` — i.e., when the user closes
+            // the success sheet themselves. We don't auto-advance on a
+            // timer because the SavedConfirmationSheet is bound to
+            // `state.isSaved`; flipping state out from under it would
+            // dismiss the sheet before the user can read it.
         } catch {
             #if DEBUG
             NSLog("[Save] FAILED: %@", "\(error)")
@@ -523,8 +521,6 @@ final class CaptureViewModel: ObservableObject {
     /// logged in DEBUG.
     func recordMood(_ mood: FoodLog.Mood) async {
         guard case .moodPulse(_, _, let log) = state else { return }
-        moodPulseTask?.cancel()
-        moodPulseTask = nil
         state = .idle
         do {
             _ = try await logService.setMood(mood, on: log.id)
@@ -543,8 +539,6 @@ final class CaptureViewModel: ObservableObject {
     /// User tapped Skip or drag-dismissed the pulse — no DB write.
     func skipMoodPulse() {
         if case .moodPulse = state {
-            moodPulseTask?.cancel()
-            moodPulseTask = nil
             state = .idle
         }
     }
@@ -560,33 +554,9 @@ final class CaptureViewModel: ObservableObject {
             #if DEBUG
             NSLog("[Mood] pulse cancelled by background")
             #endif
-            moodPulseTask?.cancel()
-            moodPulseTask = nil
             state = .idle
         default:
             break
-        }
-    }
-
-    /// Schedule the auto-transition `.saved → .moodPulse` 1.2s after
-    /// save completes. Guards against the user dismissing the success
-    /// sheet themselves (state already moved to `.moodPulse` or further)
-    /// or backgrounding before the timer fires (`.idle`). Idempotent.
-    private func scheduleMoodPulseTransition(for logId: UUID) {
-        moodPulseTask?.cancel()
-        moodPulseTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 1200)
-            } catch {
-                return
-            }
-            guard let self else { return }
-            // Only fire if we're still showing the saved state for the
-            // same row — any other state means the user (or background
-            // hook) moved us along already.
-            if case .saved(let i, let r, let log) = self.state, log.id == logId {
-                self.state = .moodPulse(i, r, log)
-            }
         }
     }
 
@@ -594,21 +564,13 @@ final class CaptureViewModel: ObservableObject {
     /// the dashed drop zone shows the empty state again and the picker
     /// can be re-presented from there.
     func resetToPick() {
-        moodPulseTask?.cancel()
-        moodPulseTask = nil
         state = .idle
     }
 
     /// Same as `resetToPick` for now; preserved as a separate entry point
     /// in case the design diverges (e.g. cancel-without-resetting).
     func discardCurrent() {
-        moodPulseTask?.cancel()
-        moodPulseTask = nil
         state = .idle
-    }
-
-    deinit {
-        moodPulseTask?.cancel()
     }
 
     // MARK: - Phase 15: Quick re-log
@@ -651,6 +613,9 @@ final class CaptureViewModel: ObservableObject {
             #endif
             Haptics.success()
             relogToast = RelogToast(foodName: source.foodName, kind: .success)
+            // Retention polish — a re-log is still "the user logged
+            // today," so it counts toward the local rhythm.
+            LoggingRhythmStore.shared.markToday()
         } catch {
             #if DEBUG
             NSLog("[Relog] FAILED for %@: %@",

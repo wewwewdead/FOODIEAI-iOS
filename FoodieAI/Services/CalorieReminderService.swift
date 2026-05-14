@@ -96,15 +96,47 @@ final class CalorieReminderService {
     /// blip should not surface a warning the user can't act on.
     func currentStatus(now: Date = Date(),
                        timeZone: TimeZone = .current) async -> DailyCalorieGoalStatus {
+        await currentSnapshot(now: now, timeZone: timeZone).status
+    }
+
+    /// Same data dependencies as `currentStatus`, but also surfaces
+    /// today's meal count so callers that need both can avoid a second
+    /// `todaysLogs` round-trip. Used by the Home daily check-in card to
+    /// drive both the calorie sub-line and the meal-count primary copy.
+    ///
+    /// `mealCount` is `nil` when the `todaysLogs` fetch failed —
+    /// callers must distinguish "unknown" from "zero" so the empty-state
+    /// copy ("Start today with one photo.") doesn't surface over a
+    /// transient network error. The calorie `status` keeps the prior
+    /// behavior (failed logs → treated as 0 consumed), so it stays
+    /// drift-free with `currentStatus()`.
+    func currentSnapshot(now: Date = Date(),
+                         timeZone: TimeZone = .current) async -> TodaySnapshot {
         async let logsTask: [FoodLog]? = try? logService.todaysLogs(timeZone: timeZone)
         async let profileTask: Profile? = try? profileService.currentProfile()
 
-        let logs = (await logsTask) ?? []
-        guard let profile = await profileTask else { return .invalid }
-
+        let logsOpt = await logsTask
+        let logs = logsOpt ?? []
+        let profile = await profileTask
         let consumed = LocalDailyTotals.sum(logs).totalCalories
-        let goal = Double(profile.dailyCalorieGoal)
-        return DailyCalorieGoalStatus.compute(consumed: consumed, goal: goal)
+        let status: DailyCalorieGoalStatus
+        if let profile {
+            status = DailyCalorieGoalStatus.compute(
+                consumed: consumed,
+                goal: Double(profile.dailyCalorieGoal)
+            )
+        } else {
+            status = .invalid
+        }
+        return TodaySnapshot(mealCount: logsOpt?.count, status: status)
+    }
+
+    struct TodaySnapshot: Equatable {
+        /// `nil` when the underlying `todaysLogs` fetch failed; an
+        /// empty success returns `0`. Callers MUST treat the two
+        /// distinctly — see the Home daily check-in card.
+        let mealCount: Int?
+        let status: DailyCalorieGoalStatus
     }
 
     // MARK: - Scheduling

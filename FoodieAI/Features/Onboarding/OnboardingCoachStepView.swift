@@ -24,8 +24,17 @@ struct OnboardingCoachStepView: View {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
                     headline
                     coachList
+                    if let confirmation = coachConfirmationCopy {
+                        Text(confirmation)
+                            .appFont(.caption)
+                            .foregroundStyle(Color.brandDeep)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .transition(.opacity)
+                            .accessibilityLabel(confirmation)
+                    }
                     Color.clear.frame(height: 140) // scroll past sticky CTA
                 }
+                .animation(.appReveal, value: vm.orderedCoaches)
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.top, AppSpacing.xl3)
                 .padding(.bottom, AppSpacing.lg)
@@ -78,6 +87,33 @@ struct OnboardingCoachStepView: View {
                 .foregroundStyle(Color.inkMute)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// Single-line confirmation that names the user's first-starred
+    /// coach so the choice carries forward into the app. Falls back to
+    /// a gentle reassurance when no coach is starred so users who
+    /// continue without picking don't feel they've made a wrong move.
+    private var coachConfirmationCopy: String? {
+        // Try the first-starred (ordered) coach, then any starred name
+        // as a fallback. Both go through a non-empty-trim guard so we
+        // can never render "<empty> will check in on you the most."
+        let topRaw: String? = vm.orderedCoaches.first
+            ?? vm.preferredCoaches.first
+        guard let raw = topRaw else { return nil }
+
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            // Defensive: a corrupt/empty name string is treated as the
+            // "no starred coaches" case rather than rendering an
+            // ungrammatical line.
+            return "Your coaches will check in on you the most."
+        }
+
+        // First word — for canonical names like "Albert Einstein" this
+        // produces "Albert"; for single-word names ("Cleopatra") it
+        // falls back to the whole name.
+        let firstName = trimmed.split(separator: " ").first.map(String.init) ?? trimmed
+        return "\(firstName) will check in on you the most."
     }
 
     private var coachList: some View {

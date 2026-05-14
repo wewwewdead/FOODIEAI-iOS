@@ -27,8 +27,17 @@ struct OnboardingArchetypeView: View {
                 VStack(alignment: .leading, spacing: AppSpacing.xl) {
                     headline
                     options
+                    if let confirmation = confirmationCopy {
+                        Text(confirmation)
+                            .appFont(.caption)
+                            .foregroundStyle(Color.brandDeep)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .transition(.opacity)
+                            .accessibilityLabel(confirmation)
+                    }
                     Spacer(minLength: 0)
                 }
+                .animation(.appReveal, value: vm.archetype)
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.top, AppSpacing.xl3)
                 // Reserve clearance for the floating Continue + Skip stack
@@ -74,6 +83,23 @@ struct OnboardingArchetypeView: View {
                 .appFont(.bodyV2)
                 .foregroundStyle(Color.inkMute)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// One-line confirmation that mirrors the user's selection so the
+    /// app feels personal before they leave the step. Nil until a choice
+    /// is made; never instructional.
+    private var confirmationCopy: String? {
+        guard let archetype = vm.archetype else { return nil }
+        switch archetype {
+        case .aware:
+            return "Got it — FoodieAI will help you stay aware of what you eat."
+        case .loseWeight:
+            return "Got it — we'll tune things to keep your day in balance."
+        case .buildMuscle:
+            return "Got it — we'll lean into protein and fuel for training."
+        case .curious:
+            return "Got it — we'll keep things light and curious."
         }
     }
 

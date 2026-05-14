@@ -28,6 +28,9 @@ struct CaptureView: View {
     /// Phase 18 — observed so we can drop the mood pulse rather than
     /// ambush the user when they re-foreground the app.
     @Environment(\.scenePhase) private var scenePhase
+    /// Used to route the after-save "View today / tracker" suggestion
+    /// to the Tracker tab via the same channel notification taps use.
+    @EnvironmentObject private var notifRouter: NotificationRouter
 
     @State private var pickerSheet: PickerSheet? = nil
     @State private var showingSourceDialog = false
@@ -62,6 +65,15 @@ struct CaptureView: View {
     /// for the rest of this CaptureView session so the second tap is
     /// instant.
     @State private var cachedCalorieStatus: DailyCalorieGoalStatus? = nil
+    /// Today's meal count, fetched alongside `cachedCalorieStatus` so the
+    /// daily check-in card can render its primary copy without a second
+    /// `todaysLogs` round-trip. `nil` while loading; the card renders
+    /// an unobtrusive idle state in that case.
+    @State private var cachedTodayMealCount: Int? = nil
+    /// Observed so a save-success `markToday()` re-renders the check-in
+    /// line ("First check-in logged.") and the personalized empty state
+    /// updates when the user crosses midnight without restarting the app.
+    @StateObject private var rhythmStore = LoggingRhythmStore.shared
 
     enum ScanWarningKind: Identifiable {
         case approaching
@@ -82,6 +94,18 @@ struct CaptureView: View {
         return false
     }
 
+    /// True for any state that paints the AnalysisResultView (or its
+    /// sibling no-food / failed views). Drives the cross-branch morph
+    /// animation so the picked photo card "settles" into the result.
+    private var isShowingResult: Bool {
+        switch viewModel.state {
+        case .ready, .saving, .saved, .saveFailed, .noFood, .failed:
+            return true
+        default:
+            return false
+        }
+    }
+
     enum PickerSheet: Identifiable {
         case camera
         var id: String { "camera" }
@@ -99,21 +123,45 @@ struct CaptureView: View {
 
                         // Idle state: hero copy + photo card.
                         // Non-idle state: result rendering takes over below.
-                        switch viewModel.state {
-                        case .idle, .picked, .analyzing, .moodPulse, .clarifying:
-                            // .moodPulse is rendered as the empty/idle
-                            // hero with the mood sheet on top — the
-                            // result rendering would be a misleading
-                            // background while the user reflects.
-                            // .clarifying does the same — the photo
-                            // card stays the focal background while
-                            // the Quantity Clarification sheet asks
-                            // the user about portions.
-                            emptyOrPickedFlow
-                        case .ready, .saving, .saved, .saveFailed,
-                             .noFood, .failed:
-                            resultFlow
+                        // Both branches carry transitions so the cross-
+                        // switch state change reads as the photo "landing"
+                        // into the result page rather than a hard swap:
+                        //   - empty/picked exits with a small upward scale-
+                        //     down + fade (the picked card lifts away)
+                        //   - result enters scaled slightly oversize and
+                        //     settles into 1.0 with a fade (the analysis
+                        //     "lands"). Driven by `.appMorph` for a fluid,
+                        //     barely-overshooting feel; Reduce Motion swaps
+                        //     to a flat opacity fade.
+                        Group {
+                            switch viewModel.state {
+                            case .idle, .picked, .analyzing, .moodPulse, .clarifying:
+                                // .moodPulse is rendered as the empty/idle
+                                // hero with the mood sheet on top — the
+                                // result rendering would be a misleading
+                                // background while the user reflects.
+                                // .clarifying does the same — the photo
+                                // card stays the focal background while
+                                // the Quantity Clarification sheet asks
+                                // the user about portions.
+                                emptyOrPickedFlow
+                                    .transition(.asymmetric(
+                                        insertion: .opacity,
+                                        removal: .opacity.combined(
+                                            with: .scale(scale: 0.94, anchor: .top)
+                                        )
+                                    ))
+                            case .ready, .saving, .saved, .saveFailed,
+                                 .noFood, .failed:
+                                resultFlow
+                            }
                         }
+                        .animation(
+                            UIAccessibility.isReduceMotionEnabled
+                                ? .appReduced
+                                : .appMorph,
+                            value: isShowingResult
+                        )
                     }
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, 120) // breathing room above the pinned CTA
@@ -171,9 +219,21 @@ struct CaptureView: View {
         .task(id: viewModel.state.isIdle) {
             // Re-fetch when the flow returns to idle (after a save),
             // so the next scan attempt evaluates the freshly-updated
-            // totals — the just-inserted meal counts now.
-            let status = await CalorieReminderService.shared.currentStatus()
-            cachedCalorieStatus = status
+            // totals — the just-inserted meal counts now. Also drives
+            // the daily check-in card's meal-count copy with the same
+            // round-trip (no second fetch).
+            let snapshot = await CalorieReminderService.shared.currentSnapshot()
+            cachedCalorieStatus = snapshot.status
+            // `snapshot.mealCount` is `nil` when the today's-logs fetch
+            // failed. Don't clobber a previously-known count with
+            // "unknown" — a transient network blip would otherwise
+            // collapse the card to the 0-meal empty-state copy. If
+            // there is no prior count, the card hides itself via the
+            // `if let count = cachedTodayMealCount` guard at the call
+            // site, which is the correct behavior under "unknown."
+            if let count = snapshot.mealCount {
+                cachedTodayMealCount = count
+            }
         }
         .sheet(item: $pickerSheet) { sheet in
             switch sheet {
@@ -229,9 +289,13 @@ struct CaptureView: View {
                 if !isPresented { viewModel.discardSaved() }
             }
         )) {
-            SavedConfirmationSheet(onClose: { viewModel.discardSaved() })
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.visible)
+            SavedConfirmationSheet(
+                onClose: { viewModel.discardSaved() },
+                nextStep: computedNextStepHint(),
+                onNextStepAction: handleNextStepAction
+            )
+            .presentationDetents([.fraction(0.7), .large])
+            .presentationDragIndicator(.visible)
         }
         // Phase 18 — mood pulse, presented after `.saved` auto-
         // transitions (1.2s) or the user closes the success sheet.
@@ -396,6 +460,24 @@ struct CaptureView: View {
         }
         .padding(.top, AppSpacing.xl2) // 48pt breathing room
 
+        // Daily Check-in / Today Pulse — combined card. Renders the
+        // daily check-in line (count-aware, deterministic, non-shaming)
+        // as the primary copy, plus an optional calorie sub-line when
+        // the user has a valid daily goal, plus an end-of-day return
+        // hook after 20:00 once at least one meal is logged. Reads
+        // entirely from caches populated by the same `.task` that
+        // feeds the scan-warning dialog — no extra polling/timers.
+        if viewModel.state.isIdle, let count = cachedTodayMealCount {
+            DailyCheckInCard(
+                mealCount: count,
+                rhythm: rhythmStore.rhythm(),
+                status: cachedCalorieStatus,
+                now: Date()
+            )
+            .padding(.top, AppSpacing.lg)
+            .transition(.opacity)
+        }
+
         // Photo card (always 354 wide-ish via maxWidth; aspect-ratio 1)
         photoCard
             .padding(.top, AppSpacing.xl2)
@@ -406,6 +488,18 @@ struct CaptureView: View {
                 .padding(.top, AppSpacing.lg)
                 .frame(maxWidth: .infinity)
                 .transition(.opacity)
+
+            // First-time activation hint. Surfaces only for users whose
+            // local rhythm store has never recorded a save — i.e. lifetime
+            // empty. `markToday()` on first successful save flips
+            // `totalLoggedDays` to 1 and this element drops out naturally
+            // (no dismissal state required).
+            if rhythmStore.rhythm().totalLoggedDays == 0 {
+                firstScanActivationHint
+                    .padding(.top, AppSpacing.sm)
+                    .frame(maxWidth: .infinity)
+                    .transition(.opacity)
+            }
 
             // Phase 15 — secondary affordance under the photo card so the
             // re-log path is visible without competing with the primary
@@ -569,6 +663,20 @@ struct CaptureView: View {
         )
     }
 
+    /// Lifetime-empty activation hint. One short, encouraging line so the
+    /// first session feels obvious without instructional copy or modals.
+    /// `LoggingRhythmStore.markToday()` flips the lifetime counter on
+    /// first save; this view drops out on the next render — no dismissal
+    /// flag needed.
+    private var firstScanActivationHint: some View {
+        Text("Your first scan builds today's pulse.")
+            .appFont(.caption)
+            .foregroundStyle(Color.brandDeep)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel("Tip: your first scan builds today's pulse.")
+    }
+
     @ViewBuilder
     private var analyzeStatus: some View {
         switch viewModel.state {
@@ -613,6 +721,19 @@ struct CaptureView: View {
         return nil
     }
 
+    /// Map the current capture state to the reward pill's phase.
+    /// `.ready` and `.saveFailed` collapse to `.idle` so the pill
+    /// doesn't claim success before the row lands — and so a transient
+    /// save failure doesn't briefly read "Added to today" while the
+    /// state was already passing through `.saving`.
+    private var saveRewardPhase: SaveRewardPhase {
+        switch viewModel.state {
+        case .saving:           return .saving
+        case .saved, .moodPulse: return .saved
+        default:                 return .idle
+        }
+    }
+
     @ViewBuilder
     private var resultFlow: some View {
         if let payload = saveFlowPayload {
@@ -621,6 +742,7 @@ struct CaptureView: View {
                     image: payload.image,
                     response: payload.response,
                     isSaving: viewModel.state.isSaving,
+                    saveRewardPhase: saveRewardPhase,
                     onSave:   { handleSaveTapped() },
                     onCancel: { handleCancelTapped() }
                 )
@@ -768,17 +890,111 @@ struct CaptureView: View {
     /// view-instance reference.
     fileprivate static func scanWarningTitle(_ kind: ScanWarningKind) -> String {
         switch kind {
-        case .reached:     return "You've reached your calorie goal for today."
-        case .approaching: return "You're close to your calorie goal."
+        case .reached:     return "You've reached today's goal."
+        case .approaching: return "You're close to today's goal."
         }
     }
 
     fileprivate static func scanWarningMessage(_ kind: ScanWarningKind) -> String {
         switch kind {
         case .reached:
-            return "Scanning another meal may put you further over your target."
+            return "Log gently from here — this one will tip you over."
         case .approaching:
-            return "You can still log it — just a heads up."
+            return "Still room for this one — just a friendly heads up."
+        }
+    }
+
+    // MARK: - After-save next-step suggestion
+
+    /// Computes a small inline hint for the saved-confirmation sheet.
+    /// Inputs come from caches already maintained by this view plus the
+    /// just-saved response carried by the current `.saved` state — no
+    /// new fetch is started here.
+    ///
+    /// `cachedCalorieStatus` is taken at scan-time, which is *before*
+    /// the meal we just inserted. To pick the right copy we estimate
+    /// the post-save status by folding the saved meal's calories into
+    /// the cached `consumed`. Otherwise a meal that crosses the goal
+    /// would still read "Still room left today."
+    private func computedNextStepHint() -> NextStepHint? {
+        let lifetimeDays = rhythmStore.rhythm().totalLoggedDays
+
+        // First-ever save — celebrate without nudging anywhere in
+        // particular. "View today" is the natural follow-up.
+        if lifetimeDays <= 1 {
+            return NextStepHint(
+                message: "Nice — your first day is started.",
+                actionLabel: "View today",
+                action: .viewTracker
+            )
+        }
+
+        // From here we need a valid pre-save status to give useful
+        // direction. Missing/invalid status falls back to the generic
+        // "Added to today." line.
+        guard let cached = cachedCalorieStatus, cached.hasValidGoal else {
+            return NextStepHint(
+                message: "Added to today.",
+                actionLabel: nil,
+                action: nil
+            )
+        }
+
+        // Fold the just-saved meal's calories into the pre-save total.
+        // Calories may be nil on a sparse analyze response — treat that
+        // as 0 rather than wedge the suggestion path. Reuses the same
+        // `compute` rules as the rest of the app so the hint can never
+        // disagree with the Today ring's warning state.
+        let savedCalories = savedMealCalories ?? 0
+        let postSaveStatus = DailyCalorieGoalStatus.compute(
+            consumed: cached.consumed + savedCalories,
+            goal: cached.goal
+        )
+
+        if postSaveStatus.warningState == .reached || postSaveStatus.exceededBy > 0 {
+            return NextStepHint(
+                message: "Goal reached for today.",
+                actionLabel: "View tracker",
+                action: .viewTracker
+            )
+        }
+        if postSaveStatus.warningState == .approaching {
+            return NextStepHint(
+                message: "You're close to today's goal.",
+                actionLabel: "View tracker",
+                action: .viewTracker
+            )
+        }
+        return NextStepHint(
+            message: "Still room left today.",
+            actionLabel: "Scan another meal",
+            action: .scanAnother
+        )
+    }
+
+    /// Pulls the calories of the meal we just saved out of the current
+    /// state. Only valid inside the `.saved` window — the suggestion
+    /// path is only invoked there, but the lookup is defensive in case
+    /// the state has moved on by the time SwiftUI re-evaluates the
+    /// sheet body.
+    private var savedMealCalories: Double? {
+        if case .saved(_, let response, _) = viewModel.state {
+            return response.analysis.calories
+        }
+        return nil
+    }
+
+    /// Routes the inline next-step action. The sheet dismisses itself
+    /// after this fires; we only need to set up where the user ends up.
+    private func handleNextStepAction(_ action: NextStepHint.Action) {
+        viewModel.discardSaved()
+        switch action {
+        case .viewTracker:
+            notifRouter.requestTab(1)
+        case .scanAnother:
+            // Already on Home; dismissing the saved sheet lets the
+            // user return to the idle capture flow. Nothing to do.
+            break
         }
     }
 
@@ -832,6 +1048,226 @@ private struct BreathingCameraHalo: View {
             }
         }
         .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Daily Check-in card
+
+/// Retention-polish replacement for the prior `TodayPulseCard`. Combines:
+///
+///   1. **Primary check-in copy** — deterministic, count-aware, never
+///      shaming. Mirrors the design contract:
+///          0 meals → "Start today with one photo."
+///          1 meal  → "Nice start — 1 meal logged today."
+///          2 meals → "You're building today's picture."
+///         3+ meals → "Today is well tracked."
+///      The 0-meal branch is personalized when the local rhythm store
+///      knows the user logged recently:
+///          yesterdayLogged → "Back from yesterday — start today with one photo."
+///          last log ≤ 30d  → "Your last log was {Friday|date}. Ready for today's first meal?"
+///
+///   2. **Secondary sub-line (optional)** — combined with the count when
+///      a valid daily calorie goal exists. Examples:
+///          "2 meals logged · about 420 calories left"
+///          "3 meals logged · goal reached"
+///      Or, on the empty path, a rhythm cue:
+///          "First check-in logged." / "You're on a 4-day logging rhythm."
+///
+///   3. **End-of-day return hook** — inline footer, only visible after
+///      20:00 local *and* at least one meal logged today. Quiet, no
+///      modal, no notification, no infinite animation:
+///          "Your day is almost complete. Come back tomorrow for a fresh pulse."
+///
+/// All inputs are pure data caches owned by the parent — there is no
+/// polling, no timer, no retained `Task`. Repeated renders produce
+/// identical copy for the same inputs (deterministic).
+private struct DailyCheckInCard: View {
+    let mealCount: Int
+    let rhythm: LoggingRhythmStore.Rhythm
+    let status: DailyCalorieGoalStatus?
+    let now: Date
+
+    /// Local hour above which the end-of-day return hook is permitted.
+    /// Lives here (not in a service) because the hook is purely a UI
+    /// concern — there is no notification or scheduler involved.
+    private static let endOfDayHourLocal: Int = 20
+
+    private var hasGoal: Bool {
+        status?.hasValidGoal == true
+    }
+
+    private var isEndOfDay: Bool {
+        Calendar.current.component(.hour, from: now) >= Self.endOfDayHourLocal
+    }
+
+    private var primaryText: String {
+        switch mealCount {
+        case 0:
+            // Personalize the empty state when the rhythm store knows
+            // the user has logged recently. Falls through to the
+            // generic copy if there's no usable history.
+            if rhythm.yesterdayLogged {
+                return "Back from yesterday — start today with one photo."
+            }
+            if let last = rhythm.lastLoggedDate {
+                return "Your last log was \(Self.relativeDayPhrase(for: last, now: now)). Ready for today's first meal?"
+            }
+            return "Start today with one photo."
+        case 1:
+            return "Nice start — 1 meal logged today."
+        case 2:
+            return "You're building today's picture."
+        default:
+            return "Today is well tracked."
+        }
+    }
+
+    /// Optional sub-line. Order of precedence:
+    ///   1. End-of-day hook (already-logged users in the 20:00+ window).
+    ///   2. Calorie hint, combined with the count, when there's a goal
+    ///      and at least one meal.
+    ///   3. Calorie hint alone (empty state, valid goal).
+    ///   4. Rhythm copy (first-ever check-in / multi-day rhythm).
+    ///   5. Nothing.
+    private var secondaryText: String? {
+        if isEndOfDay, mealCount >= 1 {
+            return "Your day is almost complete. Come back tomorrow for a fresh pulse."
+        }
+        if let status, status.hasValidGoal, mealCount >= 1 {
+            if status.warningState == .reached || status.exceededBy > 0 {
+                return "goal reached"
+            }
+            return "about \(Int(status.remaining.rounded())) calories left"
+        }
+        if let status, status.hasValidGoal, mealCount == 0 {
+            // Empty state with a goal set — keep the calorie sub-line
+            // quiet (we don't want to greet the user with their target
+            // before they've logged anything). Surface rhythm instead
+            // if it exists.
+            if rhythm.consecutiveDays >= 2 {
+                return "You're on a \(rhythm.consecutiveDays)-day logging rhythm."
+            }
+            return nil
+        }
+        if rhythm.todayLogged, rhythm.totalLoggedDays == 1 {
+            return "First check-in logged."
+        }
+        if rhythm.consecutiveDays >= 2 {
+            return "You're on a \(rhythm.consecutiveDays)-day logging rhythm."
+        }
+        return nil
+    }
+
+    /// Combined first line: meal-count copy with the calorie cue
+    /// inlined when both are present. Example: "2 meals logged · about
+    /// 420 calories left". Kept as a derived view of `primaryText` +
+    /// `secondaryText` for the count-with-calorie variant only; all
+    /// other states render the two lines stacked.
+    private var combinedPrimary: String? {
+        guard let status, status.hasValidGoal, mealCount >= 1 else { return nil }
+        let countPhrase: String = {
+            switch mealCount {
+            case 1: return "1 meal logged"
+            default: return "\(mealCount) meals logged"
+            }
+        }()
+        let caloriePhrase: String
+        if status.warningState == .reached || status.exceededBy > 0 {
+            caloriePhrase = "goal reached"
+        } else {
+            caloriePhrase = "about \(Int(status.remaining.rounded())) calories left"
+        }
+        return "\(countPhrase) · \(caloriePhrase)"
+    }
+
+    private var iconName: String {
+        if isEndOfDay, mealCount >= 1 { return "moon.stars.fill" }
+        switch mealCount {
+        case 0:  return "sun.max.fill"
+        case 1:  return "leaf.fill"
+        case 2:  return "leaf.fill"
+        default: return "checkmark.seal.fill"
+        }
+    }
+
+    private var iconAccent: Color {
+        if mealCount >= 3 { return .brandDeep }
+        return .brand
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: AppSpacing.sm) {
+                ZStack {
+                    Circle()
+                        .fill(Color.brandSoft)
+                        .frame(width: 28, height: 28)
+                    Image(systemName: iconName)
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundStyle(iconAccent)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(combinedPrimary ?? primaryText)
+                        .appFont(.bodyEmphasis)
+                        .foregroundStyle(Color.ink)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if combinedPrimary == nil, let secondary = secondaryText {
+                        Text(secondary)
+                            .appFont(.caption)
+                            .foregroundStyle(Color.inkMute)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.sm)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.borderHairline, lineWidth: 1)
+        )
+        .appShadow(.shadowCard)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var accessibilityText: String {
+        if let combined = combinedPrimary { return combined }
+        if let secondary = secondaryText {
+            return "\(primaryText) \(secondary)"
+        }
+        return primaryText
+    }
+
+    /// Compact phrasing of a recent past date relative to `now`. Mirrors
+    /// the rhythm store's 30-day cap; older dates would never land here.
+    private static func relativeDayPhrase(for date: Date,
+                                          now: Date,
+                                          calendar: Calendar = .current) -> String {
+        let dayDelta = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: date),
+            to: calendar.startOfDay(for: now)
+        ).day ?? 0
+        if dayDelta <= 1 { return "yesterday" }
+        if dayDelta < 7 {
+            let f = DateFormatter()
+            f.locale = .current
+            f.dateFormat = "EEEE"
+            return f.string(from: date)
+        }
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = "MMM d"
+        return f.string(from: date)
     }
 }
 

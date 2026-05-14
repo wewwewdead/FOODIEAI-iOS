@@ -213,6 +213,7 @@ struct ExpandableMealCard: View {
         .padding(AppSpacing.lg)
     }
     .background(Color.bgCanvas)
+    .environmentObject(FavoritesStore.shared)
 }
 
 private extension FoodLog {

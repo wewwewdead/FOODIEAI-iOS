@@ -85,8 +85,8 @@ struct MacroProgressBar: View {
     private var warningCopy: String? {
         switch warningState {
         case .safe:        return nil
-        case .approaching: return "Approaching your \(label.lowercased()) goal"
-        case .reached:     return "\(label) goal reached"
+        case .approaching: return "Close to your \(label.lowercased()) goal"
+        case .reached:     return "\(label) goal reached for today"
         }
     }
 
@@ -110,21 +110,24 @@ struct MacroProgressBar: View {
                 .foregroundStyle(Color.inkMute)
             }
 
+            // Implicit `.animation(_:value: fillProgress)` on the
+            // GeometryReader frame guarantees the 0→target fill tweens
+            // on first appear regardless of when the GeometryReader's
+            // size resolves or whether the caller wraps the assignment
+            // in `withAnimation`. Color/scale changes ride the outer
+            // `.animation(_:value: warningState)` on the VStack.
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule()
                         .fill(Color.borderHairline)
-                        .frame(height: 6)
                     Capsule()
                         .fill(fillColor)
-                        .frame(width: max(0, geo.size.width * fillProgress),
-                               height: 6)
+                        .frame(width: max(0, geo.size.width * fillProgress))
                         .scaleEffect(y: reachedPulse ? 1.55 : 1.0, anchor: .center)
-                        .animation(.easeInOut(duration: 0.2),
-                                   value: warningState)
                 }
             }
             .frame(height: 6)
+            .animation(reduceMotion ? .appReduced : .motionProgressFill, value: fillProgress)
 
             if let copy = warningCopy {
                 Text(copy)
@@ -132,22 +135,20 @@ struct MacroProgressBar: View {
                     .foregroundStyle(
                         warningState == .reached ? Color.error : Color.inkMute
                     )
-                    .transition(.opacity)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .animation(reduceMotion ? .appReduced : .motionBase, value: warningState)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "\(label) \(Int(value.rounded())) of \(Int(goal.rounded())) \(unit)"
-            + (warningCopy.map { ". \($0)" } ?? "")
-        )
+        .accessibilityLabel(accessibilityCopy)
         .onAppear {
-            // Phase 14 delight: bar visibly overshoots before settling.
-            // Reduce Motion swaps the bouncy spring for a calm ease so the
-            // fill still animates from 0 → target (the user needs the
-            // visual delta to read the value), just without the overshoot.
+            // Phase 14 delight: bar fills with a deliberate reveal that
+            // matches the calorie ring's morph. Reduce Motion swaps the
+            // spring for a calm ease so the fill still animates from
+            // 0 → target without the overshoot.
             let curve: Animation = reduceMotion
                 ? .appReduced
-                : .appBouncy.delay(0.05)
+                : .motionProgressFill.delay(0.05)
             withAnimation(curve) {
                 fillProgress = clampedProgress
             }
@@ -157,7 +158,7 @@ struct MacroProgressBar: View {
             if warningState == .reached { didFlashReached = true }
         }
         .onChange(of: clampedProgress) { _, new in
-            withAnimation(reduceMotion ? .appReduced : .appBouncy) {
+            withAnimation(reduceMotion ? .appReduced : .motionProgressFill) {
                 fillProgress = new
             }
         }
@@ -174,6 +175,14 @@ struct MacroProgressBar: View {
                 withAnimation(.appPress) { reachedPulse = false }
             }
         }
+    }
+
+    private var accessibilityCopy: String {
+        let v = Int(value.rounded())
+        let g = Int(goal.rounded())
+        let head = "\(label) \(v) of \(g) \(unit)"
+        guard let copy = warningCopy else { return head }
+        return "\(head). \(copy)"
     }
 }
 

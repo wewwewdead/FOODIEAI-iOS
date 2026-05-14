@@ -93,27 +93,64 @@ private struct CoachRow: View {
     let isSaving: Bool
     let onToggle: () -> Void
 
+    /// Week 3 polish — short, evergreen one-liner per canonical coach.
+    /// Hidden if the name isn't in the lookup table, so adding a new
+    /// coach can't silently render an empty description.
+    private static let descriptions: [String: String] = [
+        "Albert Einstein":   "Curious, gentle, fond of relativity.",
+        "Cleopatra":         "Regal voice, calm authority.",
+        "Julius Caesar":     "Decisive, direct, to the point.",
+        "Shakespeare":       "Theatrical, vivid, wry.",
+        "Frida Kahlo":       "Passionate, honest, bold colors.",
+        "Bruce Lee":         "Disciplined, focused, fluid.",
+        "Leonardo da Vinci": "Observant, balanced, endlessly curious.",
+        "Napoleon Bonaparte":"Strategic, ambitious, decisive.",
+        "Amelia Earhart":    "Brave, plainspoken, encouraging.",
+        "Marie Curie":       "Patient, precise, quietly determined.",
+    ]
+
+    @State private var stamp: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         Button {
             Haptics.tap()
+            // Optimistic stamp so the chosen feel lands with the tap,
+            // not after the network round-trip. Skipped under Reduce
+            // Motion — the star fill change itself communicates state.
+            if !reduceMotion {
+                stamp = true
+                withAnimation(.appStamp) { stamp = false }
+            }
             onToggle()
         } label: {
             HStack(alignment: .center, spacing: AppSpacing.md) {
                 // Single-letter avatar circle, mirrors CoachBadge pattern.
+                // Brand-deep fill when starred so the chosen coaches read
+                // at a glance from the row list.
                 ZStack {
                     Circle()
-                        .fill(Color.brandSoft)
+                        .fill(isStarred ? Color.brand : Color.brandSoft)
                         .frame(width: 36, height: 36)
                     Text(initials(name))
                         .appFont(.captionStrong)
-                        .foregroundStyle(Color.brandDeep)
+                        .foregroundStyle(isStarred ? Color.bgSurface : Color.brandDeep)
                 }
+                .scaleEffect(stamp ? 1.08 : 1)
 
-                Text(name)
-                    .appFont(.title2)
-                    .foregroundStyle(Color.ink)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .appFont(.title2)
+                        .foregroundStyle(Color.ink)
+                        .lineLimit(1)
+                    if let blurb = Self.descriptions[name] {
+                        Text(blurb)
+                            .appFont(.caption)
+                            .foregroundStyle(Color.inkMute)
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 if isSaving {
                     ProgressView()
@@ -123,18 +160,24 @@ private struct CoachRow: View {
                     Image(systemName: isStarred ? "star.fill" : "star")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(isStarred ? Color.brand : Color.inkLight)
+                        .scaleEffect(stamp ? 1.22 : 1)
                 }
             }
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.sm + 2)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .fill(isStarred ? Color.brandSoft : Color.bgSurface)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: AppRadius.lg)
-                    .strokeBorder(Color.borderHairline, lineWidth: 1)
+                    .strokeBorder(
+                        isStarred ? Color.brand.opacity(0.45) : Color.borderHairline,
+                        lineWidth: isStarred ? 1.5 : 1
+                    )
             )
+            .animation(reduceMotion ? .appReduced : .appReveal, value: isStarred)
         }
         .buttonStyle(.plain)
         .disabled(isSaving)

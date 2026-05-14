@@ -362,7 +362,12 @@ struct OnboardingPhysiologyStepView: View {
                     .buttonStyle(.plain)
                 }
 
-                Text("Defaults follow US Dietary Guidelines (50/25/25 carb/protein/fat). You can tweak any number in Profile.")
+                Text("We'll use this as your daily target. You can adjust it anytime in Profile.")
+                    .appFont(.caption)
+                    .foregroundStyle(Color.brandDeep)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("Defaults follow US Dietary Guidelines (50/25/25 carb/protein/fat).")
                     .appFont(.caption)
                     .foregroundStyle(Color.inkLight)
                     .fixedSize(horizontal: false, vertical: true)

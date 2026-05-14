@@ -36,6 +36,11 @@ struct MealCard: View {
     /// the thumbnail. Restored from v1 MealRow — the redesigned card had
     /// collapsed everything into a single expansion-only tap surface.
     @State private var showFullImage: Bool = false
+    /// Week 3 — heart-tap stamp scale. Bumps to 1.18 on toggle, springs
+    /// back to 1. Pure local state; persistence lives in `FavoritesStore`.
+    @State private var heartStamp: Bool = false
+    @EnvironmentObject private var favorites: FavoritesStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let imageService = FoodImageService()
 
@@ -62,7 +67,9 @@ struct MealCard: View {
                         Text(macrosLine)
                             .appFont(.caption)
                             .foregroundStyle(Color.inkMute)
-                            .lineLimit(1)
+                            .lineLimit(expandsName ? nil : 1)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: expandsName)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -89,10 +96,47 @@ struct MealCard: View {
                 .strokeBorder(Color.borderHairline, lineWidth: 1)
         )
         .appShadow(.shadowCard)
+        .overlay(alignment: .topTrailing) {
+            favoriteButton
+                .padding(.top, 4)
+                .padding(.trailing, 6)
+        }
         .task { await loadThumbnail() }
         .fullScreenCover(isPresented: $showFullImage) {
             FullImageViewer(imagePath: log.imagePath ?? log.imageThumbPath ?? "")
         }
+    }
+
+    // MARK: - Favorite (Week 3)
+
+    /// Small heart in the top-right corner. Hidden in a 22×22 hit area
+    /// padded with a 6-point inset so it lives in the corner without
+    /// covering the food name. Tap pops a `Haptics.tap()` and a brief
+    /// scale-stamp (1.18 → 1) so the gesture reads as deliberate. State
+    /// persists via the app-wide `FavoritesStore` (UserDefaults), keyed
+    /// by normalized food name so casing/spacing don't break identity.
+    @ViewBuilder
+    private var favoriteButton: some View {
+        let on = favorites.isFavorite(foodName: log.foodName)
+        Button {
+            Haptics.tap()
+            _ = favorites.toggle(foodName: log.foodName)
+            if reduceMotion {
+                heartStamp = false
+            } else {
+                heartStamp = true
+                withAnimation(.appStamp) { heartStamp = false }
+            }
+        } label: {
+            Image(systemName: on ? "heart.fill" : "heart")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(on ? Color.brand : Color.inkLight)
+                .scaleEffect(heartStamp ? 1.18 : 1)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(on ? "Remove from favorites" : "Add to favorites")
     }
 
     /// Thumbnail wrapped in a Button so a tap on the image opens the
@@ -223,6 +267,7 @@ private struct MealCardButtonStyle: ButtonStyle {
     .padding(AppSpacing.lg)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .background(Color.bgCanvas)
+    .environmentObject(FavoritesStore.shared)
 }
 
 private extension FoodLog {

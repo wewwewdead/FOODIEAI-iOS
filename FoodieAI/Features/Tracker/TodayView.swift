@@ -112,50 +112,54 @@ struct TodayView: View {
     /// Hidden when there's no recap yet. The banner is visually distinct
     /// from the meal/pattern cards (slightly cooler accent) so it reads
     /// as a separate moment, not just another row.
+    ///
+    /// When a recap exists, render the full banner. When no recap exists
+    /// but the user has been logging consistently this week (3+ days),
+    /// surface a quiet, non-clickable "building" hint so the reflection
+    /// surface doesn't feel absent. The hint reads purely from the local
+    /// rhythm store — no fetch, no AI call.
     @ViewBuilder
     private var weeklyRecapBanner: some View {
         if let recap = viewModel.latestRecap {
-            Button {
+            WeeklyRecapBanner(recap: recap) {
                 Haptics.tap()
                 showingRecap = true
-            } label: {
-                HStack(spacing: AppSpacing.md) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.brandSoft)
-                            .frame(width: 36, height: 36)
-                        Image(systemName: "calendar.badge.clock")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(Color.brandDeep)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("This week")
-                            .appFont(.captionStrong)
-                            .foregroundStyle(Color.inkMute)
-                        Text(recap.headlineStat ?? recap.coachName)
-                            .appFont(.title2)
-                            .foregroundStyle(Color.ink)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .heavy))
-                        .foregroundStyle(Color.inkLight)
-                }
-                .padding(AppSpacing.md)
-                .frame(maxWidth: .infinity)
-                .background(
-                    RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppRadius.lg)
-                        .strokeBorder(Color.borderHairline, lineWidth: 1)
-                )
-                .appShadow(.shadowCard)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("This week's recap. Tap to read.")
+        } else if loggedDaysThisWeekLocal >= 3 {
+            WeeklyRecapBuildingHint()
         }
+    }
+
+    /// Count of distinct local-day keys logged within the current ISO
+    /// week (Monday–Sunday by default; matches the recap service's week
+    /// window). Read directly from the rhythm store — cheap, pure, no
+    /// query.
+    private var loggedDaysThisWeekLocal: Int {
+        let cal = Calendar.current
+        let now = Date()
+        guard let interval = cal.dateInterval(of: .weekOfYear, for: now) else {
+            return 0
+        }
+        // The rhythm store carries `yyyy-MM-dd` keys in the user's
+        // local calendar. Reuse the same formatter rules so a date
+        // produced here is byte-equal to whatever `markToday()` stored.
+        let f = DateFormatter()
+        f.calendar = cal
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = cal.timeZone
+        f.dateFormat = "yyyy-MM-dd"
+
+        let logged = LoggingRhythmStore.shared.loggedDays
+        var cursor = interval.start
+        var count = 0
+        while cursor < interval.end {
+            if logged.contains(f.string(from: cursor)) {
+                count += 1
+            }
+            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        return count
     }
 
     // MARK: - Under-calorie reminder (Phase 20)
@@ -238,12 +242,12 @@ struct TodayView: View {
             case .safe:
                 EmptyView()
             case .approaching:
-                Text("Approaching your calorie goal")
+                Text("You're close to today's goal")
                     .appFont(.caption)
                     .foregroundStyle(Color.inkMute)
                     .transition(.opacity)
             case .reached:
-                Text("Calorie goal reached")
+                Text("You've reached today's goal")
                     .appFont(.caption)
                     .foregroundStyle(Color.error)
                     .transition(.opacity)
@@ -566,6 +570,118 @@ private struct PatternCard: View {
     }
 }
 
+// MARK: - Weekly recap banner (Week 3 polish)
+
+/// "This week" entry point for the latest recap. Lives only when
+/// `latestRecap` is non-nil — we never show a teaser for a recap that
+/// doesn't exist yet.
+///
+/// Week 3 polish:
+///   - subtle reveal: opacity + 6pt upward drift on first appear, with
+///     a small scale-in on the icon halo so the card lands rather than
+///     popping in.
+///   - copy: "Your week is ready" with a coach-attribution subtitle.
+///     Uses the recap's `headlineStat` when present so the user sees a
+///     concrete promise of content, falling back to the coach's name.
+///   - respects Reduce Motion: drift and scale collapse to a flat fade.
+///
+/// No retained Tasks; no timers; the reveal is a one-shot driven by
+/// `.onAppear` flipping a single `@State` flag.
+private struct WeeklyRecapBanner: View {
+    let recap: WeeklyRecap
+    let onTap: () -> Void
+
+    @State private var revealed: Bool = false
+    @State private var haloPulsed: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Title is evergreen — the recap's body is the real content, so
+    /// the entry point only needs to invite the tap.
+    private var title: String { "Your week is ready" }
+
+    /// Subtitle prefers a concrete promise (the headlineStat) but
+    /// gracefully drops to a coach byline when the server returned
+    /// without one. Never empty when the banner is on screen.
+    private var subtitle: String {
+        if let stat = recap.headlineStat, !stat.isEmpty {
+            return stat
+        }
+        return "A short recap from \(recap.coachName)"
+    }
+
+    /// Secondary line — coach byline when a headlineStat already
+    /// occupies the subtitle. `nil` when the subtitle already conveys
+    /// the coach's voice (no headlineStat) so the card doesn't stack
+    /// redundant attribution.
+    private var coachByline: String? {
+        guard let stat = recap.headlineStat, !stat.isEmpty else { return nil }
+        return "From \(recap.coachName)"
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: AppSpacing.md) {
+                ZStack {
+                    Circle()
+                        .fill(Color.brandSoft)
+                        .frame(width: 38, height: 38)
+                        .scaleEffect(haloPulsed ? 1 : 0.85)
+                    Image(systemName: "calendar.badge.clock")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.brandDeep)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .appFont(.title2)
+                        .foregroundStyle(Color.ink)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                        .lineLimit(1)
+                    if let byline = coachByline {
+                        Text(byline)
+                            .appFont(.caption)
+                            .foregroundStyle(Color.inkLight)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundStyle(Color.inkLight)
+            }
+            .padding(AppSpacing.md)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .strokeBorder(Color.brand.opacity(0.35), lineWidth: 1)
+            )
+            .appShadow(.shadowCard)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            coachByline.map { "\(title). \(subtitle). \($0). Tap to read." }
+                ?? "\(title). \(subtitle). Tap to read."
+        )
+        .opacity(revealed ? 1 : 0)
+        .offset(y: (revealed || reduceMotion) ? 0 : 6)
+        .onAppear {
+            guard !revealed else { return }
+            let revealAnim: Animation = reduceMotion ? .appReduced : .motionReveal
+            withAnimation(revealAnim) { revealed = true }
+            if !reduceMotion {
+                withAnimation(.appBouncy.delay(0.08)) { haloPulsed = true }
+            } else {
+                haloPulsed = true
+            }
+        }
+    }
+}
+
 // MARK: - Under-calorie reminder card (Phase 20)
 
 /// Inline card surfaced on the Today screen between 22:00 and 23:59
@@ -613,7 +729,7 @@ private struct UnderCalorieReminderCard: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("You're still under your calorie goal")
+                Text("Still room left today")
                     .appFont(.bodyEmphasis)
                     .foregroundStyle(Color.ink)
                     .fixedSize(horizontal: false, vertical: true)
@@ -658,5 +774,43 @@ private struct UnderCalorieReminderCard: View {
         )
         .appShadow(.shadowCard)
         .accessibilityElement(children: .contain)
+    }
+}
+
+// MARK: - Weekly recap building hint
+
+/// Quiet, non-clickable placeholder shown when the user has logged
+/// 3+ local days this week but no recap exists yet. Communicates
+/// that the reflection surface is alive even before the server has
+/// generated a recap. Local-only — no fetch, no AI call, no timer.
+private struct WeeklyRecapBuildingHint: View {
+    var body: some View {
+        HStack(spacing: AppSpacing.md) {
+            ZStack {
+                Circle()
+                    .fill(Color.brandSoft)
+                    .frame(width: 32, height: 32)
+                Image(systemName: "sparkles")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.brandDeep)
+            }
+            Text("Your weekly reflection is building.")
+                .appFont(.caption)
+                .foregroundStyle(Color.inkMute)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.borderHairline, lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Your weekly reflection is building.")
     }
 }

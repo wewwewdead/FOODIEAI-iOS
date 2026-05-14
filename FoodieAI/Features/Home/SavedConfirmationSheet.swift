@@ -15,8 +15,36 @@ import SwiftUI
 /// Web equivalent: `SavedMealModal.jsx` (HomePage). The web uses a
 /// centered full-screen modal; iOS keeps the existing `.sheet(.medium)`
 /// presentation, which is the idiomatic equivalent on iOS.
+/// Lightweight payload describing a next-step suggestion shown below
+/// the saved confirmation. Determined by the caller from cached state
+/// (no fetches inside this sheet). `actionLabel` is optional — when nil
+/// only the title line is shown.
+struct NextStepHint: Equatable {
+    let message: String
+    let actionLabel: String?
+    /// Action kind so the parent can route to the right tab. `nil` when
+    /// `actionLabel == nil`.
+    let action: Action?
+
+    enum Action: Equatable {
+        /// Switch to the Tracker tab.
+        case viewTracker
+        /// Stay on Home, dismiss and return to idle for another scan.
+        case scanAnother
+    }
+}
+
 struct SavedConfirmationSheet: View {
     let onClose: () -> Void
+    /// Optional next-step suggestion. Computed by the caller from the
+    /// freshest cached state at the moment of presentation so the sheet
+    /// itself stays network-free. `nil` falls back to the existing
+    /// title-only layout.
+    var nextStep: NextStepHint? = nil
+    /// Invoked when the user taps the inline next-step action. The
+    /// parent is responsible for dismissing this sheet (via `onClose`)
+    /// and routing to the requested destination.
+    var onNextStepAction: ((NextStepHint.Action) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
 
     @State private var checkmarkScale: CGFloat = 0
@@ -32,7 +60,7 @@ struct SavedConfirmationSheet: View {
     var body: some View {
         ZStack {
             Color.bgSurface.ignoresSafeArea()
-            VStack(spacing: AppSpacing.xl2) {
+            VStack(spacing: AppSpacing.xl) {
                 checkmarkBlock
 
                 Text("This food item was saved in your daily tracker successfully!")
@@ -44,6 +72,20 @@ struct SavedConfirmationSheet: View {
                     .offset(y: titleVisible ? 0 : 8)
                     .animation(.appEntrance, value: titleVisible)
 
+                if let hint = nextStep {
+                    NextStepInline(
+                        hint: hint,
+                        onAction: { action in
+                            onNextStepAction?(action)
+                            dismiss()
+                        }
+                    )
+                    .padding(.horizontal, AppSpacing.lg)
+                    .opacity(titleVisible ? 1 : 0)
+                    .offset(y: titleVisible ? 0 : 6)
+                    .animation(.appEntrance, value: titleVisible)
+                }
+
                 PillButton(title: "Close", variant: .primary) {
                     onClose()
                     dismiss()
@@ -53,7 +95,7 @@ struct SavedConfirmationSheet: View {
                 .scaleEffect(buttonVisible ? 1 : 0.95)
                 .animation(.appEntrance, value: buttonVisible)
             }
-            .padding(.vertical, AppSpacing.xl2)
+            .padding(.vertical, AppSpacing.xl)
             .frame(maxWidth: .infinity)
         }
         .task {
@@ -71,17 +113,17 @@ struct SavedConfirmationSheet: View {
             // Radial burst — a hollow brand ring that scales out and fades.
             Circle()
                 .strokeBorder(Color.brand, lineWidth: 4)
-                .frame(width: 96, height: 96)
+                .frame(width: 72, height: 72)
                 .scaleEffect(burstScale)
                 .opacity(burstOpacity)
 
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 96, weight: .regular))
+                .font(.system(size: 72, weight: .regular))
                 .foregroundStyle(Color.brand)
                 .scaleEffect(checkmarkScale)
                 .opacity(checkmarkOpacity)
         }
-        .frame(height: 220)
+        .frame(height: 140)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Saved")
     }
@@ -137,6 +179,44 @@ struct SavedConfirmationSheet: View {
         // read the headline before the action is offered.
         try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 300)
         buttonVisible = true
+    }
+}
+
+/// Small inline message + optional action link rendered below the
+/// saved-confirmation title. Kept visually quiet so it reads as guidance,
+/// not a competing CTA against the Close pill below it.
+private struct NextStepInline: View {
+    let hint: NextStepHint
+    let onAction: (NextStepHint.Action) -> Void
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(hint.message)
+                .appFont(.bodyEmphasis)
+                .foregroundStyle(Color.inkMute)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let label = hint.actionLabel, let action = hint.action {
+                Button {
+                    Haptics.tap()
+                    onAction(action)
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(label)
+                            .appFont(.captionStrong)
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 11, weight: .heavy))
+                    }
+                    .foregroundStyle(Color.brandDeep)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(label)
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 

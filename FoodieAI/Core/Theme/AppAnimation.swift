@@ -76,10 +76,17 @@ extension Animation {
 
     /// "Duolingo-feel" bounce: visibly overshoots its target before settling.
     /// Use for state changes that benefit from a moment of personality —
-    /// progress fills, accordion expansions, hero number landings, button
-    /// release. Loose damping (0.55) and medium response (0.55s) tuned so
-    /// the overshoot is felt but never feels jittery.
+    /// accordion expansions, hero number landings, button release. Loose
+    /// damping (0.55) and medium response (0.55s) tuned so the overshoot is
+    /// felt but never feels jittery.
     static let appBouncy: Animation = .spring(response: 0.55, dampingFraction: 0.55)
+
+    /// Tracker progress reveal — the calorie ring's arc and macro bars
+    /// morphing from 0 → today's value on first appear. Slower (~1s) and
+    /// less bouncy than `.appBouncy` so the fill reads as a deliberate
+    /// "here's where you are" reveal rather than a flick. Same curve for
+    /// both ring and bars so they grow in visual lockstep.
+    static let motionProgressFill: Animation = .spring(response: 1.0, dampingFraction: 0.72)
 
     /// Quick stamp/pop for moments where an element should land with weight —
     /// e.g., hero number scaling 1.0 → 1.06 → 1.0 at the end of its count-up,
