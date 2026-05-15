@@ -38,6 +38,14 @@ struct CaptureView: View {
     @State private var isShowingLibrary = false
     /// Phase 15 — Quick Re-log picker presentation flag.
     @State private var showingRecentMeals = false
+    /// Quick-log-favorite picker presentation flag. Same sheet as
+    /// `showingRecentMeals` but with the favorites filter applied so the
+    /// user sees only hearted meals.
+    @State private var showingFavoriteMeals = false
+    /// Observed so the favorite-shortcut affordance hides itself the
+    /// moment the user un-hearts every meal — no stale "Quick log
+    /// favorite" link sitting on Home with no targets.
+    @StateObject private var favoritesStore = FavoritesStore.shared
     /// Phase 16 — one-time coach picker after the user's first save.
     /// Driven by `CoachPickerOnboardingSheet.didSee`; flipped on close
     /// so subsequent saves never re-present.
@@ -65,6 +73,21 @@ struct CaptureView: View {
     /// for the rest of this CaptureView session so the second tap is
     /// instant.
     @State private var cachedCalorieStatus: DailyCalorieGoalStatus? = nil
+    /// Retained handle for the delayed "scroll into the cascade" Task.
+    /// Stored so a fresh isReady flip can cancel a still-pending scroll
+    /// (e.g. user discarded before the 700ms tail fired), and so we can
+    /// cancel on disappear.
+    @State private var resultScrollTask: Task<Void, Never>? = nil
+    /// First-scan magic: a one-time celebratory ring that radiates around
+    /// the photo card the moment a brand-new user picks their first
+    /// image. Visible-only flag drives whether the subview is mounted;
+    /// the subview owns its own fade-out via a SwiftUI `.task` so we
+    /// never retain a delayed `Task` here. The fired flag guards against
+    /// a second mount in the same session (the rhythm store flips
+    /// `totalLoggedDays` to 1 after save, but the user could pick → discard
+    /// repeatedly before saving — we only celebrate once).
+    @State private var firstScanGlowVisible: Bool = false
+    @State private var firstScanGlowFired: Bool = false
     /// Today's meal count, fetched alongside `cachedCalorieStatus` so the
     /// daily check-in card can render its primary copy without a second
     /// `todaysLogs` round-trip. `nil` while loading; the card renders
@@ -167,6 +190,11 @@ struct CaptureView: View {
                     .padding(.bottom, 120) // breathing room above the pinned CTA
                 }
                 .onChange(of: isReady) { _, ready in
+                    // Always cancel a pending scroll first — whether
+                    // `ready` is flipping on or off, a stale tail would
+                    // fire against a state that no longer wants it.
+                    resultScrollTask?.cancel()
+                    resultScrollTask = nil
                     guard ready else { return }
                     // Phase 14 delight: smoothly scroll the typewriter
                     // cascade into focus once analyze returns. Delay the
@@ -174,8 +202,17 @@ struct CaptureView: View {
                     // count-up + stamp land at the top before the screen
                     // travels down — feels like the result is settling
                     // before the page draws our eye to the substance.
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 700)
+                    resultScrollTask = Task { @MainActor in
+                        do {
+                            try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 700)
+                        } catch {
+                            return
+                        }
+                        // Re-verify we're still in the .ready state — the
+                        // user may have cancelled or discarded during the
+                        // 700ms tail. Avoids scrolling into a now-empty
+                        // result section.
+                        guard !Task.isCancelled, isReady else { return }
                         withAnimation(.spring(response: 0.7, dampingFraction: 0.85)) {
                             proxy.scrollTo(
                                 AnalysisResultView.cascadeAnchorID,
@@ -183,6 +220,10 @@ struct CaptureView: View {
                             )
                         }
                     }
+                }
+                .onDisappear {
+                    resultScrollTask?.cancel()
+                    resultScrollTask = nil
                 }
             }
 
@@ -217,6 +258,12 @@ struct CaptureView: View {
         // resolves to `.invalid` (no warning), which is the safe
         // default for an action that should never be blocked.
         .task(id: viewModel.state.isIdle) {
+            // `.task(id:)` fires on every transition of `isIdle` —
+            // both true→false and false→true. We only want the fetch
+            // to run while we're actually idle (waiting for the user's
+            // next press); the leaving-idle pass would otherwise burn a
+            // round-trip the analyze/save flow doesn't need.
+            guard viewModel.state.isIdle else { return }
             // Re-fetch when the flow returns to idle (after a save),
             // so the next scan attempt evaluates the freshly-updated
             // totals — the just-inserted meal counts now. Also drives
@@ -330,6 +377,17 @@ struct CaptureView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
+        // Quick log favorite — same sheet, favorites filter applied.
+        .sheet(isPresented: $showingFavoriteMeals) {
+            RecentMealsSheet(
+                onPicked: { picked in
+                    Task { await viewModel.relog(picked) }
+                },
+                favoritesOnly: true
+            )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
         // Phase 16 — one-time coach picker after the first save. Fires
         // on the .saved transition; the gate is the local UserDefaults
         // flag inside `CoachPickerOnboardingSheet`. We don't fire on
@@ -344,6 +402,19 @@ struct CaptureView: View {
             // dismiss first via discardSaved, then ride that exit.
             // Implementation: trigger after the user closes the
             // success sheet (state goes saved → idle).
+        }
+        .onChange(of: viewModel.state.image != nil) { _, hasImage in
+            // First-scan magic — kicks in only when a lifetime-empty
+            // user picks their first image. `rhythm.totalLoggedDays`
+            // flips to 1 after the first save, so subsequent sessions
+            // never re-trigger. The `fired` guard handles the within-
+            // session pick → discard → pick loop.
+            guard hasImage,
+                  !firstScanGlowFired,
+                  rhythmStore.rhythm().totalLoggedDays == 0
+            else { return }
+            firstScanGlowFired = true
+            firstScanGlowVisible = true
         }
         .onChange(of: viewModel.state.isIdle) { wasIdle, isIdle in
             // Edge: success sheet dismissed (.saved → .idle).
@@ -509,6 +580,17 @@ struct CaptureView: View {
                 .padding(.top, AppSpacing.md)
                 .frame(maxWidth: .infinity)
                 .transition(.opacity)
+
+            // Quick-log favorite shortcut. Visible only when the user
+            // has at least one hearted meal — otherwise the link points
+            // to an empty list. Reuses RecentMealsSheet's data path so
+            // there's no new fetch.
+            if !favoritesStore.favorites.isEmpty {
+                quickFavoriteLink
+                    .padding(.top, 4)
+                    .frame(maxWidth: .infinity)
+                    .transition(.opacity)
+            }
         }
 
         // Analyze status / errors hover here while a request is in flight
@@ -544,6 +626,22 @@ struct CaptureView: View {
                         if let image = viewModel.state.image {
                             DelightfulImageEntry(image: image)
                                 .id(ObjectIdentifier(image))
+                            // First-scan magic: brand-tinted glow ring that
+                            // radiates around the photo as it lands. Lives
+                            // in the same overlay frame as the image so it
+                            // hugs the card edge. Owns its own fade-out
+                            // (.task with try/catch), so this view doesn't
+                            // retain a delayed Task — SwiftUI cancels the
+                            // .task automatically when the glow's `onDone`
+                            // flips visibility off and removes it.
+                            if firstScanGlowVisible {
+                                FirstScanGlow {
+                                    firstScanGlowVisible = false
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
+                                .allowsHitTesting(false)
+                                .transition(.opacity)
+                            }
                             if viewModel.state.isAnalyzing {
                                 AnalyzingImageAura()
                                     .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
@@ -642,6 +740,30 @@ struct CaptureView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Pick from recent meals to re-log")
+    }
+
+    /// Companion to `quickRelogLink`. Surfaces the favorites-filtered
+    /// picker so users with a small set of hearted meals can land in
+    /// one tap instead of scrolling through the full recents list.
+    private var quickFavoriteLink: some View {
+        Button {
+            Haptics.tap()
+            showingFavoriteMeals = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 11, weight: .heavy))
+                Text("Quick log a favorite")
+                    .appFont(.captionStrong)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 11, weight: .heavy))
+            }
+            .foregroundStyle(Color.brandDeep)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Quick log a favorite meal")
     }
 
     private var hintChip: some View {
@@ -743,6 +865,12 @@ struct CaptureView: View {
                     response: payload.response,
                     isSaving: viewModel.state.isSaving,
                     saveRewardPhase: saveRewardPhase,
+                    // Pass the pre-scan calorie status so the result view
+                    // can render its small day-aware impact line. Status
+                    // is taken at scan-time (before this meal), exactly
+                    // what `predictedImpactCopy` expects to fold the
+                    // analyzed calories into.
+                    dailyStatus: cachedCalorieStatus,
                     onSave:   { handleSaveTapped() },
                     onCancel: { handleCancelTapped() }
                 )
@@ -1405,6 +1533,58 @@ private struct DelightfulImageEntry: View {
                 return
             }
         }
+    }
+}
+
+// MARK: - First-scan celebratory glow
+
+/// Lifetime-first-scan delight. A brand-tinted ring fades in around the
+/// photo card, scales up slightly, then fades out — under a second from
+/// start to finish. Owns its own lifecycle via SwiftUI's `.task`, which
+/// SwiftUI cancels automatically when the view leaves the tree, so the
+/// host doesn't have to retain a delayed `Task` to cancel.
+///
+/// Reduce Motion path: opacity-only crossfade, no scale, same duration
+/// budget. No haptic — DelightfulImageEntry already fires the land
+/// haptic and stacking a second would double-tap the user.
+private struct FirstScanGlow: View {
+    let onDone: () -> Void
+    @State private var opacity: Double = 0
+    @State private var scale: CGFloat = 0.92
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: AppRadius.xl2)
+            .strokeBorder(Color.brand, lineWidth: 3)
+            .scaleEffect(scale)
+            .opacity(opacity)
+            .accessibilityHidden(true)
+            .task {
+                do {
+                    if reduceMotion {
+                        withAnimation(.appReduced) { opacity = 0.55 }
+                        try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 700)
+                        try Task.checkCancellation()
+                        withAnimation(.appReduced) { opacity = 0 }
+                        try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 220)
+                    } else {
+                        withAnimation(.easeOut(duration: 0.45)) {
+                            opacity = 0.75
+                            scale = 1.08
+                        }
+                        try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 520)
+                        try Task.checkCancellation()
+                        withAnimation(.easeIn(duration: 0.32)) {
+                            opacity = 0
+                        }
+                        try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 340)
+                    }
+                    try Task.checkCancellation()
+                } catch {
+                    return
+                }
+                onDone()
+            }
     }
 }
 

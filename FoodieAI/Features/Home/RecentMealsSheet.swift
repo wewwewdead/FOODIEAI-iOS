@@ -20,14 +20,20 @@ struct RecentMealsSheet: View {
     /// environment's `dismiss` immediately after invoking this; the
     /// network insert happens after dismissal.
     let onPicked: (FoodLog) -> Void
+    /// When `true`, the loaded recents are filtered to meals the user
+    /// has hearted in `FavoritesStore`. No new schema and no extra
+    /// network round-trip — the existing recent-meals fetch supplies
+    /// the candidate set; we just filter client-side.
+    var favoritesOnly: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var vm = RecentMealsViewModel()
+    @StateObject private var favorites = FavoritesStore.shared
 
     var body: some View {
         NavigationStack {
             content
-                .navigationTitle("Re-log a meal")
+                .navigationTitle(favoritesOnly ? "Pick a favorite" : "Re-log a meal")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
@@ -37,6 +43,14 @@ struct RecentMealsSheet: View {
                 .background(Color.bgCanvas)
                 .task { await vm.load() }
         }
+    }
+
+    /// Apply the favorites filter to the loaded list. Pure function of
+    /// the inputs so SwiftUI memoizes alongside `vm.state` /
+    /// `favorites.favorites`.
+    private func visibleMeals(_ meals: [FoodLog]) -> [FoodLog] {
+        guard favoritesOnly else { return meals }
+        return meals.filter { favorites.isFavorite(foodName: $0.foodName) }
     }
 
     @ViewBuilder
@@ -55,11 +69,37 @@ struct RecentMealsSheet: View {
             emptyState
 
         case .loaded(let meals):
-            list(meals)
+            let filtered = visibleMeals(meals)
+            if filtered.isEmpty {
+                // Favorites mode with no favorites left in the recent
+                // window — surface a small explanatory empty state
+                // instead of "No saved meals" copy that no longer fits.
+                noFavoritesInRecentsState
+            } else {
+                list(filtered)
+            }
 
         case .failed(let error):
             failedState(error)
         }
+    }
+
+    private var noFavoritesInRecentsState: some View {
+        VStack(spacing: AppSpacing.md) {
+            Image(systemName: "heart")
+                .font(.system(size: 44, weight: .regular))
+                .foregroundStyle(Color.inkLight)
+            Text("No favorites in your recents")
+                .appFont(.title1)
+                .foregroundStyle(Color.ink)
+            Text("Heart a meal from your meal list to make it quick-loggable here.")
+                .appFont(.bodyV2)
+                .foregroundStyle(Color.inkMute)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.lg)
+        }
+        .padding(AppSpacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - States

@@ -103,7 +103,7 @@ struct MealCard: View {
         }
         .task { await loadThumbnail() }
         .fullScreenCover(isPresented: $showFullImage) {
-            FullImageViewer(imagePath: log.imagePath ?? log.imageThumbPath ?? "")
+            FullImageViewer(log: log)
         }
     }
 

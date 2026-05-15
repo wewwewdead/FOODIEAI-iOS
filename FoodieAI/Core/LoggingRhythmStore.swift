@@ -137,22 +137,32 @@ final class LoggingRhythmStore: ObservableObject {
     /// `yyyy-MM-dd` in the user's current time zone. POSIX locale +
     /// gregorian calendar so the formatter never depends on the user's
     /// region settings (which can flip the day boundary).
-    private static func dayKey(for date: Date,
-                               calendar: Calendar) -> String {
+    ///
+    /// Exposed at the type so callers that need to test set-membership
+    /// (e.g. weekly counts) can produce byte-equal keys without
+    /// allocating their own DateFormatter on every render.
+    static func dayKey(for date: Date,
+                       calendar: Calendar = .current) -> String {
         let f = Self.formatter(for: calendar)
         return f.string(from: date)
     }
 
-    /// Per-call DateFormatter so the time zone matches the supplied
-    /// calendar's. Cheap (no ICU rebootstrap at this scale), and keeps
-    /// the formatter from drifting if the user's region changes mid-
-    /// session.
+    /// Cached DateFormatter — invalidated whenever the supplied
+    /// calendar's time zone differs from the cached one (mid-session
+    /// region change, tests passing fixed zones). Keeps the per-render
+    /// weekly-count loop allocation-free.
+    private static var cachedFormatter: (timeZone: TimeZone, formatter: DateFormatter)?
+
     private static func formatter(for calendar: Calendar) -> DateFormatter {
+        if let cached = cachedFormatter, cached.timeZone == calendar.timeZone {
+            return cached.formatter
+        }
         let f = DateFormatter()
         f.calendar = calendar
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = calendar.timeZone
         f.dateFormat = "yyyy-MM-dd"
+        cachedFormatter = (calendar.timeZone, f)
         return f
     }
 

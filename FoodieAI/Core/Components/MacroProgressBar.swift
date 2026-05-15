@@ -49,6 +49,13 @@ struct MacroProgressBar: View {
     let goal: Double
     var unit: String = "g"
     let tint: Color
+    /// Positive-polarity macros (protein, fiber) treat hitting the goal as
+    /// a small win rather than a warning. When set, the fill never tints
+    /// toward `.error`, the caption uses this praise string instead of the
+    /// default warning copy, and the caption renders in muted ink so it
+    /// reads as supportive rather than scary. `nil` preserves the
+    /// existing limit-style behavior used by carbs / sugar / fat.
+    var reachedPraise: String? = nil
 
     @State private var fillProgress: Double = 0
     /// One-shot reached pulse: scales the fill bar's tint up briefly when
@@ -73,6 +80,9 @@ struct MacroProgressBar: View {
     /// reads as "light red" rather than harsh red.
     private var fillColor: Color {
         guard goal > 0 else { return tint }
+        // Positive macros (protein/fiber) keep their tint even at goal —
+        // hitting the target is the desired outcome, not a warning.
+        if reachedPraise != nil { return tint }
         let p = max(value, 0) / goal
         if p >= 1.0 { return .error }
         if p >= 0.80 {
@@ -84,9 +94,16 @@ struct MacroProgressBar: View {
 
     private var warningCopy: String? {
         switch warningState {
-        case .safe:        return nil
-        case .approaching: return "Close to your \(label.lowercased()) goal"
-        case .reached:     return "\(label) goal reached for today"
+        case .safe:
+            return nil
+        case .approaching:
+            // Positive macros stay silent before goal so the row doesn't
+            // crowd the UI with "almost there" messaging.
+            if reachedPraise != nil { return nil }
+            return "Close to your \(label.lowercased()) goal"
+        case .reached:
+            if let praise = reachedPraise { return praise }
+            return "\(label) goal reached for today"
         }
     }
 
@@ -133,7 +150,9 @@ struct MacroProgressBar: View {
                 Text(copy)
                     .appFont(.caption)
                     .foregroundStyle(
-                        warningState == .reached ? Color.error : Color.inkMute
+                        (warningState == .reached && reachedPraise == nil)
+                            ? Color.error
+                            : Color.inkMute
                     )
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }

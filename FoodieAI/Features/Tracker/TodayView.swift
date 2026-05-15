@@ -131,32 +131,36 @@ struct TodayView: View {
     }
 
     /// Count of distinct local-day keys logged within the current ISO
-    /// week (Monday–Sunday by default; matches the recap service's week
-    /// window). Read directly from the rhythm store — cheap, pure, no
-    /// query.
+    /// week (Monday–Sunday). Read directly from the rhythm store —
+    /// cheap, pure, no query.
+    ///
+    /// The week interval is computed with an explicit ISO-8601 calendar
+    /// pinned to the user's current time zone, so the Mon–Sun window
+    /// doesn't drift based on `Calendar.current`'s region-default week
+    /// start (which can fall on Sun or Sat for some locales).
     private var loggedDaysThisWeekLocal: Int {
-        let cal = Calendar.current
+        var iso = Calendar(identifier: .iso8601)
+        iso.timeZone = .current
         let now = Date()
-        guard let interval = cal.dateInterval(of: .weekOfYear, for: now) else {
+        guard let interval = iso.dateInterval(of: .weekOfYear, for: now) else {
             return 0
         }
         // The rhythm store carries `yyyy-MM-dd` keys in the user's
-        // local calendar. Reuse the same formatter rules so a date
+        // local calendar. Reuse its shared key formatter so a date
         // produced here is byte-equal to whatever `markToday()` stored.
-        let f = DateFormatter()
-        f.calendar = cal
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = cal.timeZone
-        f.dateFormat = "yyyy-MM-dd"
+        // We hand `dayKey` the user's *local* calendar (not the ISO
+        // one) — the rhythm store's keys are formatted against
+        // `Calendar.current`, so we must match it for set-membership.
+        let dayCal = Calendar.current
 
         let logged = LoggingRhythmStore.shared.loggedDays
         var cursor = interval.start
         var count = 0
         while cursor < interval.end {
-            if logged.contains(f.string(from: cursor)) {
+            if logged.contains(LoggingRhythmStore.dayKey(for: cursor, calendar: dayCal)) {
                 count += 1
             }
-            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            guard let next = iso.date(byAdding: .day, value: 1, to: cursor) else { break }
             cursor = next
         }
         return count
@@ -242,15 +246,27 @@ struct TodayView: View {
             case .safe:
                 EmptyView()
             case .approaching:
-                Text("You're close to today's goal")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                    .transition(.opacity)
+                VStack(spacing: 2) {
+                    Text("You're close to today's goal")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                    Text("Small choices now keep dinner flexible.")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkLight)
+                        .multilineTextAlignment(.center)
+                }
+                .transition(.opacity)
             case .reached:
-                Text("You've reached today's goal")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.error)
-                    .transition(.opacity)
+                VStack(spacing: 2) {
+                    Text("You've reached today's goal")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.error)
+                    Text("You can still log — this just keeps the day honest.")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkLight)
+                        .multilineTextAlignment(.center)
+                }
+                .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -280,7 +296,8 @@ struct TodayView: View {
                 label: "Protein",
                 value: totals.totalProtein,
                 goal: profileStore.proteinGoal,
-                tint: .accentCool
+                tint: .accentCool,
+                reachedPraise: "Nice — this supports fullness and recovery."
             )
 
             if showAllMacros {
@@ -294,7 +311,8 @@ struct TodayView: View {
                     label: "Fiber",
                     value: totals.totalFiber,
                     goal: profileStore.fiberGoal,
-                    tint: .success
+                    tint: .success,
+                    reachedPraise: "Nice — fiber helps fullness and digestion."
                 )
             }
 
@@ -488,18 +506,30 @@ struct TodayView: View {
 
     // MARK: - Date formatting
 
-    private func eyebrowDate(_ date: Date) -> String {
+    /// Cached DateFormatter for the weekday eyebrow ("MONDAY"). Allocating
+    /// a fresh DateFormatter per body render was hot under pull-to-refresh
+    /// — keeping the formatter around avoids the per-frame ICU bootstrap.
+    private static let weekdayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = .current
         f.dateFormat = "EEEE"
-        return f.string(from: date)
-    }
+        return f
+    }()
 
-    private func headlineDate(_ date: Date) -> String {
+    /// Cached DateFormatter for the headline date ("May 9").
+    private static let headlineFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = .current
         f.dateFormat = "MMMM d"
-        return f.string(from: date)
+        return f
+    }()
+
+    private func eyebrowDate(_ date: Date) -> String {
+        Self.weekdayFormatter.string(from: date)
+    }
+
+    private func headlineDate(_ date: Date) -> String {
+        Self.headlineFormatter.string(from: date)
     }
 }
 
@@ -606,7 +636,7 @@ private struct WeeklyRecapBanner: View {
         if let stat = recap.headlineStat, !stat.isEmpty {
             return stat
         }
-        return "A short recap from \(recap.coachName)"
+        return "A short reflection from \(recap.coachName)"
     }
 
     /// Secondary line — coach byline when a headlineStat already
@@ -629,12 +659,25 @@ private struct WeeklyRecapBanner: View {
                     Image(systemName: "calendar.badge.clock")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Color.brandDeep)
+                    // Tiny sparkle accent floats off the halo so the
+                    // banner reads as a small reward, not just another
+                    // calendar entry. Static glyph (no infinite anim)
+                    // honoring Reduce Motion — `haloPulsed` already
+                    // gates the one-shot reveal scale.
+                    Image(systemName: "sparkle")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundStyle(Color.accentWarm)
+                        .offset(x: 14, y: -14)
+                        .opacity(haloPulsed ? 1 : 0)
+                        .accessibilityHidden(true)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .appFont(.title2)
-                        .foregroundStyle(Color.ink)
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(title)
+                            .appFont(.title2)
+                            .foregroundStyle(Color.ink)
+                            .lineLimit(1)
+                    }
                     Text(subtitle)
                         .appFont(.caption)
                         .foregroundStyle(Color.inkMute)

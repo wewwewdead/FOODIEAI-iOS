@@ -49,6 +49,12 @@ struct AnalysisResultView: View {
     /// hero number. Defaults to 2,000 — Tier 4 can wire this through to
     /// the Profile model if desired.
     var dailyCalorieGoal: Double = 2_000
+    /// Optional pre-scan calorie status. When supplied, the result page
+    /// shows a tiny day-aware line ("This still keeps you within today's
+    /// goal." / etc.) computed from the *predicted* post-save total.
+    /// Nil hides the line entirely — invalid/missing goals are not a
+    /// place to surface vague copy.
+    var dailyStatus: DailyCalorieGoalStatus? = nil
     let onSave: () -> Void
     let onCancel: () -> Void
 
@@ -110,6 +116,9 @@ struct AnalysisResultView: View {
                 .opacity(cascadeOn ? 1 : 0)
                 .offset(y: cascadeOn ? 0 : 10)
                 .animation(cascadeAnim(delay: 0.25), value: cascadeOn)
+            dayAwareImpactLine
+                .opacity(cascadeOn ? 1 : 0)
+                .animation(cascadeAnim(delay: 0.30), value: cascadeOn)
             macroChipsRow
                 .opacity(cascadeOn ? 1 : 0)
                 .offset(y: cascadeOn ? 0 : 8)
@@ -377,6 +386,47 @@ struct AnalysisResultView: View {
             Spacer(minLength: 0)
             DailyGoalArc(percentage: pct)
         }
+    }
+
+    // MARK: - Day-aware impact line
+
+    /// Tiny inline line under the calorie hero. Folds the just-analyzed
+    /// meal's calories into the pre-scan status to predict where today
+    /// would land if the user saves — so the copy never disagrees with
+    /// the Today ring's warning state. Hidden when there's no usable
+    /// pre-scan status (missing/invalid goal).
+    @ViewBuilder
+    private var dayAwareImpactLine: some View {
+        if let copy = predictedImpactCopy {
+            Text(copy)
+                .appFont(.caption)
+                .foregroundStyle(Color.inkMute)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Picks the friendly, non-shaming copy for the predicted-post-save
+    /// status. Returns nil when the inputs don't justify a line (no
+    /// valid goal in the cached pre-scan status, or no calories on the
+    /// analyze response).
+    private var predictedImpactCopy: String? {
+        guard let cached = dailyStatus, cached.hasValidGoal else { return nil }
+        guard let cals = analysis.calories, cals.isFinite, cals >= 0 else {
+            return nil
+        }
+        let predicted = DailyCalorieGoalStatus.compute(
+            consumed: cached.consumed + cals,
+            goal: cached.goal
+        )
+        if predicted.exceededBy > 0 || predicted.warningState == .reached {
+            return "This would put you at today's goal."
+        }
+        if predicted.warningState == .approaching {
+            return "This would bring you close to today's goal."
+        }
+        return "This would still keep you within today's goal."
     }
 
     // MARK: - Macro chips row

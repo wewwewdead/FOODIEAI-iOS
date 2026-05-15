@@ -14,13 +14,6 @@ import Charts
 struct WeekView: View {
     @ObservedObject var viewModel: WeekViewModel
     @State private var selectedBucket: DailyBucket?
-    // Measured plot-area frame of the calories chart. Used to align the
-    // tappable day-cell row beneath the chart so each cell sits under its
-    // corresponding bar — the Y-axis labels (0/1000/2000/3000) push the plot
-    // area to the right inside the card, so a full-width HStack would not
-    // align with the bars otherwise.
-    @State private var plotLeading: CGFloat = 0
-    @State private var plotWidth: CGFloat = 0
 
     private let calendar: Calendar = {
         var c = Calendar.current
@@ -169,7 +162,20 @@ struct WeekView: View {
                 .cornerRadius(4)
             }
             .chartXScale(domain: xDomain)
-            .chartXAxis(.hidden) // replaced by tappable day-cell row below
+            .chartXAxis {
+                // Day-of-week labels rendered natively by Charts so they're
+                // automatically aligned to each bar — avoids measuring the
+                // plot area via @State (which triggers per-frame update
+                // warnings inside chartOverlay's layout pass).
+                AxisMarks(values: buckets.map(\.date)) { value in
+                    AxisValueLabel(centered: true) {
+                        if let d = value.as(Date.self),
+                           let bucket = buckets.first(where: { calendar.isDate($0.date, inSameDayAs: d) }) {
+                            dayLabel(for: bucket)
+                        }
+                    }
+                }
+            }
             .chartYAxis {
                 AxisMarks(position: .leading) { value in
                     AxisGridLine().foregroundStyle(Color.textMeta.opacity(0.2))
@@ -178,34 +184,24 @@ struct WeekView: View {
                         .foregroundStyle(Color.textMeta)
                 }
             }
-            .frame(height: 200)
+            .frame(height: 220)
             .chartOverlay { proxy in
+                // Tap regions aligned to the plot area inside the same
+                // GeometryReader evaluation — no @State, no preferences,
+                // so nothing is written back into layout per frame.
                 GeometryReader { geo in
                     let frame = geo[proxy.plotAreaFrame]
-                    Color.clear
-                        .onAppear {
-                            plotLeading = frame.minX
-                            plotWidth = frame.width
+                    HStack(spacing: 0) {
+                        ForEach(buckets) { bucket in
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture { selectedBucket = bucket }
+                                .accessibilityLabel(accessibilityLabel(for: bucket))
                         }
-                        .onChange(of: frame) { _, new in
-                            plotLeading = new.minX
-                            plotWidth = new.width
-                        }
-                }
-            }
-
-            // Tappable day cells — also serve as the X-axis label row.
-            // Aligned to the chart's measured plot area so each cell sits
-            // under its bar.
-            HStack(spacing: 0) {
-                Spacer().frame(width: plotLeading)
-                HStack(spacing: 0) {
-                    ForEach(buckets) { bucket in
-                        dayCell(for: bucket)
                     }
+                    .frame(width: frame.width, height: frame.height)
+                    .offset(x: frame.minX, y: frame.minY)
                 }
-                .frame(width: max(plotWidth, 0))
-                Spacer(minLength: 0)
             }
         }
         .padding(AppSpacing.md)
@@ -219,39 +215,22 @@ struct WeekView: View {
         )
     }
 
-    private func dayCell(for bucket: DailyBucket) -> some View {
+    private func dayLabel(for bucket: DailyBucket) -> some View {
         let isToday = calendar.isDateInToday(bucket.date)
-        return Button {
-            selectedBucket = bucket
-        } label: {
-            VStack(spacing: 2) {
-                Text(weekdayLetter(bucket.date))
-                    .appFont(.meta)
-                    .fontWeight(.heavy)
-                    .foregroundStyle(isToday ? Color.brand : Color.textMeta)
-                Text(dayNumber(bucket.date))
-                    .appFont(.meta)
-                    .foregroundStyle(Color.textMeta)
-                    .opacity(0.8)
-                if bucket.hasLogs {
-                    Circle()
-                        .fill(Color.brand)
-                        .frame(width: 4, height: 4)
-                } else {
-                    Circle()
-                        .fill(Color.clear)
-                        .frame(width: 4, height: 4)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, AppSpacing.xs)
-            .background(
-                RoundedRectangle(cornerRadius: AppRadius.md)
-                    .fill(isToday ? Color.brand.opacity(0.15) : Color.clear)
-            )
+        return VStack(spacing: 2) {
+            Text(weekdayLetter(bucket.date))
+                .appFont(.meta)
+                .fontWeight(.heavy)
+                .foregroundStyle(isToday ? Color.brand : Color.textMeta)
+            Text(dayNumber(bucket.date))
+                .appFont(.meta)
+                .foregroundStyle(Color.textMeta)
+                .opacity(0.8)
+            Circle()
+                .fill(bucket.hasLogs ? Color.brand : Color.clear)
+                .frame(width: 4, height: 4)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(accessibilityLabel(for: bucket))
+        .padding(.vertical, 2)
     }
 
     // MARK: - Formatting helpers
@@ -308,3 +287,4 @@ struct WeekView: View {
         return String(format: "%.1f", v)
     }
 }
+

@@ -19,6 +19,7 @@ struct ProfileView: View {
     @EnvironmentObject private var profileStore: ProfileStore
     @StateObject private var viewModel: ProfileViewModel
     @State private var showingAbout = false
+    @State private var showingDeleteAccount = false
     @State private var hasAppeared = false
     @FocusState private var nameFieldFocused: Bool
 
@@ -55,6 +56,9 @@ struct ProfileView: View {
             AboutSheet()
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showingDeleteAccount) {
+            DeleteAccountSheet()
         }
     }
 
@@ -168,6 +172,12 @@ struct ProfileView: View {
 
                 signOutSection
                     .staggered(6, appeared: hasAppeared)
+
+                // App Store Review Guideline 5.1.1(v): user-initiated
+                // account deletion. Placed last, low-visual-weight —
+                // present when needed, not encouraging.
+                accountDeletionSection
+                    .staggered(7, appeared: hasAppeared)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.top, AppSpacing.lg)
@@ -846,6 +856,61 @@ struct ProfileView: View {
             .padding(.top, AppSpacing.xs)
         }
         .padding(.top, AppSpacing.md)
+    }
+
+    // MARK: - Account deletion (App Store 5.1.1(v))
+
+    private var accountDeletionSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: 6) {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .black))
+                Text("ACCOUNT").eyebrow()
+            }
+            .foregroundStyle(Color.inkLight)
+
+            Button {
+                Haptics.tap()
+                showingDeleteAccount = true
+            } label: {
+                HStack(spacing: AppSpacing.md) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.error.opacity(0.12))
+                            .frame(width: 40, height: 40)
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 16, weight: .heavy))
+                            .foregroundStyle(Color.error)
+                    }
+                    Text("Delete account")
+                        .appFont(.bodyEmphasis)
+                        .foregroundStyle(Color.error)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .black))
+                        .foregroundStyle(Color.inkLight)
+                }
+                .padding(AppSpacing.md)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: AppRadius.lg)
+                        .fill(Color.bgSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppRadius.lg)
+                        .strokeBorder(Color.error.opacity(0.25), lineWidth: 1.5)
+                )
+                .appShadow(.shadowCard)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableRowStyle())
+
+            Text("Permanently removes all your data.")
+                .appFont(.caption)
+                .foregroundStyle(Color.inkLight)
+                .padding(.horizontal, AppSpacing.xs)
+        }
+        .padding(.top, AppSpacing.lg)
     }
 
     // MARK: - Failed state

@@ -180,7 +180,7 @@ struct MonthView: View {
         return VStack(spacing: AppSpacing.sm) {
             // Weekday header row, rotated by Calendar.firstWeekday.
             HStack(spacing: AppSpacing.xs) {
-                ForEach(orderedWeekdaySymbols(), id: \.self) { sym in
+                ForEach(Array(orderedWeekdaySymbols().enumerated()), id: \.offset) { _, sym in
                     Text(sym)
                         .appFont(.meta)
                         .fontWeight(.heavy)

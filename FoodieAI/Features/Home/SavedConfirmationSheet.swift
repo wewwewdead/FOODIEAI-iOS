@@ -129,56 +129,71 @@ struct SavedConfirmationSheet: View {
     }
 
     private func runEntrance() async {
-        if reduceMotion {
-            // Quiet path: opacity-only fade, no overshoot, no radial
-            // burst, no confetti. Haptic still fires so the user has
-            // tactile confirmation; title and button reveal together
-            // so the user can act immediately.
-            withAnimation(.appReduced) {
-                checkmarkScale = 1
-                checkmarkOpacity = 1
-                burstScale = 1.0
-                burstOpacity = 0
-                titleVisible = true
-                buttonVisible = true
+        // Cancellation-safe: if the sheet dismisses early SwiftUI cancels
+        // this `.task`. We propagate the CancellationError out of each
+        // sleep, then `catch` it at the top level and return silently —
+        // no late haptics, no state writes against a defunct view.
+        do {
+            if reduceMotion {
+                // Quiet path: opacity-only fade, no overshoot, no radial
+                // burst, no confetti. Haptic still fires so the user has
+                // tactile confirmation; title and button reveal together
+                // so the user can act immediately.
+                withAnimation(.appReduced) {
+                    checkmarkScale = 1
+                    checkmarkOpacity = 1
+                    burstScale = 1.0
+                    burstOpacity = 0
+                    titleVisible = true
+                    buttonVisible = true
+                }
+                try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 120)
+                try Task.checkCancellation()
+                Haptics.success()
+                return
             }
-            try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 120)
+
+            try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 80)
+            try Task.checkCancellation()
+
+            // Checkmark scale-pop and opacity-fade in the same frame so the
+            // glyph appears with confidence rather than dissolving.
+            // Phase 14 delight: bouncier overshoot so the checkmark stamps in.
+            withAnimation(.appBouncy) {
+                checkmarkScale = 1
+            }
+            withAnimation(.appEntrance) {
+                checkmarkOpacity = 1
+            }
+            // Radial burst: expand and fade simultaneously over 0.8s.
+            withAnimation(.easeOut(duration: 0.8)) {
+                burstScale = 2.0
+                burstOpacity = 0
+            }
+            // Phase 14 delight: confetti burst fires alongside the checkmark.
+            confettiActive = true
+
+            // The bouncy spring stabilizes at roughly t≈+470ms; fire the
+            // success haptic when the visual lands.
+            try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 470)
+            try Task.checkCancellation()
             Haptics.success()
+
+            // Title appears just after the checkmark settles.
+            try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 50)
+            try Task.checkCancellation()
+            titleVisible = true
+
+            // Button appears 0.3s after the title — gives the eye time to
+            // read the headline before the action is offered.
+            try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 300)
+            try Task.checkCancellation()
+            buttonVisible = true
+        } catch is CancellationError {
+            return
+        } catch {
             return
         }
-
-        try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 80)
-
-        // Checkmark scale-pop and opacity-fade in the same frame so the
-        // glyph appears with confidence rather than dissolving.
-        // Phase 14 delight: bouncier overshoot so the checkmark stamps in.
-        withAnimation(.appBouncy) {
-            checkmarkScale = 1
-        }
-        withAnimation(.appEntrance) {
-            checkmarkOpacity = 1
-        }
-        // Radial burst: expand and fade simultaneously over 0.8s.
-        withAnimation(.easeOut(duration: 0.8)) {
-            burstScale = 2.0
-            burstOpacity = 0
-        }
-        // Phase 14 delight: confetti burst fires alongside the checkmark.
-        confettiActive = true
-
-        // The bouncy spring stabilizes at roughly t≈+470ms; fire the
-        // success haptic when the visual lands.
-        try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 470)
-        Haptics.success()
-
-        // Title appears just after the checkmark settles.
-        try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 50)
-        titleVisible = true
-
-        // Button appears 0.3s after the title — gives the eye time to
-        // read the headline before the action is offered.
-        try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 300)
-        buttonVisible = true
     }
 }
 
