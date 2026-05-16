@@ -213,3 +213,207 @@ final class CalorieGoalCalculatorTests: XCTestCase {
         XCTAssertLessThan(unspec.calories, male.calories)
     }
 }
+
+// MARK: - Phase 21.5 — DailyQuest.Kind goal alignment
+
+final class DailyQuestGoalAlignmentTests: XCTestCase {
+    /// A loseWeight user must NOT see "Log 3 meals" (they may
+    /// intentionally skip a meal under IF) but SHOULD see protein
+    /// (muscle preservation in deficit) and stayUnderGoal.
+    func test_loseWeightUser_excludesLogThreeMeals_andIncludesStayUnderGoal() {
+        let loseWeightKinds = DailyQuest.Kind.allCases.filter {
+            $0.isAppropriate(for: .loseWeight, goal: .lose)
+        }
+        XCTAssertFalse(loseWeightKinds.contains(.logThreeMeals))
+        XCTAssertTrue(loseWeightKinds.contains(.stayUnderGoal))
+        XCTAssertTrue(loseWeightKinds.contains(.logProtein))
+    }
+
+    /// A buildMuscle/gain user must NOT see stayUnderGoal (they're
+    /// intentionally in surplus) but SHOULD see protein.
+    func test_buildMuscleUser_excludesStayUnderGoal_andIncludesLogProtein() {
+        let buildKinds = DailyQuest.Kind.allCases.filter {
+            $0.isAppropriate(for: .buildMuscle, goal: .gain)
+        }
+        XCTAssertFalse(buildKinds.contains(.stayUnderGoal))
+        XCTAssertTrue(buildKinds.contains(.logProtein))
+    }
+
+    /// User who skipped onboarding archetype + physiology shouldn't
+    /// land in a weird empty pool — fall back to the everyone-
+    /// appropriate quests.
+    func test_nilArchetype_treatedAsAware() {
+        let kinds = DailyQuest.Kind.allCases.filter {
+            $0.isAppropriate(for: nil, goal: nil)
+        }
+        XCTAssertGreaterThanOrEqual(kinds.count, 3)
+        // The universal quests must all be present.
+        XCTAssertTrue(kinds.contains(.logSomethingGreen))
+        XCTAssertTrue(kinds.contains(.logBeforeTime))
+        XCTAssertTrue(kinds.contains(.tryNewFood))
+    }
+
+    // MARK: - Phase 21.7 — pool size
+
+    /// Aware + maintain user should see at least 12 of the 15 kinds —
+    /// the most permissive archetype. Floor protects against an
+    /// accidental future filter that prunes the everyone-appropriate
+    /// bucket.
+    func test_poolSize_aware_maintain() {
+        let pool = DailyQuest.Kind.allCases.filter {
+            $0.isAppropriate(for: .aware, goal: .maintain)
+        }
+        XCTAssertGreaterThanOrEqual(pool.count, 12)
+    }
+
+    /// Build-muscle / gain users skip a couple of "eat less" framings
+    /// (stayUnderGoal, logLightMeal, logLowSugar). They should still
+    /// have 12+ quests to draw from.
+    func test_poolSize_buildMuscle_gain() {
+        let pool = DailyQuest.Kind.allCases.filter {
+            $0.isAppropriate(for: .buildMuscle, goal: .gain)
+        }
+        XCTAssertGreaterThanOrEqual(pool.count, 12)
+    }
+
+    /// Lose-weight users skip logThreeMeals but everything else is
+    /// in. Still 12+.
+    func test_poolSize_loseWeight_lose() {
+        let pool = DailyQuest.Kind.allCases.filter {
+            $0.isAppropriate(for: .loseWeight, goal: .lose)
+        }
+        XCTAssertGreaterThanOrEqual(pool.count, 12)
+    }
+}
+
+// MARK: - Phase 21.6 — Gap scoring
+
+final class DailyQuestGapScoringTests: XCTestCase {
+
+    // MARK: greenGap
+
+    func test_greenGap_zeroGreenLogs_scoresHigh() {
+        let logs = [
+            Self.makeLog(name: "Pizza",  daysAgo: 1),
+            Self.makeLog(name: "Burger", daysAgo: 2),
+            Self.makeLog(name: "Ramen",  daysAgo: 3)
+        ]
+        let score = DailyQuest.Kind.logSomethingGreen.gapScore(recentLogs: logs)
+        XCTAssertGreaterThan(score, 0.7)
+    }
+
+    func test_greenGap_threeGreenLogs_scoresLow() {
+        let logs = [
+            Self.makeLog(name: "Kimchi",         daysAgo: 1),
+            Self.makeLog(name: "Spinach salad",  daysAgo: 2),
+            Self.makeLog(name: "Broccoli",       daysAgo: 3)
+        ]
+        let score = DailyQuest.Kind.logSomethingGreen.gapScore(recentLogs: logs)
+        XCTAssertLessThan(score, 0.3)
+    }
+
+    // MARK: proteinGap
+
+    func test_proteinGap_zeroHighProteinLogs_scoresHigh() {
+        let logs = [
+            Self.makeLog(name: "Apple",  daysAgo: 1, proteinG: 0.3),
+            Self.makeLog(name: "Toast",  daysAgo: 2, proteinG: 5),
+            Self.makeLog(name: "Banana", daysAgo: 3, proteinG: 1.0)
+        ]
+        let score = DailyQuest.Kind.logProtein.gapScore(recentLogs: logs)
+        XCTAssertGreaterThan(score, 0.7)
+    }
+
+    func test_proteinGap_fiveHighProteinLogs_scoresLow() {
+        let logs = (1...5).map {
+            Self.makeLog(name: "Chicken breast", daysAgo: $0, proteinG: 30)
+        }
+        let score = DailyQuest.Kind.logProtein.gapScore(recentLogs: logs)
+        XCTAssertLessThan(score, 0.25)
+    }
+
+    // MARK: varietyGap
+
+    func test_varietyGap_lowVariety_scoresHigh() {
+        // 10 logs, all the same food.
+        let logs = (1...10).map {
+            Self.makeLog(name: "Rice", daysAgo: $0 % 7)
+        }
+        let score = DailyQuest.Kind.tryNewFood.gapScore(recentLogs: logs)
+        XCTAssertGreaterThan(score, 0.7)
+    }
+
+    func test_varietyGap_highVariety_scoresLow() {
+        let names = ["Rice", "Pasta", "Salad", "Chicken", "Soup", "Pizza", "Eggs"]
+        let logs = names.enumerated().map { (i, name) in
+            Self.makeLog(name: name, daysAgo: i)
+        }
+        let score = DailyQuest.Kind.tryNewFood.gapScore(recentLogs: logs)
+        XCTAssertLessThan(score, 0.3)
+    }
+
+    func test_varietyGap_tooFewLogs_returnsNeutralMidValue() {
+        let logs = [Self.makeLog(name: "Rice", daysAgo: 1)]
+        let score = DailyQuest.Kind.tryNewFood.gapScore(recentLogs: logs)
+        XCTAssertEqual(score, 0.5, accuracy: 0.01)
+    }
+
+    // MARK: breakfastGap
+
+    func test_breakfastGap_zeroEarlyLogs_scoresHigh() {
+        let logs = (1...5).map { day in
+            Self.makeLog(name: "Lunch", daysAgo: day, hour: 13)
+        }
+        let score = DailyQuest.Kind.logBeforeTime.gapScore(recentLogs: logs)
+        XCTAssertGreaterThan(score, 0.7)
+    }
+
+    // MARK: threeMealsGap
+
+    func test_threeMealsGap_userLogsOncePerDay_scoresHigh() {
+        let logs = (0..<7).map { day in
+            Self.makeLog(name: "Dinner", daysAgo: day, hour: 19)
+        }
+        let score = DailyQuest.Kind.logThreeMeals.gapScore(recentLogs: logs)
+        XCTAssertGreaterThan(score, 0.6)
+    }
+
+    // MARK: helpers
+
+    /// Builds a FoodLog at `daysAgo` days back from `Date()`, snapped
+    /// to `hour:00:00` local. Used by every test above.
+    private static func makeLog(name: String,
+                                daysAgo: Int,
+                                hour: Int = 12,
+                                proteinG: Double? = nil) -> FoodLog {
+        var comps = DateComponents()
+        comps.day = -daysAgo
+        let base = Calendar.current.date(byAdding: comps, to: Date())!
+        let dt = Calendar.current.date(
+            bySettingHour: hour, minute: 0, second: 0, of: base
+        )!
+        return FoodLog(
+            id: UUID(),
+            userId: UUID(),
+            foodName: name,
+            imagePath: nil,
+            imageThumbPath: nil,
+            calories: 400,
+            carbsG: 50,
+            sugarG: 5,
+            proteinG: proteinG,
+            fatG: 10,
+            fiberG: 3,
+            benefits: [],
+            drawbacks: [],
+            nutrients: [],
+            coachName: nil,
+            coachAdvice: nil,
+            eatenAt: dt,
+            createdAt: dt,
+            origin: .analyzed,
+            sourceLogId: nil,
+            mood: nil
+        )
+    }
+}

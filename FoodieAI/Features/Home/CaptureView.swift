@@ -98,6 +98,37 @@ struct CaptureView: View {
     /// updates when the user crosses midnight without restarting the app.
     @StateObject private var rhythmStore = LoggingRhythmStore.shared
 
+    /// Phase 21 — manual log sheet presentation flag.
+    @State private var showingManualLog: Bool = false
+    /// Phase 21.5 — action sheet for the daily quest card. Tap on the
+    /// card flips this; user picks between Scan or Manual Log paths,
+    /// both of which already exist on this view.
+    @State private var showingQuestActionSheet: Bool = false
+    /// Phase 21 — post-manual-save toast carrying optional quest reward
+    /// copy + a free-tier nudge. Cleared automatically after a few
+    /// seconds or when the user taps the action.
+    @State private var manualLogToast: ManualLogToast? = nil
+    /// Manual-log path's equivalent of `state.moodPulse` — the photo
+    /// flow drives mood capture through CaptureViewModel's state
+    /// machine, but a manual save has no analyze response to thread,
+    /// so we hold the just-inserted log here and present
+    /// `MoodPulseSheet` directly.
+    @State private var pendingManualMoodLog: FoodLog? = nil
+    /// When a manual save also completes today's quest, the quest
+    /// celebration modal takes priority — we stash the log here while
+    /// the modal is up and promote it to `pendingManualMoodLog` once
+    /// the modal dismisses. Keeps the two overlays from racing.
+    @State private var manualLogAwaitingMood: FoodLog? = nil
+
+    /// Lightweight after-save banner state. The struct lives inline
+    /// because no other surface reads or writes it.
+    struct ManualLogToast: Identifiable, Equatable {
+        let id = UUID()
+        let foodName: String
+        let questRewardCopy: String?
+        let scansRemaining: Int
+    }
+
     enum ScanWarningKind: Identifiable {
         case approaching
         case reached
@@ -475,6 +506,183 @@ struct CaptureView: View {
         // bottom CTA so it's visible without overlapping the primary
         // affordance. Auto-fades after 1.6s.
         .modifier(RelogToastModifier(viewModel: viewModel))
+        // Phase 21 — manual log sheet + post-save toast.
+        .sheet(isPresented: $showingManualLog) {
+            ManualLogSheet(
+                onSaved: { inserted in
+                    handleManualLogSaved(inserted)
+                },
+                onCancelled: {}
+            )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
+        // Phase 21.x — mood pulse after a manual log save. Mirrors the
+        // photo-flow `MoodPulseSheet` above but is keyed off the
+        // inserted FoodLog instead of CaptureViewModel state, since the
+        // manual path doesn't pass through `.moodPulse`.
+        .sheet(item: $pendingManualMoodLog) { log in
+            MoodPulseSheet(
+                onPick: { mood in
+                    Task { await recordMoodForManualLog(log.id, mood: mood) }
+                },
+                onSkip: {}
+            )
+            .presentationDetents([.height(280)])
+            .presentationDragIndicator(.visible)
+        }
+        .modifier(ManualLogToastModifier(
+            toast: $manualLogToast,
+            onScanAction: {
+                if FreeTierLimits.scansRemainingToday > 0 {
+                    manualLogToast = nil
+                    requestScan()
+                } else {
+                    // Future paywall hook — for now this is a no-op
+                    // (placeholder until Phase 22 ships the paywall).
+                    manualLogToast = nil
+                }
+            },
+            onTrackerAction: {
+                manualLogToast = nil
+                notifRouter.requestTab(1)
+            }
+        ))
+        // Phase 21.5 — quest card → action sheet routing. Both options
+        // hand off to the existing scan + manual-log paths. The
+        // completion state is used only to swap the title copy so the
+        // user understands they can keep logging after the quest is
+        // done.
+        .confirmationDialog(
+            viewModel.questCompleted
+                ? "Quest done — want to log more?"
+                : "How would you like to log it?",
+            isPresented: $showingQuestActionSheet,
+            titleVisibility: .visible
+        ) {
+            Button("Take Photo") {
+                requestScan()
+            }
+            Button("Log Without Photo") {
+                showingManualLog = true
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        // Phase 21.5 — load today's quest on appear and on every
+        // scene-phase active transition (so a user who left the app
+        // running overnight sees today's new quest rather than
+        // yesterday's). Fire-and-forget; the load itself is silent
+        // on failure.
+        .task {
+            await viewModel.loadQuest()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await viewModel.loadQuest() }
+            }
+        }
+        // Phase 21.11 — quest-completion celebration modal. Sits on
+        // top of all main Home content (zIndex pushes it above the
+        // success sheet's adjacent layers too). Renders whenever
+        // `justCompletedQuest` is non-nil; clears the trigger from
+        // its own `onDismiss` so the parent doesn't need a timer.
+        .overlay {
+            if let moment = viewModel.justCompletedQuest {
+                QuestCelebrationModal(
+                    moment: moment,
+                    onDismiss: {
+                        viewModel.clearJustCompletedQuest()
+                        // Promote a stashed manual-log mood pulse so it
+                        // appears AFTER the quest celebration instead
+                        // of racing it. A short delay lets the modal's
+                        // opacity fade finish before the sheet rises.
+                        if let log = manualLogAwaitingMood {
+                            manualLogAwaitingMood = nil
+                            Task { @MainActor in
+                                try? await Task.sleep(nanoseconds: 350 * NSEC_PER_MSEC)
+                                pendingManualMoodLog = log
+                            }
+                        }
+                    }
+                )
+                .transition(.opacity)
+                .zIndex(1000)
+            }
+        }
+        .animation(.motionBase, value: viewModel.justCompletedQuest)
+    }
+
+    /// Phase 21 — post-manual-save side-effects. Fires streak + quest
+    /// updates (best-effort), refreshes the cached scan-warning data,
+    /// bumps the local rhythm store so Home's check-in copy reflects
+    /// continuity, and drops a small banner with optional quest
+    /// reward + free-tier scan nudge.
+    private func handleManualLogSaved(_ inserted: FoodLog) {
+        LoggingRhythmStore.shared.markToday()
+
+        // Streak + quest in a detached Task so the toast renders
+        // immediately. The quest evaluator's result drives the
+        // optional reward copy on the toast — wait for it before
+        // setting toast state so the user sees the right thing.
+        Task { @MainActor in
+            _ = try? await StreakService.shared.recordLog(
+                at: inserted.eatenAt
+            )
+            let evaluation = try? await DailyQuestService.shared
+                .evaluateQuestProgress(after: inserted)
+
+            // Phase 21.10 — when a manual save completes today's
+            // quest, fire the live-completion animation on the Home
+            // quest card. The manual-log sheet dismisses back into
+            // Home with the card right in front of the user, so the
+            // morph happens in view.
+            let questFired = evaluation?.questCompleted == true
+                          && evaluation?.rewardCopy != nil
+            if questFired, let reward = evaluation?.rewardCopy {
+                viewModel.recordQuestCompletion(rewardCopy: reward)
+            }
+
+            // Mood pulse ordering: if the quest celebration is about
+            // to play, stash the log and promote it after the modal
+            // dismisses (handled in the QuestCelebrationModal
+            // onDismiss hook). Otherwise present mood pulse now.
+            if questFired {
+                manualLogAwaitingMood = inserted
+            } else {
+                pendingManualMoodLog = inserted
+            }
+
+            // Refresh the today's-meals count + calorie status caches
+            // since the manual save just shifted both.
+            let snapshot = await CalorieReminderService.shared.currentSnapshot()
+            cachedCalorieStatus = snapshot.status
+            if let count = snapshot.mealCount {
+                cachedTodayMealCount = count
+            }
+
+            manualLogToast = ManualLogToast(
+                foodName: inserted.foodName,
+                questRewardCopy: evaluation?.rewardCopy,
+                scansRemaining: FreeTierLimits.scansRemainingToday
+            )
+        }
+    }
+
+    /// Writes a mood for a just-saved manual log. Mirrors the photo
+    /// flow's `CaptureViewModel.recordMood` but is intentionally
+    /// standalone — the manual path doesn't enter `.moodPulse` state,
+    /// so there's no view-model anchor to reuse. Failures are silent;
+    /// mood is enrichment, not critical.
+    private func recordMoodForManualLog(_ logId: UUID, mood: FoodLog.Mood) async {
+        let service = FoodLogService()
+        do {
+            _ = try await service.setMood(mood, on: logId)
+        } catch {
+            #if DEBUG
+            NSLog("[Mood] manual-log setMood FAILED id=%@ err=%@",
+                  logId.uuidString, "\(error)")
+            #endif
+        }
     }
 
     // MARK: - Top bar (wordmark + avatar)
@@ -530,6 +738,33 @@ struct CaptureView: View {
                 .foregroundStyle(Color.inkMute)
         }
         .padding(.top, AppSpacing.xl2) // 48pt breathing room
+
+        // Phase 21.5 — daily quest card. Sits between hero copy and
+        // the daily check-in / photo card so the user sees the
+        // suggested action right after orientation. Tappable: opens
+        // the action sheet that routes to Scan or Manual Log.
+        if viewModel.state.isIdle, let quest = viewModel.dailyQuest {
+            DailyQuestCard(
+                quest: quest,
+                completed: viewModel.questCompleted,
+                completionMoment: viewModel.justCompletedQuest,
+                onTap: {
+                    Haptics.tap()
+                    showingQuestActionSheet = true
+                }
+            )
+            .padding(.top, AppSpacing.lg)
+            .transition(.opacity)
+            // Phase 21.10's 1.2s self-clear timer was removed in
+            // Phase 21.11 — the celebration modal (overlaid below)
+            // now owns the trigger's lifecycle. It auto-dismisses
+            // after ~2.5s or on tap, then nils
+            // `viewModel.justCompletedQuest` itself via its
+            // `onDismiss`. The in-place card morph still fires
+            // because the card observes the same trigger, and its
+            // own animation is short enough to finish before the
+            // modal goes away.
+        }
 
         // Daily Check-in / Today Pulse — combined card. Renders the
         // daily check-in line (count-aware, deterministic, non-shaming)
@@ -935,10 +1170,30 @@ struct CaptureView: View {
     private var bottomCTA: some View {
         switch viewModel.state {
         case .idle:
-            PrimaryButton(title: "Take a photo",
-                          leadingSystemImage: "camera.fill") {
-                Haptics.tap()
-                requestScan()
+            VStack(spacing: AppSpacing.sm) {
+                PrimaryButton(title: "Take a photo",
+                              leadingSystemImage: "camera.fill") {
+                    Haptics.tap()
+                    requestScan()
+                }
+                // Phase 21 — secondary path for typing-based logging.
+                // Lives directly under the primary so the user can see
+                // both options at once without an extra tap to reveal.
+                Button {
+                    Haptics.tap()
+                    showingManualLog = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 13, weight: .heavy))
+                        Text("Or log without a photo")
+                            .appFont(.captionStrong)
+                    }
+                    .foregroundStyle(Color.brandDeep)
+                    .padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Log a meal without a photo")
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, AppSpacing.md)
@@ -2101,6 +2356,562 @@ private struct RelogToastView: View {
             ? "Re-logged \(toast.foodName)"
             : "Couldn't re-log \(toast.foodName)"
         )
+    }
+}
+
+// MARK: - Daily quest card (Phase 21.5)
+
+/// One playful prompt per day, rendered on Home above the photo card.
+/// Whole card is a Button so a tap anywhere opens the action sheet
+/// that routes to Scan or Manual Log. The completion state swaps
+/// the title to the reward copy and surfaces a "✨ done" pill, but
+/// keeps the card tappable — some users want to continue logging
+/// after the quest is satisfied.
+private struct DailyQuestCard: View {
+    let quest: DailyQuest
+    let completed: Bool
+    /// Phase 21.10 — non-nil when the user *just* completed the quest
+    /// (within the current session). Triggers the live morph
+    /// animation. nil means render the resting state for whichever
+    /// `completed` value is current (no animation).
+    let completionMoment: CaptureViewModel.DailyQuestCompletionMoment?
+    let onTap: () -> Void
+
+    @State private var pressed: Bool = false
+    // Phase 21.10 — driven by the morph sequence. Start at the
+    // values appropriate for "no animation pending":
+    //   - `washOpacity = 0`        no overlay tint
+    //   - `pillScale` depends on `completed` (set in .onAppear)
+    //   - `titleScale = 1`         no pop
+    @State private var washOpacity: Double = 0
+    @State private var pillScale: CGFloat = 0
+    @State private var titleScale: CGFloat = 1
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var displayedTitle: String {
+        completed ? quest.kind.rewardCopy : quest.kind.copy
+    }
+
+    private var displayedCaption: String {
+        completed ? "Tap to log more" : "Tap to log it"
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .top) {
+                    Text("TODAY'S QUEST").eyebrow()
+                        .foregroundStyle(Color.inkMute)
+                    Spacer()
+                    if completed {
+                        Text("✨ done")
+                            .appFont(.captionStrong)
+                            .foregroundStyle(Color.brandDeep)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.brandSoft))
+                            .scaleEffect(pillScale)
+                            .opacity(pillScale)
+                    }
+                }
+
+                Text(displayedTitle)
+                    .appFont(.title2)
+                    .foregroundStyle(Color.ink)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+                    .scaleEffect(titleScale, anchor: .leading)
+                    // .id forces SwiftUI to treat the post-morph
+                    // text as a *new* view so `.transition(.opacity)`
+                    // crossfades instead of snap-replacing.
+                    .id(displayedTitle)
+                    .transition(.opacity)
+
+                HStack(spacing: 4) {
+                    Text(displayedCaption)
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundStyle(Color.inkMute)
+                }
+                .padding(.top, 2)
+                .id(displayedCaption)
+                .transition(.opacity)
+            }
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                ZStack {
+                    RoundedRectangle(cornerRadius: AppRadius.lg)
+                        .fill(completed ? Color.brandSoft : Color.bgSurface)
+                    // Brand wash overlay — appears during beat 1 of
+                    // the morph, fades back out at beat 4. Resting
+                    // state is `washOpacity = 0`, so the card looks
+                    // identical to before whenever no animation is
+                    // running.
+                    RoundedRectangle(cornerRadius: AppRadius.lg)
+                        .fill(Color.brandSoft)
+                        .opacity(washOpacity)
+                }
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .strokeBorder(Color.borderHairline, lineWidth: 1)
+            )
+            .appShadow(.shadowCard)
+            .scaleEffect(pressed ? 0.98 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if !pressed {
+                        withAnimation(.appPress) { pressed = true }
+                    }
+                }
+                .onEnded { _ in
+                    withAnimation(.appPress) { pressed = false }
+                }
+        )
+        .onAppear {
+            // Settle the pill into its resting state without animating
+            // — re-entering Home with an already-completed quest must
+            // show the pill in place, not replay yesterday's
+            // celebration.
+            pillScale = completed ? 1 : 0
+        }
+        .onChange(of: completionMoment) { _, new in
+            guard new != nil else { return }
+            runCompletionAnimation()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            completed
+            ? "Today's quest complete: \(quest.kind.rewardCopy). Tap to log more."
+            : "Today's quest: \(quest.kind.copy). Tap to log it."
+        )
+        .accessibilityAddTraits(.isButton)
+    }
+
+    /// Phase 21.10 morph sequence — runs when `completionMoment`
+    /// arrives non-nil. Four beats:
+    ///   1. wash overlay fades in + soft haptic
+    ///   2. title text crossfades to reward copy + title pops + success haptic
+    ///   3. ✨ done pill scales in
+    ///   4. wash overlay fades back out, leaving a clean white card
+    ///      with the persistent pill in the corner
+    ///
+    /// Reduce Motion path: skip the choreography, snap the pill in,
+    /// fire a single success haptic. The user still feels the
+    /// completion; no vestibular triggers.
+    private func runCompletionAnimation() {
+        guard !reduceMotion else {
+            withAnimation(.appReduced) { pillScale = 1 }
+            Haptics.success()
+            return
+        }
+
+        // Beat 1 — acknowledgment (0.00–0.25s)
+        withAnimation(.easeOut(duration: 0.25)) {
+            washOpacity = 0.55
+        }
+        Haptics.soft()
+
+        Task { @MainActor in
+            // Beat 2 — transformation (0.25–0.55s)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.55)) {
+                titleScale = 1.06
+            }
+            Haptics.success()
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                titleScale = 1.0
+            }
+
+            // Beat 3 — pill settles in (0.55–0.85s)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            withAnimation(.appStamp) {
+                pillScale = 1
+            }
+
+            // Beat 4 — wash recedes, leaving the card clean
+            // (0.85–1.15s). The persistent visual marker of
+            // completion is the pill in the corner + the reward
+            // title; the wash is a moment, not a state.
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            withAnimation(.easeOut(duration: 0.35)) {
+                washOpacity = 0
+            }
+        }
+    }
+}
+
+// MARK: - Quest celebration modal (Phase 21.11)
+
+/// Center-screen celebration that fires when the user completes
+/// today's daily quest. The modal makes the moment unmissable; the
+/// underlying Phase 21.10 in-place card morph handles the persistent
+/// state. Two complementary layers.
+///
+/// Design intent:
+///   - Brief: enters fast, auto-dismisses ~2.5s after entry
+///   - Center-emotionally: hero is the reward emoji, not the brand
+///   - Respects context: backdrop dims to ~40%, user still sees Home
+///   - Tap-to-dismiss for impatient users
+///
+/// Reduce Motion is honored — bouncy entry becomes a calm fade,
+/// the success haptic stays so the completion still registers.
+struct QuestCelebrationModal: View {
+    let moment: CaptureViewModel.DailyQuestCompletionMoment
+    let onDismiss: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @State private var backdropOpacity: Double = 0
+    @State private var cardScale: CGFloat = 0.6
+    @State private var cardOpacity: Double = 0
+    @State private var heroScale: CGFloat = 0.4
+    @State private var heroRotation: Double = -15
+    @State private var sparkleOpacity: Double = 0
+    @State private var sparkleScale: CGFloat = 0.5
+    @State private var rewardOpacity: Double = 0
+    @State private var rewardOffset: CGFloat = 8
+    @State private var didDismiss: Bool = false
+
+    var body: some View {
+        ZStack {
+            // Backdrop dim — clear-color is no good for hit-testing
+            // taps reliably; black at low opacity gives a real tap
+            // target so tapping anywhere outside the card dismisses.
+            Color.black
+                .opacity(backdropOpacity)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { dismiss() }
+
+            // Celebration card
+            VStack(spacing: AppSpacing.lg) {
+                // Hero: large emoji from the reward copy, with
+                // sparkle accents fanning out behind it on beat 3.
+                ZStack {
+                    sparkleLayer
+                        .opacity(sparkleOpacity)
+                        .scaleEffect(sparkleScale)
+
+                    Text(heroEmoji)
+                        .font(.system(size: 76))
+                        .scaleEffect(heroScale)
+                        .rotationEffect(.degrees(heroRotation))
+                        .accessibilityHidden(true)
+                }
+                .frame(width: 140, height: 140)
+
+                VStack(spacing: AppSpacing.xs) {
+                    Text("QUEST COMPLETE").eyebrow()
+                        .foregroundStyle(Color.brandDeep)
+
+                    Text(rewardHeadline)
+                        .appFont(.display2)
+                        .foregroundStyle(Color.ink)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .opacity(rewardOpacity)
+                        .offset(y: rewardOffset)
+                }
+                .padding(.horizontal, AppSpacing.md)
+            }
+            .padding(.vertical, AppSpacing.xl)
+            .padding(.horizontal, AppSpacing.lg)
+            .frame(maxWidth: 320)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.xl)
+                    .fill(Color.bgSurface)
+            )
+            .overlay(
+                // Subtle brand-tinted top edge — premium detail that
+                // gives the card a small lift without color-flooding.
+                RoundedRectangle(cornerRadius: AppRadius.xl)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.brand.opacity(0.35),
+                                Color.brandSoft.opacity(0.08)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 1
+                    )
+            )
+            .appShadow(.shadowElevated)
+            .scaleEffect(cardScale)
+            .opacity(cardOpacity)
+            .contentShape(RoundedRectangle(cornerRadius: AppRadius.xl))
+            .onTapGesture { dismiss() }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Quest complete. \(rewardHeadline). Tap to dismiss.")
+            .accessibilityAddTraits(.isButton)
+        }
+        .onAppear { play() }
+    }
+
+    // MARK: - Reward-copy parsing
+    //
+    // Phase 21 reward copies all start with an emoji (e.g.
+    // "🍎 Fruit logged — small win"). We render the emoji at hero
+    // size separately, and the rest as the headline. The `> 0x238C`
+    // floor skips ASCII digits that `isEmoji` reports as true when
+    // followed by the keycap sequence — none of our reward copies
+    // use those, so the filter is purely defensive.
+
+    private var heroEmoji: String {
+        guard let first = moment.rewardCopy.first,
+              first.unicodeScalars.contains(where: { scalar in
+                  scalar.properties.isEmoji && scalar.value > 0x238C
+              }) else {
+            return "✨"
+        }
+        return String(first)
+    }
+
+    private var rewardHeadline: String {
+        var copy = moment.rewardCopy
+        if let first = copy.first,
+           first.unicodeScalars.contains(where: { scalar in
+               scalar.properties.isEmoji && scalar.value > 0x238C
+           }) {
+            copy.removeFirst()
+        }
+        return copy.trimmingCharacters(in: .whitespaces)
+    }
+
+    // MARK: - Sparkle accents
+    //
+    // Six SF Symbol sparkles arranged on a circle around the hero.
+    // Alternating sizes give visual rhythm; brand color keeps them
+    // on-palette. They fade and scale in together at beat 3 so the
+    // user reads them as "a celebration moment" rather than six
+    // separate elements.
+    @ViewBuilder
+    private var sparkleLayer: some View {
+        ZStack {
+            ForEach(0..<6, id: \.self) { i in
+                Image(systemName: "sparkle")
+                    .font(.system(size: i.isMultiple(of: 2) ? 14 : 10,
+                                  weight: .heavy))
+                    .foregroundStyle(Color.brand)
+                    .offset(
+                        x: cos(Double(i) * .pi / 3) * 62,
+                        y: sin(Double(i) * .pi / 3) * 62
+                    )
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    // MARK: - Animation
+
+    private func play() {
+        if reduceMotion {
+            // Calm fade-in. No spring, no rotation, no staggered
+            // beats. Sparkles still appear (they're structural to
+            // the layout) but without independent motion.
+            withAnimation(.appReduced) {
+                backdropOpacity = 0.4
+                cardScale = 1
+                cardOpacity = 1
+                heroScale = 1
+                heroRotation = 0
+                rewardOpacity = 1
+                rewardOffset = 0
+                sparkleOpacity = 1
+                sparkleScale = 1
+            }
+            Haptics.success()
+            scheduleAutoDismiss()
+            return
+        }
+
+        // Beat 1 (0.00–0.20s) — backdrop dims, card enters with spring
+        withAnimation(.easeOut(duration: 0.20)) {
+            backdropOpacity = 0.4
+        }
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.65)) {
+            cardScale = 1
+            cardOpacity = 1
+        }
+        Haptics.soft()
+
+        Task { @MainActor in
+            // Beat 2 (0.20–0.45s) — hero springs in, rotation corrects
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.55)) {
+                heroScale = 1.1
+                heroRotation = 0
+            }
+
+            // Beat 3 (0.45–0.70s) — hero settles, sparkles fan,
+            // success haptic lands with the visual peak.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                heroScale = 1.0
+            }
+            withAnimation(.easeOut(duration: 0.4)) {
+                sparkleOpacity = 1
+                sparkleScale = 1
+            }
+            Haptics.success()
+
+            // Beat 4 (0.70–1.05s) — reward copy rises into place
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            withAnimation(.easeOut(duration: 0.35)) {
+                rewardOpacity = 1
+                rewardOffset = 0
+            }
+
+            scheduleAutoDismiss()
+        }
+    }
+
+    private func scheduleAutoDismiss() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if !didDismiss { dismiss() }
+        }
+    }
+
+    private func dismiss() {
+        guard !didDismiss else { return }
+        didDismiss = true
+        withAnimation(.easeIn(duration: 0.22)) {
+            backdropOpacity = 0
+            cardScale = 0.94
+            cardOpacity = 0
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            onDismiss()
+        }
+    }
+}
+
+// MARK: - Manual log toast (Phase 21)
+
+/// Lightweight banner shown after a successful manual save. Carries
+/// two slots:
+///   1. an optional quest-complete reward line (only when the save
+///      just completed today's quest), and
+///   2. a free-tier nudge ("Try a photo scan?" or "Upgrade for 5
+///      photo scans/day", depending on `scansRemaining`).
+///
+/// The host owns dismissal so the action buttons can route tab
+/// switches / scan starts cleanly — this modifier is just the
+/// presentation envelope.
+private struct ManualLogToastModifier: ViewModifier {
+    @Binding var toast: CaptureView.ManualLogToast?
+    let onScanAction: () -> Void
+    let onTrackerAction: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottom) {
+                if let toast {
+                    ManualLogToastView(
+                        toast: toast,
+                        onScanAction: onScanAction,
+                        onTrackerAction: onTrackerAction
+                    )
+                    .padding(.bottom, 96)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task(id: toast.id) {
+                        do {
+                            try await Task.sleep(nanoseconds: 4_000_000_000)
+                        } catch {
+                            return
+                        }
+                        withAnimation(.appReveal) {
+                            self.toast = nil
+                        }
+                    }
+                }
+            }
+            .animation(.motionBase, value: toast?.id)
+    }
+}
+
+private struct ManualLogToastView: View {
+    let toast: CaptureView.ManualLogToast
+    let onScanAction: () -> Void
+    let onTrackerAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(Color.success)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Manual log saved")
+                        .appFont(.captionStrong)
+                        .foregroundStyle(Color.ink)
+                    Text(toast.foodName)
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    Haptics.tap()
+                    onTrackerAction()
+                } label: {
+                    Text("View today")
+                        .appFont(.captionStrong)
+                        .foregroundStyle(Color.brandDeep)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if let reward = toast.questRewardCopy {
+                Text(reward)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.brandDeep)
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(Color.inkMute)
+                Button {
+                    Haptics.tap()
+                    onScanAction()
+                } label: {
+                    Text(toast.scansRemaining > 0
+                         ? "Try a photo scan? \(toast.scansRemaining) left today"
+                         : "Upgrade for \(FreeTierLimits.scansPerDayPro) photo scans/day")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.brandDeep)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundStyle(Color.brandDeep)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.sm)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.borderHairline, lineWidth: 1)
+        )
+        .appShadow(.shadowCard)
     }
 }
 

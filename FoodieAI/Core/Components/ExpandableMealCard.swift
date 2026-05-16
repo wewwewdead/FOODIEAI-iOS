@@ -41,7 +41,12 @@ struct ExpandableMealCard: View {
     private enum DeletePhase { case idle, windup, vanish }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
+        // Phase 21.9 — one unified card chrome wraps both the row and
+        // the expansion content. Previously `MealCard` carried its own
+        // chrome and the expansion sat as an unstyled sibling below it,
+        // which read as "floating outside the card." `hideChrome: true`
+        // suppresses MealCard's own surface; this VStack supplies it.
+        VStack(alignment: .leading, spacing: 0) {
             MealCard(
                 log: log,
                 onTap: {
@@ -53,7 +58,8 @@ struct ExpandableMealCard: View {
                         isExpanded.toggle()
                     }
                 },
-                expandsName: isExpanded
+                expandsName: isExpanded,
+                hideChrome: true
             )
             .contextMenu {
                 if onDelete != nil {
@@ -79,9 +85,22 @@ struct ExpandableMealCard: View {
 
             if isExpanded, hasExpandableContent, deletePhase == .idle {
                 expansion
+                    .padding(.top, AppSpacing.sm)
+                    .padding(.bottom, AppSpacing.md)
+                    .padding(.horizontal, AppSpacing.sm + 2)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.borderHairline, lineWidth: 1)
+        )
+        .appShadow(.shadowCard)
+        .clipShape(RoundedRectangle(cornerRadius: AppRadius.lg))
         .scaleEffect(deleteScaleX, anchor: .center)
         .scaleEffect(x: 1, y: deleteScaleY, anchor: .center)
         .rotationEffect(deleteRotation, anchor: .center)
@@ -150,16 +169,19 @@ struct ExpandableMealCard: View {
         }
     }
 
-    private var hasExpandableContent: Bool {
-        if let advice = log.coachAdvice, !advice.isEmpty { return true }
-        return !log.nutrients.isEmpty
-            || !log.benefits.isEmpty
-            || !log.drawbacks.isEmpty
-    }
+    /// The card is always expandable now (Phase 21.9): even a manual log
+    /// with no analysis content has six macros worth showing in the
+    /// macros grid. Tapping a card never feels inert.
+    private var hasExpandableContent: Bool { true }
 
     @ViewBuilder
     private var expansion: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
+            // Phase 21.9 — full 6-macro breakdown at the top of every
+            // expansion. The inline row only shows carbs/sugar/protein;
+            // fat and fiber were previously invisible per meal.
+            MealMacroGrid(log: log)
+
             if let advice = log.coachAdvice, !advice.isEmpty {
                 EditorialQuote(text: advice, attribution: log.coachName)
             }
@@ -185,7 +207,89 @@ struct ExpandableMealCard: View {
                 )
             }
         }
-        .padding(.horizontal, AppSpacing.sm)
+        // Horizontal padding moved to the call site so the expansion
+        // can align with the row inside the unified card chrome.
+    }
+}
+
+// MARK: - Phase 21.9 — per-meal macros grid
+
+/// Six-macro breakdown for one meal. Used inside `ExpandableMealCard`'s
+/// expanded content. Reuses `MacroChip` so the visual treatment matches
+/// the day-level chip row in `DayDetailSheet`.
+///
+/// Nil-valued macros (pre-Phase-11 analyzed rows, or manual logs where
+/// the user left protein/fat/fiber blank) render as "—" rather than "0g"
+/// — "0g" would be a false claim about the food's composition.
+private struct MealMacroGrid: View {
+    let log: FoodLog
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text("Macros").eyebrow()
+                .foregroundStyle(Color.inkLight)
+
+            // Two rows of three chips. Top: Calories / Carbs / Sugar
+            // (always present in the schema). Bottom: Protein / Fat /
+            // Fiber (optional — fall back to "—" placeholder).
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                HStack(spacing: AppSpacing.sm) {
+                    MacroChip(label: "Calories", value: log.calories, unit: "")
+                    MacroChip(label: "Carbs",    value: log.carbsG,   unit: "g")
+                    MacroChip(label: "Sugar",    value: log.sugarG,   unit: "g")
+                }
+                HStack(spacing: AppSpacing.sm) {
+                    OptionalMacroChip(label: "Protein", value: log.proteinG, unit: "g")
+                    OptionalMacroChip(label: "Fat",     value: log.fatG,     unit: "g")
+                    OptionalMacroChip(label: "Fiber",   value: log.fiberG,   unit: "g")
+                }
+            }
+        }
+    }
+}
+
+/// Renders a `MacroChip` for a non-nil value, or a same-geometry "—"
+/// placeholder when nil. Same fixed 78×64 footprint so a missing value
+/// doesn't reflow the grid.
+private struct OptionalMacroChip: View {
+    let label: String
+    let value: Double?
+    let unit: String
+
+    var body: some View {
+        if let v = value {
+            MacroChip(label: label, value: v, unit: unit)
+        } else {
+            MacroChipPlaceholder(label: label)
+        }
+    }
+}
+
+private struct MacroChipPlaceholder: View {
+    let label: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label).eyebrow()
+                .foregroundStyle(Color.inkLight)
+            // "—" replaces both the number and the unit — communicating
+            // "no data" rather than "we measured this and it was zero."
+            Text("—")
+                .appFont(.chipNumber)
+                .foregroundStyle(Color.inkLight)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(width: 78, height: 64, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.borderHairline, lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label) not recorded")
     }
 }
 

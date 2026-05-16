@@ -28,6 +28,53 @@ actor FoodLogService {
             .value
     }
 
+    /// Phase 21 — insert a manual (typing-based) meal log. Mirrors the
+    /// analyzed insert path but skips image-related fields and stashes
+    /// the serving description in the existing `nutrients` array so the
+    /// meal-detail UI surfaces it without a new column. Sets
+    /// `origin = .manual` so callers can distinguish later.
+    ///
+    /// The serving description is the user-readable portion ("1 cup
+    /// (158g)" or "2× 1 cup (158g)" when a multiplier was applied);
+    /// it lives in `nutrients[0]` by convention so v1 doesn't need a
+    /// schema change.
+    func insertManual(
+        foodName: String,
+        servingDesc: String,
+        calories: Double,
+        carbsG: Double,
+        proteinG: Double?,
+        fatG: Double?,
+        fiberG: Double?,
+        sugarG: Double?
+    ) async throws -> FoodLog {
+        let draft = NewFoodLog(
+            foodName:       foodName,
+            imagePath:      nil,
+            imageThumbPath: nil,
+            calories:       calories,
+            carbsG:         carbsG,
+            sugarG:         sugarG ?? 0,
+            proteinG:       proteinG,
+            fatG:           fatG,
+            fiberG:         fiberG,
+            benefits:       [],
+            drawbacks:      [],
+            nutrients:      [servingDesc],
+            coachName:      nil,
+            coachAdvice:    nil,
+            origin:         .manual,
+            sourceLogId:    nil
+        )
+
+        #if DEBUG
+        NSLog("[ManualLog] INSERT name=%@ cal=%.0f serving=%@",
+              foodName, calories, servingDesc)
+        #endif
+
+        return try await insert(draft)
+    }
+
     /// Today's logs for the signed-in user, in the user's local time zone.
     /// Phase 0 Q2: query food_logs directly with a local-day boundary; do not use
     /// the daily_food_totals view (which buckets by UTC and can disagree near midnight).

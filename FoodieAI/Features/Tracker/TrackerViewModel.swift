@@ -37,6 +37,20 @@ final class TrackerViewModel: ObservableObject {
     /// blocks the refresh path.
     @Published private(set) var latestRecap: WeeklyRecap? = nil
 
+    /// Phase 21 — streak snapshot read off the user's Profile. Loaded
+    /// alongside today's logs so the streak chip on Today reflects
+    /// the latest server state on every refresh. `nil` means "not
+    /// loaded yet" — the chip is hidden when nil OR when the count is
+    /// 0 (no streak to display).
+    ///
+    /// Phase 21.5 — the daily quest moved to Home (CaptureView). The
+    /// streak chip stays here because it's backward-looking (a
+    /// reflection metric), which is what Tracker is for. The quest
+    /// card is forward-looking and belongs at the entry point.
+    @Published private(set) var streakDays: Int? = nil
+    @Published private(set) var longestStreakDays: Int? = nil
+    @Published private(set) var graceDaysRemaining: Int? = nil
+
     private let logService: FoodLogService
     private let history: MealHistoryService
     private let observations: CoachObservationService
@@ -91,6 +105,12 @@ final class TrackerViewModel: ObservableObject {
         async let patternsTask: [Pattern]? = try? history.patternsForToday()
         async let observationTask: CoachObservation? = try? observations.todaysObservation()
         async let latestRecapTask: WeeklyRecap? = try? recapService.latest()
+        // Phase 21 — streak + quest. Both wrapped in try? so a
+        // transient failure on either doesn't poison the tracker's
+        // primary fetch. The profile load also feeds the streak chip
+        // values, so we run it explicitly rather than via Profile-
+        // Store (which may not be fresh yet on tab appear).
+        async let profileForStreakTask: Profile? = try? profileService.currentProfile()
 
         do {
             let logs = try await logsTask
@@ -107,6 +127,14 @@ final class TrackerViewModel: ObservableObject {
             self.patterns = resolvedPatterns
             self.activeObservation = observation
             self.latestRecap = await latestRecapTask
+            // Phase 21 — fold streak/quest results into the published
+            // state. Both can be nil (load failures); the views read
+            // them defensively.
+            if let profile = await profileForStreakTask {
+                self.streakDays         = profile.currentStreakDays
+                self.longestStreakDays  = profile.longestStreakDays
+                self.graceDaysRemaining = profile.graceDaysRemaining
+            }
             if logs.isEmpty {
                 state = .empty
             } else {
@@ -138,6 +166,11 @@ final class TrackerViewModel: ObservableObject {
             self.patterns = await patternsTask ?? []
             self.activeObservation = await observationTask
             self.latestRecap = await latestRecapTask
+            if let profile = await profileForStreakTask {
+                self.streakDays         = profile.currentStreakDays
+                self.longestStreakDays  = profile.longestStreakDays
+                self.graceDaysRemaining = profile.graceDaysRemaining
+            }
             state = .failed(error)
         }
     }

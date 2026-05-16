@@ -122,7 +122,7 @@ final class AuthService: NSObject, ObservableObject {
 
     func signInWithGoogle() async throws {
         lastError = nil
-        let scheme = Bundle.main.bundleIdentifier ?? "com.foodieai.FoodieAI"
+        let scheme = Bundle.main.bundleIdentifier ?? "com.thefoodieai.app"
         let redirect = URL(string: "\(scheme)://login-callback")!
         let oauthURL = try client.auth.getOAuthSignInURL(provider: .google, redirectTo: redirect)
         let callback: URL

@@ -43,6 +43,22 @@ struct Profile: Codable, Identifiable, Hashable {
     var weightKg: Double?
     var activityLevel: CalorieGoalCalculator.ActivityLevel?
     var weightGoalDirection: CalorieGoalCalculator.GoalDirection?
+    /// Phase 21 — daily-engagement state. All values are managed by
+    /// `StreakService` (streak math) and `DailyQuestService` (quest
+    /// rotation); the rest of the app reads them but does not write.
+    var currentStreakDays: Int
+    var longestStreakDays: Int
+    /// Local-calendar date of the user's most recent log. Compared
+    /// against today's local date to compute the gap and decide
+    /// extend / grace / reset.
+    var lastLoggedLocalDate: Date?
+    /// Capped at 2 by the DB check constraint. Starts at 1; refills by
+    /// 1 every full week without a miss; decremented when a 1-day gap
+    /// is forgiven.
+    var graceDaysRemaining: Int
+    var lastQuestDate: Date?
+    var lastQuestKind: String?
+    var lastQuestCompleted: Bool
     let createdAt: Date
     let updatedAt: Date
 
@@ -71,6 +87,13 @@ struct Profile: Codable, Identifiable, Hashable {
         case weightKg               = "weight_kg"
         case activityLevel          = "activity_level"
         case weightGoalDirection    = "weight_goal_direction"
+        case currentStreakDays      = "current_streak_days"
+        case longestStreakDays      = "longest_streak_days"
+        case lastLoggedLocalDate    = "last_logged_local_date"
+        case graceDaysRemaining     = "grace_days_remaining"
+        case lastQuestDate          = "last_quest_date"
+        case lastQuestKind          = "last_quest_kind"
+        case lastQuestCompleted     = "last_quest_completed"
         case createdAt              = "created_at"
         case updatedAt              = "updated_at"
     }
@@ -148,8 +171,51 @@ struct Profile: Codable, Identifiable, Hashable {
         weightKg            = try c.decodeIfPresent(Double.self, forKey: .weightKg)
         activityLevel       = try c.decodeIfPresent(CalorieGoalCalculator.ActivityLevel.self, forKey: .activityLevel)
         weightGoalDirection = try c.decodeIfPresent(CalorieGoalCalculator.GoalDirection.self, forKey: .weightGoalDirection)
+        // Phase 21. Defaults mirror migration 011 so a row predating
+        // the migration (which shouldn't happen in production, but
+        // does happen on a stale dev DB) decodes without throwing.
+        currentStreakDays    = try c.decodeIfPresent(Int.self, forKey: .currentStreakDays) ?? 0
+        longestStreakDays    = try c.decodeIfPresent(Int.self, forKey: .longestStreakDays) ?? 0
+        lastLoggedLocalDate  = try Profile.decodeLocalDate(from: c, forKey: .lastLoggedLocalDate)
+        graceDaysRemaining   = try c.decodeIfPresent(Int.self, forKey: .graceDaysRemaining) ?? 1
+        lastQuestDate        = try Profile.decodeLocalDate(from: c, forKey: .lastQuestDate)
+        lastQuestKind        = try c.decodeIfPresent(String.self, forKey: .lastQuestKind)
+        lastQuestCompleted   = try c.decodeIfPresent(Bool.self, forKey: .lastQuestCompleted) ?? false
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+    }
+
+    /// Postgres `date` columns serialize as `"YYYY-MM-DD"` over
+    /// PostgREST — not the ISO-8601 timestamp the rest of the schema
+    /// uses for `timestamptz`. The shared decoder is configured for
+    /// timestamps, so we parse the date string by hand here. The
+    /// resulting `Date` is midnight UTC of the named day; callers
+    /// compare it against a local-calendar `startOfDay` after pinning
+    /// the same timezone, so the UTC anchor doesn't shift the day
+    /// boundary.
+    private static let localDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static func decodeLocalDate(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws -> Date? {
+        // Some PostgREST stacks return the value as a string, others as
+        // a Date if a custom decoder strategy has already been applied.
+        // Handle both, plus null.
+        if let str = try container.decodeIfPresent(String.self, forKey: key) {
+            return localDateFormatter.date(from: str)
+        }
+        if let date = try? container.decodeIfPresent(Date.self, forKey: key) {
+            return date
+        }
+        return nil
     }
 }
 
@@ -187,6 +253,16 @@ struct ProfileUpdate: Encodable {
     var weightKg: Double? = nil
     var activityLevel: CalorieGoalCalculator.ActivityLevel? = nil
     var weightGoalDirection: CalorieGoalCalculator.GoalDirection? = nil
+    /// Phase 21 streak fields. Same opt-in semantics — nil leaves the
+    /// column untouched. Dates here are local-calendar dates and get
+    /// encoded as `"YYYY-MM-DD"` strings to match Postgres `date`.
+    var currentStreakDays: Int? = nil
+    var longestStreakDays: Int? = nil
+    var lastLoggedLocalDate: Date? = nil
+    var graceDaysRemaining: Int? = nil
+    var lastQuestDate: Date? = nil
+    var lastQuestKind: String? = nil
+    var lastQuestCompleted: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case displayName            = "display_name"
@@ -211,6 +287,13 @@ struct ProfileUpdate: Encodable {
         case weightKg               = "weight_kg"
         case activityLevel          = "activity_level"
         case weightGoalDirection    = "weight_goal_direction"
+        case currentStreakDays      = "current_streak_days"
+        case longestStreakDays      = "longest_streak_days"
+        case lastLoggedLocalDate    = "last_logged_local_date"
+        case graceDaysRemaining     = "grace_days_remaining"
+        case lastQuestDate          = "last_quest_date"
+        case lastQuestKind          = "last_quest_kind"
+        case lastQuestCompleted     = "last_quest_completed"
     }
 
     /// Encode only the keys the caller actually populated. Without this,
@@ -241,5 +324,38 @@ struct ProfileUpdate: Encodable {
         try c.encodeIfPresent(weightKg,              forKey: .weightKg)
         try c.encodeIfPresent(activityLevel,         forKey: .activityLevel)
         try c.encodeIfPresent(weightGoalDirection,   forKey: .weightGoalDirection)
+        try c.encodeIfPresent(currentStreakDays,     forKey: .currentStreakDays)
+        try c.encodeIfPresent(longestStreakDays,     forKey: .longestStreakDays)
+        if let d = lastLoggedLocalDate {
+            try c.encode(Self.localDateString(d), forKey: .lastLoggedLocalDate)
+        }
+        try c.encodeIfPresent(graceDaysRemaining,    forKey: .graceDaysRemaining)
+        if let d = lastQuestDate {
+            try c.encode(Self.localDateString(d), forKey: .lastQuestDate)
+        }
+        try c.encodeIfPresent(lastQuestKind,         forKey: .lastQuestKind)
+        try c.encodeIfPresent(lastQuestCompleted,    forKey: .lastQuestCompleted)
+    }
+
+    /// Postgres `date` columns want `"YYYY-MM-DD"`. The shared encoder
+    /// is configured for timestamps, so we format dates explicitly to
+    /// avoid sending a full ISO-8601 timestamp that would force PG to
+    /// implicitly cast and potentially shift the day across a TZ
+    /// boundary. Caller is responsible for passing a Date that
+    /// represents the user's local-calendar day (typically the result
+    /// of `cal.startOfDay(for:)` with the user's timezone).
+    private static let outboundDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        // Use the *user's* timezone when formatting so the YYYY-MM-DD
+        // string names the same calendar day the streak math saw.
+        f.timeZone = TimeZone.current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static func localDateString(_ date: Date) -> String {
+        outboundDateFormatter.string(from: date)
     }
 }

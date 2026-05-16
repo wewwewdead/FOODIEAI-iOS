@@ -87,6 +87,49 @@ final class CaptureViewModel: ObservableObject {
     /// leaving `.idle`, and we don't want to wedge the main capture flow.
     @Published var relogToast: RelogToast? = nil
 
+    /// Phase 21.5 — today's daily quest, displayed as a tappable card
+    /// on Home above the photo card. `nil` until loaded; the card
+    /// hides itself in that state rather than rendering a placeholder.
+    @Published var dailyQuest: DailyQuest? = nil
+    /// Mirrors `Profile.lastQuestCompleted` for today. We carry it on
+    /// the view model (rather than re-reading from DailyQuest.completed
+    /// every render) so the quest card can flip to its done state the
+    /// instant a save completes the quest, without waiting for the
+    /// next `loadQuest()` round-trip.
+    @Published var questCompleted: Bool = false
+
+    /// Phase 21.10 — fires the *one-shot* live-completion animation on
+    /// the Home quest card. `questCompleted` is the persistent state
+    /// (sticks for the rest of the day); this is the trigger that
+    /// plays the morph in the moment the save lands. The card view
+    /// nils it back out once the animation completes so subsequent
+    /// re-renders don't replay.
+    @Published var justCompletedQuest: DailyQuestCompletionMoment? = nil
+
+    struct DailyQuestCompletionMoment: Equatable {
+        let rewardCopy: String
+        let timestamp: Date
+    }
+
+    /// Called from the save paths (analyzed + manual-log) after the
+    /// quest evaluator reports the quest was just satisfied. Flips
+    /// `questCompleted` so the card stays in the completed state, and
+    /// fires `justCompletedQuest` so a visible card animates the morph
+    /// in the moment instead of waiting for the next foreground.
+    func recordQuestCompletion(rewardCopy: String) {
+        self.questCompleted = true
+        self.justCompletedQuest = DailyQuestCompletionMoment(
+            rewardCopy: rewardCopy,
+            timestamp: Date()
+        )
+    }
+
+    /// Cleared by the card view ~1.2s after the animation kicks off so
+    /// subsequent re-renders within the same session don't replay.
+    func clearJustCompletedQuest() {
+        self.justCompletedQuest = nil
+    }
+
     /// Phase 15.
     struct RelogToast: Identifiable, Equatable {
         let id = UUID()
@@ -475,6 +518,34 @@ final class CaptureViewModel: ObservableObject {
                 await CalorieReminderService.shared.recompute()
             }
 
+            // Phase 21: streak + daily-quest updates. Both are
+            // best-effort — the meal is already saved, and a failure
+            // here must not back out the user's row. They fire in a
+            // detached Task so the saved-state UI doesn't wait on
+            // them.
+            //
+            // Phase 21.5: after the evaluator runs, re-read the quest
+            // state so the Home quest card transitions to its done
+            // state without waiting for the next foreground.
+            Task { [weak self] in
+                _ = try? await StreakService.shared.recordLog(
+                    at: inserted.eatenAt
+                )
+                let evaluation = try? await DailyQuestService.shared
+                    .evaluateQuestProgress(after: inserted)
+                // Phase 21.10 — if the just-saved meal completed
+                // today's quest, fire the live-completion animation
+                // before refreshing from DB so the card morphs in
+                // place rather than snap-flipping on the next
+                // `loadQuest()` round-trip.
+                if let evaluation,
+                   evaluation.questCompleted,
+                   let reward = evaluation.rewardCopy {
+                    await self?.recordQuestCompletion(rewardCopy: reward)
+                }
+                await self?.loadQuest()
+            }
+
             // Phase 18: the `.saved → .moodPulse` transition is driven
             // entirely by `discardSaved()` — i.e., when the user closes
             // the success sheet themselves. We don't auto-advance on a
@@ -630,6 +701,34 @@ final class CaptureViewModel: ObservableObject {
     /// when the user starts a new flow.
     func clearRelogToast() {
         relogToast = nil
+    }
+
+    // MARK: - Phase 21.5: Daily quest
+
+    /// Fetch today's quest and the completion flag in parallel.
+    /// Silent on failure — the quest card hides itself when
+    /// `dailyQuest` is nil, which is the safer default than blocking
+    /// the rest of Home on a quest-only RPC.
+    ///
+    /// Called from `CaptureView` on appear, on scenePhase → .active,
+    /// and after every successful save (so the card transitions to
+    /// its completed state once the post-save evaluator flips the
+    /// flag server-side).
+    func loadQuest() async {
+        do {
+            async let questTask = DailyQuestService.shared.todaysQuest(
+                timeZone: .current
+            )
+            async let profileTask = ProfileService().currentProfile()
+            let quest = try await questTask
+            let profile = try await profileTask
+            self.dailyQuest = quest
+            self.questCompleted = profile.lastQuestCompleted
+        } catch {
+            #if DEBUG
+            NSLog("[Quest] load FAILED: %@", "\(error)")
+            #endif
+        }
     }
 }
 

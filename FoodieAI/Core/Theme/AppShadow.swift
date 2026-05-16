@@ -20,6 +20,7 @@ enum AppShadow: String, CaseIterable, Identifiable {
     case shadowCard       // 0 6 14 rgba(0,0,0,0.05) — default card lift
     case shadowCta        // 0 8 16 rgba(184,202,56,0.18) — colored CTA shadow
     case shadowFloating   // 0 4 10 rgba(0,0,0,0.08) — coach badge, segmented thumb
+    case shadowElevated   // 0 12 30 rgba(0,0,0,0.18) — modal / overlay lifted above page (Phase 21.11)
 
     var id: String { rawValue }
 
@@ -64,6 +65,13 @@ enum AppShadow: String, CaseIterable, Identifiable {
         case .shadowFloating:
             [.init(color: .black.opacity(0.08),
                    radius: 10, x: 0, y: 4)]
+        case .shadowElevated:
+            // Phase 21.11 — modal/overlay shadow. Deliberately heavier
+            // than `.shadowCard` so a centered celebration card reads
+            // as "above the page" rather than "another card on the
+            // page."
+            [.init(color: .black.opacity(0.18),
+                   radius: 30, x: 0, y: 12)]
         }
     }
 }

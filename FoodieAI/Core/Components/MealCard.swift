@@ -29,6 +29,12 @@ struct MealCard: View {
     /// meal with spicy pork stew" reads fully once the card is opened
     /// without changing collapsed-row layout elsewhere.
     var expandsName: Bool = false
+    /// Phase 21.9 fix — when true, drop the white surface / hairline
+    /// border / card shadow. Used by `ExpandableMealCard` so its outer
+    /// wrapper can own one unified chrome that visually contains both
+    /// the row AND the expansion content. Standalone callers
+    /// (`RecentMealsSheet`, ComponentGallery) keep the default false.
+    var hideChrome: Bool = false
 
     @State private var imageURL: URL?
     @State private var failed: Bool = false
@@ -89,13 +95,24 @@ struct MealCard: View {
         .frame(minHeight: 76)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+            // Phase 21.9 — chrome is suppressed when `hideChrome` is
+            // true so `ExpandableMealCard` can own a single unified
+            // chrome around row + expansion.
+            Group {
+                if !hideChrome {
+                    RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+                }
+            }
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
+            Group {
+                if !hideChrome {
+                    RoundedRectangle(cornerRadius: AppRadius.lg)
+                        .strokeBorder(Color.borderHairline, lineWidth: 1)
+                }
+            }
         )
-        .appShadow(.shadowCard)
+        .modifier(ConditionalCardShadow(apply: !hideChrome))
         .overlay(alignment: .topTrailing) {
             favoriteButton
                 .padding(.top, 4)
@@ -211,8 +228,10 @@ struct MealCard: View {
     }()
 
     private var macrosLine: String {
-        // Compact 3-macro line; protein/fat/fiber drop here so the row
-        // stays scannable. The expanded MealRow still shows everything.
+        // Compact 3-macro line: carbs, sugar, and protein (when present).
+        // Fat and fiber are intentionally omitted from the inline summary
+        // to keep the row scannable; the full 6-macro breakdown lives in
+        // the expanded view (see `MealMacroGrid` in ExpandableMealCard).
         var parts: [String] = []
         parts.append("\(format(log.carbsG))g carbs")
         parts.append("\(format(log.sugarG))g sugar")
@@ -244,6 +263,19 @@ struct MealCard: View {
 
 /// Subtle press state — scale 0.98 with `.appPress`. The card already
 /// carries `shadowCard`, so a lift effect would feel heavy.
+/// Phase 21.9 — applies the card shadow only when `apply` is true.
+/// `AppShadow` has no `.none` token, so we gate the modifier instead.
+private struct ConditionalCardShadow: ViewModifier {
+    let apply: Bool
+    func body(content: Content) -> some View {
+        if apply {
+            content.appShadow(.shadowCard)
+        } else {
+            content
+        }
+    }
+}
+
 private struct MealCardButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label

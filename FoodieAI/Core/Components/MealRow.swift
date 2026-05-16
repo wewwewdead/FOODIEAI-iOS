@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// @deprecated Phase 21.9 — replaced everywhere by `ExpandableMealCard`
+/// (which composes `MealCard` + an inline expansion). Today, Day detail,
+/// and Recap all use the new card. The only remaining references to this
+/// type live in its own `#Preview` blocks below; safe to delete in a
+/// follow-up cleanup once we're confident nothing dynamic still resolves
+/// to it.
+///
 /// Shared expandable meal row used by Today, the Week day-detail sheet, and
 /// the Month day-detail sheet. Phase 10 surfaces the saved analysis details
 /// (coach speech bubble + nutrients/benefits/drawbacks panels) inline below

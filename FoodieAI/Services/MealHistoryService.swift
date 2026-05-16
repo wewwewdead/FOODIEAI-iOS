@@ -115,6 +115,41 @@ actor MealHistoryService {
         return unique
     }
 
+    // MARK: - Recent behavior (Phase 21.6)
+
+    /// Phase 21.6 — every food_log in the last N=7 local days for the
+    /// signed-in user, newest-first. Used by gap-score quest selection.
+    ///
+    /// Distinct from the existing helpers:
+    ///   - `priorOccurrences(of:)` filters by name (repeat detection)
+    ///   - `recentUniqueMeals(limit:)` dedupes by name (re-log picker)
+    ///   - `recentMealsForCoachContext()` is name-agnostic but caps at
+    ///     14 days / 14 rows for the analyze payload
+    ///
+    /// Gap scoring needs the raw, undeduplicated set across exactly
+    /// seven local days so counts (e.g. "0 green logs in 7 days") are
+    /// honest. RLS handles user isolation.
+    func logsInLast7Days(now: Date = Date(),
+                         timeZone: TimeZone = .current) async throws -> [FoodLog] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let today = cal.startOfDay(for: now)
+        guard let sevenDaysAgo = cal.date(byAdding: .day, value: -7, to: today) else {
+            return []
+        }
+
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        return try await client
+            .from("food_logs")
+            .select()
+            .gte("eaten_at", value: f.string(from: sevenDaysAgo))
+            .order("eaten_at", ascending: false)
+            .execute()
+            .value
+    }
+
     // MARK: - Coach context (Phase 16)
 
     /// Up to 14 of the user's most recent meals from the last 14 days,

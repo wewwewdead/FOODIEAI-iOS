@@ -218,13 +218,55 @@ struct TodayView: View {
 
     // MARK: - Date header
 
+    /// Phase 21 — local presentation flag for the streak detail sheet.
+    @State private var showingStreakDetail: Bool = false
+
     private var dateHeader: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
-            Text(eyebrowDate(Date())).eyebrow()
-                .foregroundStyle(Color.inkMute)
+            HStack(alignment: .center) {
+                Text(eyebrowDate(Date())).eyebrow()
+                    .foregroundStyle(Color.inkMute)
+                Spacer()
+                streakChip
+            }
             Text(headlineDate(Date()))
                 .appFont(.display2)
                 .foregroundStyle(Color.ink)
+        }
+        .sheet(isPresented: $showingStreakDetail) {
+            StreakDetailSheet(
+                current: viewModel.streakDays ?? 0,
+                longest: viewModel.longestStreakDays ?? 0,
+                graceRemaining: viewModel.graceDaysRemaining ?? 0
+            )
+            .presentationDetents([.height(360)])
+            .presentationDragIndicator(.visible)
+        }
+    }
+
+    /// Phase 21 — small chip showing the current streak. Hidden when
+    /// the user hasn't started a streak yet (count == 0) so day-zero
+    /// users don't get "0 days" rendered at them.
+    @ViewBuilder
+    private var streakChip: some View {
+        if let streak = viewModel.streakDays, streak > 0 {
+            Button {
+                Haptics.tap()
+                showingStreakDetail = true
+            } label: {
+                HStack(spacing: 4) {
+                    Text("🔥")
+                        .font(.system(size: 12))
+                    Text("\(streak) day\(streak == 1 ? "" : "s")")
+                        .appFont(.captionStrong)
+                        .foregroundStyle(Color.ink)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color.brandSoft))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Current streak: \(streak) days. Tap for details.")
         }
     }
 
@@ -855,5 +897,64 @@ private struct WeeklyRecapBuildingHint: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Your weekly reflection is building.")
+    }
+}
+
+// MARK: - Streak detail sheet (Phase 21)
+
+/// Small explanatory sheet presented when the user taps the streak
+/// chip. Displays current streak, longest streak, grace remaining,
+/// and a one-line description of the grace-day mechanic.
+private struct StreakDetailSheet: View {
+    let current: Int
+    let longest: Int
+    let graceRemaining: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                Text("YOUR STREAK").eyebrow()
+                    .foregroundStyle(Color.inkMute)
+                Text("\(current) day\(current == 1 ? "" : "s")")
+                    .appFont(.display1)
+                    .foregroundStyle(Color.ink)
+            }
+
+            HStack(spacing: AppSpacing.lg) {
+                statBlock(label: "BEST", value: "\(longest)")
+                statBlock(label: "GRACE", value: "\(graceRemaining)")
+            }
+
+            Text("Miss a day and your streak survives once — that's your grace day. Log every day for a week and we refill it. We don't penalize humans.")
+                .appFont(.caption)
+                .foregroundStyle(Color.inkMute)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer()
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.top, AppSpacing.xl)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.bgCanvas)
+    }
+
+    private func statBlock(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).eyebrow()
+                .foregroundStyle(Color.inkMute)
+            Text(value)
+                .appFont(.title1)
+                .foregroundStyle(Color.ink)
+        }
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.borderHairline, lineWidth: 1)
+        )
     }
 }

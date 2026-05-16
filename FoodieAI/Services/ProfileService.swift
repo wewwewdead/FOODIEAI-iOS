@@ -348,6 +348,73 @@ actor ProfileService {
             .value
     }
 
+    /// Phase 21 — write the four streak fields in one round-trip.
+    /// Called by `StreakService.recordLog(...)` after every meal save
+    /// (manual + analyzed). Returns the updated profile so observers
+    /// can refresh the streak chip without re-fetching.
+    ///
+    /// All four fields are written together because they're computed as
+    /// one unit and writing them in separate calls would let a partial
+    /// failure leave the profile inconsistent (e.g. extended streak but
+    /// no grace decrement).
+    func updateStreak(currentStreakDays: Int,
+                      longestStreakDays: Int,
+                      lastLoggedLocalDate: Date,
+                      graceDaysRemaining: Int) async throws -> Profile {
+        let id = try await signedInUserId()
+        let patch = ProfileUpdate(
+            currentStreakDays:   currentStreakDays,
+            longestStreakDays:   longestStreakDays,
+            lastLoggedLocalDate: lastLoggedLocalDate,
+            graceDaysRemaining:  graceDaysRemaining
+        )
+
+        #if DEBUG
+        NSLog("[Profile] UPDATE streak SET (current=%d longest=%d grace=%d) WHERE id=%@",
+              currentStreakDays, longestStreakDays, graceDaysRemaining, id)
+        #endif
+
+        return try await client
+            .from("profiles")
+            .update(patch)
+            .eq("id", value: id)
+            .select()
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Phase 21 — write the three quest fields. Called when:
+    ///   - a new day rolls over and `DailyQuestService.todaysQuest` picks
+    ///     a fresh kind (resets `last_quest_completed` to false)
+    ///   - a save evaluates the quest predicate and flips
+    ///     `last_quest_completed` to true
+    func updateQuest(lastQuestDate: Date,
+                     lastQuestKind: String,
+                     lastQuestCompleted: Bool) async throws -> Profile {
+        let id = try await signedInUserId()
+        let patch = ProfileUpdate(
+            lastQuestDate:      lastQuestDate,
+            lastQuestKind:      lastQuestKind,
+            lastQuestCompleted: lastQuestCompleted
+        )
+
+        #if DEBUG
+        NSLog("[Profile] UPDATE quest SET (date=%@ kind=%@ done=%@) WHERE id=%@",
+              lastQuestDate.description, lastQuestKind,
+              lastQuestCompleted ? "true" : "false", id)
+        #endif
+
+        return try await client
+            .from("profiles")
+            .update(patch)
+            .eq("id", value: id)
+            .select()
+            .single()
+            .execute()
+            .value
+    }
+
     /// Phase 17 — quiet timezone sync. Writes the IANA identifier only
     /// when it differs from `currentValue`. Caller is responsible for
     /// reading the current value from the loaded profile and skipping

@@ -41,13 +41,14 @@ struct PhysiologyEditorView: View {
     @State private var isSaving = false
     @State private var saveError: String? = nil
 
+    private enum Field: Hashable { case age, height, weight }
+    @FocusState private var focusedField: Field?
+
     private let service = ProfileService()
 
     var body: some View {
         ZStack {
             Color.bgCanvas.ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { dismissKeyboard() }
             switch phase {
             case .form:
                 formContent
@@ -84,6 +85,12 @@ struct PhysiologyEditorView: View {
             .padding(.horizontal, AppSpacing.lg)
             .padding(.top, AppSpacing.lg)
             .padding(.bottom, AppSpacing.lg)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Tap on empty space dismisses the keyboard. Lives on the
+            // VStack — the ScrollView sits on top of the canvas Color so
+            // a gesture on the canvas would never fire.
+            .contentShape(Rectangle())
+            .onTapGesture { focusedField = nil }
         }
         .scrollDismissesKeyboard(.interactively)
     }
@@ -119,7 +126,9 @@ struct PhysiologyEditorView: View {
         section(title: "Age", caption: nil) {
             HStack {
                 TextField("30", text: $ageText)
-                    .keyboardType(.numberPad)
+                    .keyboardType(.default)
+                    .focused($focusedField, equals: .age)
+                    .tint(Color.brand)
                     .font(AppFont.font(.kcal))
                     .fontWeight(.heavy)
                     .foregroundStyle(Color.textPrimary)
@@ -132,10 +141,11 @@ struct PhysiologyEditorView: View {
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: AppRadius.lg)
-                            .strokeBorder(Color.panelBorder, lineWidth: 2)
+                            .strokeBorder(focusedField == .age ? Color.brand : Color.panelBorder,
+                                          lineWidth: 2)
                     )
                     .onChange(of: ageText) { _, newValue in
-                        let filtered = newValue.filter { ("0"..."9").contains($0) }
+                        let filtered = NumericFieldFilter.integer(newValue)
                         if filtered != newValue { ageText = filtered }
                     }
                 Text("years")
@@ -152,7 +162,11 @@ struct PhysiologyEditorView: View {
                 HStack {
                     TextField(heightUnit == .cm ? "175" : "5'9\"",
                               text: $heightText)
-                        .keyboardType(heightUnit == .cm ? .decimalPad : .asciiCapable)
+                        .keyboardType(.default)
+                        .autocorrectionDisabled(true)
+                        .textInputAutocapitalization(.never)
+                        .focused($focusedField, equals: .height)
+                        .tint(Color.brand)
                         .font(AppFont.font(.kcal))
                         .fontWeight(.heavy)
                         .foregroundStyle(Color.textPrimary)
@@ -165,8 +179,15 @@ struct PhysiologyEditorView: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppRadius.lg)
-                                .strokeBorder(Color.panelBorder, lineWidth: 2)
+                                .strokeBorder(focusedField == .height ? Color.brand : Color.panelBorder,
+                                              lineWidth: 2)
                         )
+                        .onChange(of: heightText) { _, newValue in
+                            let filtered = heightUnit == .cm
+                                ? NumericFieldFilter.decimal(newValue)
+                                : NumericFieldFilter.feetInches(newValue)
+                            if filtered != newValue { heightText = filtered }
+                        }
                     Text(heightUnit.suffix)
                         .appFont(.body)
                         .foregroundStyle(Color.textMeta)
@@ -182,7 +203,9 @@ struct PhysiologyEditorView: View {
                 HStack {
                     TextField(weightUnit == .kg ? "75" : "165",
                               text: $weightText)
-                        .keyboardType(.decimalPad)
+                        .keyboardType(.default)
+                        .focused($focusedField, equals: .weight)
+                        .tint(Color.brand)
                         .font(AppFont.font(.kcal))
                         .fontWeight(.heavy)
                         .foregroundStyle(Color.textPrimary)
@@ -195,8 +218,13 @@ struct PhysiologyEditorView: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppRadius.lg)
-                                .strokeBorder(Color.panelBorder, lineWidth: 2)
+                                .strokeBorder(focusedField == .weight ? Color.brand : Color.panelBorder,
+                                              lineWidth: 2)
                         )
+                        .onChange(of: weightText) { _, newValue in
+                            let filtered = NumericFieldFilter.decimal(newValue)
+                            if filtered != newValue { weightText = filtered }
+                        }
                     Text(weightUnit.suffix)
                         .appFont(.body)
                         .foregroundStyle(Color.textMeta)
@@ -498,12 +526,6 @@ struct PhysiologyEditorView: View {
         }
     }
 
-    private func dismissKeyboard() {
-        UIApplication.shared.sendAction(
-            #selector(UIResponder.resignFirstResponder),
-            to: nil, from: nil, for: nil
-        )
-    }
 }
 
 // MARK: - Unit toggles
@@ -535,6 +557,10 @@ private enum HeightUnit: String, CaseIterable, Hashable, CustomStringConvertible
             return Double(text.replacingOccurrences(of: ",", with: "."))
         case .ftIn:
             let cleaned = text
+                .replacingOccurrences(of: "\u{2019}", with: "'")
+                .replacingOccurrences(of: "\u{2018}", with: "'")
+                .replacingOccurrences(of: "\u{201C}", with: "\"")
+                .replacingOccurrences(of: "\u{201D}", with: "\"")
                 .replacingOccurrences(of: "\"", with: "")
                 .replacingOccurrences(of: "'", with: " ")
             let parts = cleaned.split(separator: " ", omittingEmptySubsequences: true)

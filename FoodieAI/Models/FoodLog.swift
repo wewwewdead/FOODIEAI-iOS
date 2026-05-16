@@ -38,9 +38,16 @@ struct FoodLog: Codable, Identifiable, Hashable {
 
     /// Phase 15. String-coded so PostgREST round-trips cleanly through
     /// the `text` column with its CHECK constraint.
+    ///
+    /// Phase 21 adds `.manual` for typing-based entries that skip the
+    /// photo + analyze pipeline. Manual rows leave image_path /
+    /// image_thumb_path / coach_* null and stash the serving description
+    /// in the existing `nutrients` array so it surfaces in meal detail
+    /// without a new column.
     enum Origin: String, Codable, Hashable {
         case analyzed
         case relogged
+        case manual
     }
 
     /// Phase 18. Three deliberately small options — five would dilute
