@@ -415,6 +415,28 @@ actor ProfileService {
             .value
     }
 
+    /// Phase 21.12 — toggle for the daily Healthy Choice quest card.
+    /// Writes only `healthy_choices_enabled`, leaving every other
+    /// column untouched.
+    func setHealthyChoicesEnabled(_ enabled: Bool) async throws -> Profile {
+        let id = try await signedInUserId()
+        let patch = ProfileUpdate(healthyChoicesEnabled: enabled)
+
+        #if DEBUG
+        NSLog("[Profile] UPDATE profiles SET healthy_choices_enabled=%@ WHERE id=%@",
+              enabled ? "true" : "false", id)
+        #endif
+
+        return try await client
+            .from("profiles")
+            .update(patch)
+            .eq("id", value: id)
+            .select()
+            .single()
+            .execute()
+            .value
+    }
+
     /// Phase 17 — quiet timezone sync. Writes the IANA identifier only
     /// when it differs from `currentValue`. Caller is responsible for
     /// reading the current value from the loaded profile and skipping

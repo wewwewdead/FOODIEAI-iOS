@@ -217,16 +217,16 @@ final class CalorieGoalCalculatorTests: XCTestCase {
 // MARK: - Phase 21.5 — DailyQuest.Kind goal alignment
 
 final class DailyQuestGoalAlignmentTests: XCTestCase {
-    /// A loseWeight user must NOT see "Log 3 meals" (they may
-    /// intentionally skip a meal under IF) but SHOULD see protein
-    /// (muscle preservation in deficit) and stayUnderGoal.
-    func test_loseWeightUser_excludesLogThreeMeals_andIncludesStayUnderGoal() {
+    /// A loseWeight user should see stayUnderGoal + protein
+    /// (preservation in deficit) and the universal health choices.
+    /// Phase 21.12 — `logThreeMeals` was hard-removed in the reframing.
+    func test_loseWeightUser_includesStayUnderGoal_andLogProtein() {
         let loseWeightKinds = DailyQuest.Kind.allCases.filter {
             $0.isAppropriate(for: .loseWeight, goal: .lose)
         }
-        XCTAssertFalse(loseWeightKinds.contains(.logThreeMeals))
         XCTAssertTrue(loseWeightKinds.contains(.stayUnderGoal))
         XCTAssertTrue(loseWeightKinds.contains(.logProtein))
+        XCTAssertTrue(loseWeightKinds.contains(.logSomethingGreen))
     }
 
     /// A buildMuscle/gain user must NOT see stayUnderGoal (they're
@@ -247,42 +247,41 @@ final class DailyQuestGoalAlignmentTests: XCTestCase {
             $0.isAppropriate(for: nil, goal: nil)
         }
         XCTAssertGreaterThanOrEqual(kinds.count, 3)
-        // The universal quests must all be present.
+        // The universal Healthy Choice quests must all be present.
         XCTAssertTrue(kinds.contains(.logSomethingGreen))
-        XCTAssertTrue(kinds.contains(.logBeforeTime))
-        XCTAssertTrue(kinds.contains(.tryNewFood))
+        XCTAssertTrue(kinds.contains(.logFruit))
+        XCTAssertTrue(kinds.contains(.logFiber))
     }
 
-    // MARK: - Phase 21.7 — pool size
+    // MARK: - Phase 21.12 — pool size after Healthy Choice expansion
 
-    /// Aware + maintain user should see at least 12 of the 15 kinds —
-    /// the most permissive archetype. Floor protects against an
-    /// accidental future filter that prunes the everyone-appropriate
-    /// bucket.
-    func test_poolSize_aware_maintain() {
-        let pool = DailyQuest.Kind.allCases.filter {
+    /// Phase 21.13 — pool grew to 28 kinds (dropped logColorfulMeal,
+    /// added logBerry / logHydrationMeal / logAntioxidantRich).
+    /// Aware + maintain is the most permissive archetype.
+    func test_poolSize_aware_maintain_expanded() {
+        let appropriate = DailyQuest.Kind.allCases.filter {
             $0.isAppropriate(for: .aware, goal: .maintain)
         }
-        XCTAssertGreaterThanOrEqual(pool.count, 12)
+        XCTAssertGreaterThanOrEqual(appropriate.count, 24)
     }
 
-    /// Build-muscle / gain users skip a couple of "eat less" framings
-    /// (stayUnderGoal, logLightMeal, logLowSugar). They should still
-    /// have 12+ quests to draw from.
+    /// Build-muscle / gain users skip the "eat less" framings
+    /// (stayUnderGoal, logLightMeal, logLowSugar, logLowProcessedMeal).
+    /// They should still have 22+ quests to draw from.
     func test_poolSize_buildMuscle_gain() {
         let pool = DailyQuest.Kind.allCases.filter {
             $0.isAppropriate(for: .buildMuscle, goal: .gain)
         }
-        XCTAssertGreaterThanOrEqual(pool.count, 12)
+        XCTAssertGreaterThanOrEqual(pool.count, 22)
     }
 
-    /// Lose-weight users skip logThreeMeals but everything else is
-    /// in. Still 12+.
+    /// Lose-weight users get the full universal set + lose-specific
+    /// quests.
     func test_poolSize_loseWeight_lose() {
         let pool = DailyQuest.Kind.allCases.filter {
             $0.isAppropriate(for: .loseWeight, goal: .lose)
         }
-        XCTAssertGreaterThanOrEqual(pool.count, 12)
+        XCTAssertGreaterThanOrEqual(pool.count, 24)
     }
 }
 
@@ -332,50 +331,86 @@ final class DailyQuestGapScoringTests: XCTestCase {
         XCTAssertLessThan(score, 0.25)
     }
 
-    // MARK: varietyGap
+    // MARK: Phase 21.12 — scoring smoke tests for new kinds
 
-    func test_varietyGap_lowVariety_scoresHigh() {
-        // 10 logs, all the same food.
-        let logs = (1...10).map {
-            Self.makeLog(name: "Rice", daysAgo: $0 % 7)
-        }
-        let score = DailyQuest.Kind.tryNewFood.gapScore(recentLogs: logs)
-        XCTAssertGreaterThan(score, 0.7)
-    }
-
-    func test_varietyGap_highVariety_scoresLow() {
-        let names = ["Rice", "Pasta", "Salad", "Chicken", "Soup", "Pizza", "Eggs"]
-        let logs = names.enumerated().map { (i, name) in
-            Self.makeLog(name: name, daysAgo: i)
-        }
-        let score = DailyQuest.Kind.tryNewFood.gapScore(recentLogs: logs)
-        XCTAssertLessThan(score, 0.3)
-    }
-
-    func test_varietyGap_tooFewLogs_returnsNeutralMidValue() {
-        let logs = [Self.makeLog(name: "Rice", daysAgo: 1)]
-        let score = DailyQuest.Kind.tryNewFood.gapScore(recentLogs: logs)
-        XCTAssertEqual(score, 0.5, accuracy: 0.01)
-    }
-
-    // MARK: breakfastGap
-
-    func test_breakfastGap_zeroEarlyLogs_scoresHigh() {
-        let logs = (1...5).map { day in
-            Self.makeLog(name: "Lunch", daysAgo: day, hour: 13)
-        }
-        let score = DailyQuest.Kind.logBeforeTime.gapScore(recentLogs: logs)
-        XCTAssertGreaterThan(score, 0.7)
-    }
-
-    // MARK: threeMealsGap
-
-    func test_threeMealsGap_userLogsOncePerDay_scoresHigh() {
-        let logs = (0..<7).map { day in
-            Self.makeLog(name: "Dinner", daysAgo: day, hour: 19)
-        }
-        let score = DailyQuest.Kind.logThreeMeals.gapScore(recentLogs: logs)
+    /// User who never logs a cruciferous vegetable scores high.
+    func test_cruciferGap_zeroCrucifer_scoresHigh() {
+        let logs = [
+            Self.makeLog(name: "Rice",   daysAgo: 1),
+            Self.makeLog(name: "Burger", daysAgo: 2)
+        ]
+        let score = DailyQuest.Kind.logCrucifer.gapScore(recentLogs: logs)
         XCTAssertGreaterThan(score, 0.6)
+    }
+
+    /// User who logs broccoli repeatedly scores low — this isn't a
+    /// gap for them.
+    func test_cruciferGap_repeatedCrucifer_scoresLow() {
+        let logs = (1...5).map {
+            Self.makeLog(name: "Broccoli stir fry", daysAgo: $0)
+        }
+        let score = DailyQuest.Kind.logCrucifer.gapScore(recentLogs: logs)
+        XCTAssertLessThan(score, 0.4)
+    }
+
+    /// Late dinners pull the early-dinner gap toward "you should
+    /// eat earlier."
+    func test_earlyDinnerHealthGap_lateDinners_scoresHigh() {
+        let logs = (1...5).map { day in
+            Self.makeLog(name: "Dinner", daysAgo: day, hour: 21)
+        }
+        let score = DailyQuest.Kind.logEarlyDinnerHealth.gapScore(recentLogs: logs)
+        XCTAssertGreaterThan(score, 0.6)
+    }
+
+    // MARK: Phase 21.13 — berry / hydration / antioxidant scorers
+
+    /// No berry log in the last 7 days → high gap.
+    /// Bananas are fruit but not berries, so they shouldn't count.
+    func test_berryGap_zeroBerryLogs_scoresHigh() {
+        let logs = [
+            Self.makeLog(name: "Pizza",  daysAgo: 1),
+            Self.makeLog(name: "Pasta",  daysAgo: 2),
+            Self.makeLog(name: "Banana", daysAgo: 3)
+        ]
+        let score = DailyQuest.Kind.logBerry.gapScore(recentLogs: logs)
+        XCTAssertGreaterThan(score, 0.7)
+    }
+
+    /// Three berry logs covering blueberry / strawberry / raspberry
+    /// substrings — the gap should fall well below 0.35.
+    func test_berryGap_threeBerryLogs_scoresLow() {
+        let logs = [
+            Self.makeLog(name: "Blueberries",        daysAgo: 1),
+            Self.makeLog(name: "Strawberry yogurt",  daysAgo: 2),
+            Self.makeLog(name: "Raspberry smoothie", daysAgo: 3)
+        ]
+        let score = DailyQuest.Kind.logBerry.gapScore(recentLogs: logs)
+        XCTAssertLessThan(score, 0.35)
+    }
+
+    /// Cucumber + watermelon + miso soup — three hydration matches.
+    /// `scoreHydrationGap` floors slower than `scoreBerryGap`, so we
+    /// only need to confirm we're under the mid-pool ~0.45.
+    func test_hydrationGap_hydratingFoodsDetected() {
+        let logs = [
+            Self.makeLog(name: "Cucumber salad", daysAgo: 1),
+            Self.makeLog(name: "Watermelon",     daysAgo: 2),
+            Self.makeLog(name: "Miso soup",      daysAgo: 3)
+        ]
+        let score = DailyQuest.Kind.logHydrationMeal.gapScore(recentLogs: logs)
+        XCTAssertLessThan(score, 0.45)
+    }
+
+    /// Tea / cocoa / berry combo — broad antioxidant coverage.
+    func test_antioxidantGap_relevantFoodsDetected() {
+        let logs = [
+            Self.makeLog(name: "Green tea",      daysAgo: 1),
+            Self.makeLog(name: "Dark chocolate", daysAgo: 2),
+            Self.makeLog(name: "Blueberries",    daysAgo: 3)
+        ]
+        let score = DailyQuest.Kind.logAntioxidantRich.gapScore(recentLogs: logs)
+        XCTAssertLessThan(score, 0.4)
     }
 
     // MARK: helpers

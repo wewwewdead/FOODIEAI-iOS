@@ -2,15 +2,14 @@ import SwiftUI
 import AuthenticationServices
 import CryptoKit
 
-/// Mobile-adapted version of `pages/Login/Login.jsx`. The desktop layout
-/// has three benefit cards; on iPhone we collapse to a single concise
-/// paragraph so it fits without scroll.
+/// Sign-in surface. Three vertical zones: wordmark + hero copy, the two
+/// provider buttons, and reassurance microcopy with legal links.
 ///
 /// Ships Google OAuth + Sign in with Apple. SIWA is required by App Store
-/// Review Guideline 4.8 because Google sign-in is offered.
+/// Review Guideline 4.8 because Google sign-in is offered. Legal links are
+/// required on or accessible from the sign-in screen.
 struct SignInView: View {
     @EnvironmentObject private var auth: AuthService
-    let onBack: () -> Void
 
     @State private var isSigningIn = false
     @State private var errorMessage: String?
@@ -19,80 +18,117 @@ struct SignInView: View {
     /// verify the identity token.
     @State private var currentNonce: String?
 
+    private static let termsURL   = URL(string: "https://thefoodieai.com/terms")!
+    private static let privacyURL = URL(string: "https://thefoodieai.com/privacy")!
+
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Color.bgCanvas.ignoresSafeArea()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: AppSpacing.xl) {
-                    titleRow
-                    googleButton
-                    appleButton
-                    if let errorMessage {
-                        Text(errorMessage)
-                            .appFont(.meta)
-                            .foregroundStyle(Color.redError)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    benefitsParagraph
-                    Spacer(minLength: AppSpacing.xl2)
-                }
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.xl4)
-                .padding(.bottom, AppSpacing.xl)
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                Spacer().frame(height: geo.size.height * 0.08)
+                heroZone
+                Spacer().frame(height: AppSpacing.xl2)
+                buttonsZone
+                Spacer(minLength: AppSpacing.xl)
+                reassuranceZone
             }
-
-            backButton
+            .frame(width: geo.size.width, height: geo.size.height)
         }
+        .background(Color.bgCanvas.ignoresSafeArea())
     }
 
-    // MARK: - Subviews
+    // MARK: - Zones
 
-    private var titleRow: some View {
-        HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
-            Text("Become a member!")
-                .appFont(.displayMD)
-                .foregroundStyle(Color.textPrimary)
-            BouncingBadge(text: "free!", style: .free)
-            Spacer(minLength: 0)
+    private var heroZone: some View {
+        VStack(spacing: AppSpacing.xl) {
+            Text("foodie.")
+                .appFont(.display1)
+                .foregroundStyle(Color.brand)
+                .accessibilityAddTraits(.isHeader)
+
+            VStack(spacing: AppSpacing.md) {
+                HStack(spacing: AppSpacing.sm) {
+                    Text("Welcome")
+                        .appFont(.display2)
+                        .foregroundStyle(Color.ink)
+                    BouncingBadge(text: "free!", style: .free)
+                }
+
+                Text("Track meals from a photo.\nGet coached by people who knew a thing or two about life.")
+                    .appFont(.bodyV2)
+                    .foregroundStyle(Color.inkMute)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, AppSpacing.lg)
+            }
         }
+        .frame(maxWidth: .infinity)
     }
+
+    private var buttonsZone: some View {
+        VStack(spacing: AppSpacing.md) {
+            if let errorMessage {
+                Text(errorMessage)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.error)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            }
+            googleButton
+            appleButton
+        }
+        .padding(.horizontal, AppSpacing.lg)
+    }
+
+    private var reassuranceZone: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Text("Free to start. Always private.")
+                .appFont(.captionStrong)
+                .foregroundStyle(Color.inkMute)
+
+            legalLinks
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.bottom, AppSpacing.xl)
+    }
+
+    // MARK: - Buttons
 
     private var googleButton: some View {
         Button(action: handleGoogleTap) {
             HStack(spacing: AppSpacing.sm) {
                 if isSigningIn {
-                    ProgressView().tint(Color.textPrimary)
+                    // Brand mark IS the loader (Threads pattern):
+                    // continuous rotation + soft breath pulse stands
+                    // in for the generic system ProgressView.
+                    FoodieLogoLoader(size: 28)
+                    Text("Signing in…")
+                        .appFont(.pillTitle)
+                        .foregroundStyle(Color.ink)
                 } else {
-                    // Phase 4 deviation: SF Symbol substitute for the
-                    // official Google "G" mark — the web client doesn't
-                    // bundle the official asset, and re-creating it would
-                    // violate Google's brand guidelines. Swap to the official
-                    // PNG before pre-release.
-                    Image(systemName: "globe")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(Color.textPrimary)
+                    Image("google_g")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 24, height: 24)
                     Text("Continue with Google")
                         .appFont(.pillTitle)
-                        .foregroundStyle(Color.textPrimary)
+                        .foregroundStyle(Color.ink)
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 56)
-            .background(
-                Capsule().fill(Color.white)
-            )
+            .background(Capsule().fill(Color.white))
             .overlay(
-                Capsule().strokeBorder(Color.brand, lineWidth: 2)
+                Capsule().strokeBorder(Color.brand.opacity(0.4), lineWidth: 1.5)
             )
+            .appShadow(.card)
         }
         .disabled(isSigningIn)
-        .opacity(isSigningIn ? 0.7 : 1.0)
-        .accessibilityLabel("Continue with Google")
+        .opacity(isSigningIn ? 0.85 : 1.0)
+        .accessibilityLabel(isSigningIn ? "Signing in" : "Continue with Google")
     }
 
     /// Apple's official `SignInWithAppleButton` — required by Guideline 4.8
-    /// when third-party sign-ins are offered. Frame matches the Google
-    /// button (capsule, 56pt min height, full width) for equal prominence.
+    /// when third-party sign-ins are offered. Stays stock per Apple HIG.
     private var appleButton: some View {
         SignInWithAppleButton(
             .continue,
@@ -107,32 +143,31 @@ struct SignInView: View {
             }
         )
         .signInWithAppleButtonStyle(.black)
-        .frame(maxWidth: .infinity, minHeight: 56)
+        .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56)
         .clipShape(Capsule())
         .disabled(isSigningIn)
         .opacity(isSigningIn ? 0.7 : 1.0)
         .accessibilityLabel("Continue with Apple")
     }
 
-    private var benefitsParagraph: some View {
-        Text("Track calories, sugar, and carbs from a single photo. Save meals to your daily log. Get insights from your AI nutrition coach.")
-            .appFont(.body)
-            .foregroundStyle(Color.textBody)
-            .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
+    // MARK: - Legal links
 
-    private var backButton: some View {
-        Button(action: onBack) {
-            Image(systemName: "chevron.left")
-                .font(.system(size: 18, weight: .heavy))
-                .foregroundStyle(Color.textPrimary)
-                .frame(width: 40, height: 40)
-                .background(Circle().fill(Color.bgSurfaceSoft))
+    private var legalLinks: some View {
+        HStack(spacing: 4) {
+            Text("By continuing, you agree to our")
+                .appFont(.caption)
+                .foregroundStyle(Color.inkLight)
+            Link("Terms", destination: Self.termsURL)
+                .font(AppFont.font(.caption))
+                .foregroundStyle(Color.brandDeep)
+            Text("and")
+                .appFont(.caption)
+                .foregroundStyle(Color.inkLight)
+            Link("Privacy", destination: Self.privacyURL)
+                .font(AppFont.font(.caption))
+                .foregroundStyle(Color.brandDeep)
         }
-        .padding(.top, AppSpacing.md)
-        .padding(.leading, AppSpacing.lg)
-        .accessibilityLabel("Back")
+        .multilineTextAlignment(.center)
     }
 
     // MARK: - Actions
@@ -219,6 +254,57 @@ struct SignInView: View {
 }
 
 #Preview("SignInView") {
-    SignInView(onBack: {})
+    SignInView()
         .environmentObject(AuthService())
+}
+
+// MARK: - Brand-mark loader
+
+/// Threads-style auth loader. While the OAuth round-trip is in
+/// flight, the FoodieAI brand mark replaces the system spinner:
+///   - A slow, continuous rotation reads as "still working."
+///   - A soft 0.94 ↔ 1.06 breath pulse keeps the mark feeling
+///     alive instead of robotic.
+/// Reduce Motion drops the rotation and shrinks the pulse so the
+/// element still registers without inducing motion sickness.
+private struct FoodieLogoLoader: View {
+    var size: CGFloat = 28
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var rotation: Double = 0
+    @State private var breathing: Bool = false
+
+    var body: some View {
+        Image("FoodieLogo")
+            .resizable()
+            .interpolation(.high)
+            .antialiased(true)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: size, height: size)
+            .rotationEffect(.degrees(rotation))
+            .scaleEffect(breathing ? 1.06 : 0.94)
+            .accessibilityHidden(true)
+            .onAppear { startAnimating() }
+    }
+
+    private func startAnimating() {
+        if reduceMotion {
+            // Calm fallback: gentle breath only, no spin.
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                breathing = true
+            }
+            return
+        }
+        // 1.4s linear full revolution. Linear (not easeInOut) so the
+        // rotation looks like a steady spinner and not a "swing."
+        withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+            rotation = 360
+        }
+        // 0.9s breath, autoreverses — slightly faster than the spin
+        // so the two cycles drift in and out of phase, avoiding a
+        // lock-step "metronome" feel.
+        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+            breathing = true
+        }
+    }
 }

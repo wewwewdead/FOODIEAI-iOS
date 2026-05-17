@@ -50,7 +50,7 @@ struct OnboardingFlow: View {
                         removal:   .opacity.animation(.easeIn(duration: 0.22))
                     ))
             case .signIn:
-                SignInView(onBack: { vm.step = .hero })
+                SignInView()
                     .transition(.opacity)
             case .archetype:
                 OnboardingArchetypeView(vm: vm, ctaNamespace: ctaNamespace)

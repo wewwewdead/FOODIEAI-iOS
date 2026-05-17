@@ -130,6 +130,52 @@ final class CaptureViewModel: ObservableObject {
         self.justCompletedQuest = nil
     }
 
+    // MARK: - Phase 21.13: Scan-flow mood/quest ordering
+    //
+    // When a scan save completes the daily quest, two follow-ups race
+    // for the screen: the quest celebration modal and the mood pulse
+    // sheet. The mood sheet is driven by `state.isMoodPulse`, which
+    // flips the moment the user dismisses the success confirmation —
+    // before the quest evaluator's detached Task has even decided
+    // whether the quest fired. Result: mood sometimes lands first,
+    // sometimes the modal overlays the sheet.
+    //
+    // Fix: defer the `.moodPulse` transition until we're sure the
+    // celebration won't show (or has dismissed). When the user closes
+    // the success sheet while either (a) the celebration is already up
+    // or (b) the evaluator is still running, stash the snapshot here
+    // and leave state at `.idle`. The celebration's `onDismiss` —
+    // or the evaluator's "no quest fired" path — calls
+    // `promotePendingMoodPulse()` to enter `.moodPulse` for real.
+
+    /// True from the moment `save()` kicks off the quest evaluator
+    /// until it completes. Used by `discardSaved()` to decide whether
+    /// the mood pulse can play immediately or needs to be stashed.
+    @Published private(set) var questEvaluationInFlight: Bool = false
+
+    private struct PendingMoodPulse {
+        let image: UIImage
+        let response: AnalyzeResponse
+        let log: FoodLog
+    }
+    private var pendingMoodPulse: PendingMoodPulse? = nil
+
+    /// Promote a stashed `.moodPulse` transition. Called when the quest
+    /// celebration modal dismisses, or when the quest evaluator finishes
+    /// without firing a celebration. Idempotent — a nil stash is a no-op.
+    func promotePendingMoodPulse() {
+        guard let pending = pendingMoodPulse else { return }
+        pendingMoodPulse = nil
+        // Only enter mood if the user is still in an idle-ish background
+        // state. If they've already started a new capture flow, skip.
+        switch state {
+        case .idle:
+            state = .moodPulse(pending.image, pending.response, pending.log)
+        default:
+            break
+        }
+    }
+
     /// Phase 15.
     struct RelogToast: Identifiable, Equatable {
         let id = UUID()
@@ -488,10 +534,13 @@ final class CaptureViewModel: ObservableObject {
                   inserted.fiberG.map   { String(format: "%.1fg", $0) } ?? "nil")
             #endif
 
-            // Phase 13: success haptic fires from `SavedConfirmationSheet`
-            // when the checkmark hits full scale, so it lands with the
-            // visual — not here on row insert.
-            state = .saved(image, response, inserted)
+            // Phase 21.13 — DO NOT transition to `.saved` yet. The
+            // SavedConfirmationSheet binds to `.saved`, and the quest
+            // evaluator (below) needs to settle first so the
+            // celebration modal can land BEFORE the success sheet,
+            // not race it. We stay in `.saving` (spinner still visible)
+            // for the ~few hundred ms the evaluator takes, then
+            // transition with quest state in hand.
 
             // Retention polish — mark today as logged in the local
             // rhythm store so the Home daily check-in card reflects
@@ -527,22 +576,46 @@ final class CaptureViewModel: ObservableObject {
             // Phase 21.5: after the evaluator runs, re-read the quest
             // state so the Home quest card transitions to its done
             // state without waiting for the next foreground.
-            Task { [weak self] in
+            // Streak is independent of the success-sheet handoff —
+            // fire it detached so it doesn't add latency.
+            Task {
                 _ = try? await StreakService.shared.recordLog(
                     at: inserted.eatenAt
                 )
-                let evaluation = try? await DailyQuestService.shared
-                    .evaluateQuestProgress(after: inserted)
-                // Phase 21.10 — if the just-saved meal completed
-                // today's quest, fire the live-completion animation
-                // before refreshing from DB so the card morphs in
-                // place rather than snap-flipping on the next
-                // `loadQuest()` round-trip.
-                if let evaluation,
-                   evaluation.questCompleted,
-                   let reward = evaluation.rewardCopy {
-                    await self?.recordQuestCompletion(rewardCopy: reward)
-                }
+            }
+
+            // Phase 21.13 — evaluate the quest INLINE before flipping
+            // to `.saved`. If the quest just fired we set
+            // `justCompletedQuest` first; then the state transition
+            // happens with the celebration already pending. The view
+            // gates the SavedConfirmationSheet on
+            // `justCompletedQuest == nil` so the celebration shows
+            // FIRST, the success sheet appears only after the modal
+            // dismisses, and the mood pulse follows the success sheet.
+            questEvaluationInFlight = true
+            let evaluation = try? await DailyQuestService.shared
+                .evaluateQuestProgress(after: inserted)
+            let questFired = (evaluation?.questCompleted == true)
+                          && (evaluation?.rewardCopy != nil)
+            if questFired, let reward = evaluation?.rewardCopy {
+                recordQuestCompletion(rewardCopy: reward)
+            }
+
+            // NOW transition to `.saved`. The success-sheet binding
+            // is gated on `justCompletedQuest == nil`, so when the
+            // quest fired, the sheet stays hidden until the modal
+            // dismisses; when it didn't, the sheet rises immediately.
+            //
+            // Phase 13: success haptic fires from
+            // `SavedConfirmationSheet` when the checkmark hits full
+            // scale, so it lands with the visual.
+            state = .saved(image, response, inserted)
+            questEvaluationInFlight = false
+
+            // Refresh the local quest cache so the Home card morphs
+            // in place rather than waiting for the next foreground.
+            // Detached — purely a UI mirror; doesn't gate any modal.
+            Task { [weak self] in
                 await self?.loadQuest()
             }
 
@@ -574,13 +647,38 @@ final class CaptureViewModel: ObservableObject {
     /// success sheet is auto-dismissed by the `.saved → .moodPulse`
     /// transition timer. In that case `state` is already `.moodPulse`
     /// (or beyond) and we leave it alone.
+    ///
+    /// Phase 21.13 — when the quest celebration is showing OR the
+    /// evaluator is still running, stash the snapshot and drop to
+    /// `.idle` instead. The stash is later promoted to `.moodPulse`
+    /// either by the modal's `onDismiss` (quest fired) or by
+    /// `finishQuestEvaluation(questFired: false)` (no quest, user
+    /// already closed the success sheet).
     func discardSaved() {
-        if case .saved(let image, let response, let log) = state {
+        guard case .saved(let image, let response, let log) = state else {
+            return
+        }
+        let questPending = (justCompletedQuest != nil) || questEvaluationInFlight
+        if questPending {
+            pendingMoodPulse = PendingMoodPulse(
+                image: image, response: response, log: log
+            )
+            state = .idle
+        } else {
             state = .moodPulse(image, response, log)
         }
-        // Any other state (including .moodPulse / .idle) means the
-        // transition either already ran or the flow has moved past
-        // mood — do not reset.
+    }
+
+    /// Called by the save Task once the daily-quest evaluator returns.
+    /// If a celebration is going to play, the modal handles the mood
+    /// handoff on dismiss. If no celebration is going to play and the
+    /// user has already closed the success sheet, promote the mood
+    /// pulse from the stash now so it doesn't get orphaned.
+    func finishQuestEvaluation(questFired: Bool) {
+        questEvaluationInFlight = false
+        if !questFired {
+            promotePendingMoodPulse()
+        }
     }
 
     // MARK: - Phase 18: Mood pulse

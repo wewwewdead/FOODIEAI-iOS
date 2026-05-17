@@ -59,6 +59,10 @@ struct Profile: Codable, Identifiable, Hashable {
     var lastQuestDate: Date?
     var lastQuestKind: String?
     var lastQuestCompleted: Bool
+    /// Phase 21.12 — when false, the Today / Home daily-quest card is
+    /// hidden. Defaults to true via the migration default so existing
+    /// users keep seeing quests until they opt out.
+    var healthyChoicesEnabled: Bool
     let createdAt: Date
     let updatedAt: Date
 
@@ -94,6 +98,7 @@ struct Profile: Codable, Identifiable, Hashable {
         case lastQuestDate          = "last_quest_date"
         case lastQuestKind          = "last_quest_kind"
         case lastQuestCompleted     = "last_quest_completed"
+        case healthyChoicesEnabled  = "healthy_choices_enabled"
         case createdAt              = "created_at"
         case updatedAt              = "updated_at"
     }
@@ -181,6 +186,9 @@ struct Profile: Codable, Identifiable, Hashable {
         lastQuestDate        = try Profile.decodeLocalDate(from: c, forKey: .lastQuestDate)
         lastQuestKind        = try c.decodeIfPresent(String.self, forKey: .lastQuestKind)
         lastQuestCompleted   = try c.decodeIfPresent(Bool.self, forKey: .lastQuestCompleted) ?? false
+        // Phase 21.12. Default mirrors migration 012 so a row decoded
+        // before the migration runs still parses cleanly.
+        healthyChoicesEnabled = try c.decodeIfPresent(Bool.self, forKey: .healthyChoicesEnabled) ?? true
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
@@ -263,6 +271,8 @@ struct ProfileUpdate: Encodable {
     var lastQuestDate: Date? = nil
     var lastQuestKind: String? = nil
     var lastQuestCompleted: Bool? = nil
+    /// Phase 21.12 — toggle for the daily-quest card on Home.
+    var healthyChoicesEnabled: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case displayName            = "display_name"
@@ -294,6 +304,7 @@ struct ProfileUpdate: Encodable {
         case lastQuestDate          = "last_quest_date"
         case lastQuestKind          = "last_quest_kind"
         case lastQuestCompleted     = "last_quest_completed"
+        case healthyChoicesEnabled  = "healthy_choices_enabled"
     }
 
     /// Encode only the keys the caller actually populated. Without this,
@@ -335,6 +346,7 @@ struct ProfileUpdate: Encodable {
         }
         try c.encodeIfPresent(lastQuestKind,         forKey: .lastQuestKind)
         try c.encodeIfPresent(lastQuestCompleted,    forKey: .lastQuestCompleted)
+        try c.encodeIfPresent(healthyChoicesEnabled, forKey: .healthyChoicesEnabled)
     }
 
     /// Postgres `date` columns want `"YYYY-MM-DD"`. The shared encoder

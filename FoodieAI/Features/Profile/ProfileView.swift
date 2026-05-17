@@ -158,7 +158,10 @@ struct ProfileView: View {
                 .staggered(3, appeared: hasAppeared)
 
                 sectionGroup(title: "PREFERENCES", icon: "slider.horizontal.3") {
-                    notificationsSection
+                    VStack(spacing: AppSpacing.sm) {
+                        notificationsSection
+                        healthyChoicesSection
+                    }
                 }
                 .staggered(4, appeared: hasAppeared)
 
@@ -532,6 +535,85 @@ struct ProfileView: View {
         if profile.reminderDinner    { parts.append("Dinner") }
         if profile.weeklyRecapEnabled { parts.append("recap") }
         return parts.isEmpty ? "On (no reminders)" : parts.joined(separator: " · ")
+    }
+
+    /// Phase 21.12 — toggle row for the daily Healthy Choice quest
+    /// card on Home. Pure local-state read; writes route through
+    /// `ProfileService.setHealthyChoicesEnabled` and broadcast via
+    /// `profileStore.apply` so the Home card hides/shows immediately.
+    private var healthyChoicesSection: some View {
+        let isOn = profileStore.profile?.healthyChoicesEnabled ?? true
+        return Toggle(isOn: Binding(
+            get: { isOn },
+            set: { newValue in
+                Haptics.tap()
+                Task { await persistHealthyChoices(newValue) }
+            }
+        )) {
+            toggleRowChrome(
+                icon: "leaf.fill",
+                title: "Healthy Choice",
+                subtitle: isOn
+                    ? "A daily nudge on Home"
+                    : "Hidden — turn on to bring it back"
+            )
+        }
+        .toggleStyle(SwitchToggleStyle(tint: Color.brand))
+        .padding(.trailing, AppSpacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.borderHairline, lineWidth: 1.5)
+        )
+        .appShadow(.shadowCard)
+    }
+
+    private func persistHealthyChoices(_ enabled: Bool) async {
+        do {
+            let updated = try await ProfileService().setHealthyChoicesEnabled(enabled)
+            profileStore.apply(updated)
+        } catch {
+            #if DEBUG
+            NSLog("[Profile] setHealthyChoicesEnabled FAILED: %@", "\(error)")
+            #endif
+        }
+    }
+
+    /// Chrome for a toggle row — same visual weight as `navRowChrome`
+    /// but without the trailing chevron, since the Toggle owns its
+    /// own accessory.
+    private func toggleRowChrome(
+        icon: String,
+        title: String,
+        subtitle: String
+    ) -> some View {
+        HStack(spacing: AppSpacing.md) {
+            ZStack {
+                Circle()
+                    .fill(Color.brandSoft)
+                    .frame(width: 40, height: 40)
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .heavy))
+                    .foregroundStyle(Color.brandDeep)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .appFont(.bodyEmphasis)
+                    .foregroundStyle(Color.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Text(subtitle)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(AppSpacing.md)
     }
 
     /// Shared chrome for every nav-row card.

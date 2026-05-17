@@ -31,6 +31,9 @@ struct CaptureView: View {
     /// Used to route the after-save "View today / tracker" suggestion
     /// to the Tracker tab via the same channel notification taps use.
     @EnvironmentObject private var notifRouter: NotificationRouter
+    /// Phase 21.12 — read for the Healthy Choice toggle so the daily
+    /// quest card can hide when the user has opted out in Profile.
+    @EnvironmentObject private var profileStore: ProfileStore
 
     @State private var pickerSheet: PickerSheet? = nil
     @State private var showingSourceDialog = false
@@ -361,8 +364,15 @@ struct CaptureView: View {
                 photosSelection = nil
             }
         }
+        // Phase 21.13 — the success sheet is gated on
+        // `justCompletedQuest == nil` so the quest celebration always
+        // lands BEFORE this sheet. The view model already transitions
+        // to `.saved` only after the evaluator decides; when the
+        // quest fires it also sets `justCompletedQuest` *before*
+        // flipping state, so this binding stays false until the
+        // celebration modal dismisses and clears the trigger.
         .sheet(isPresented: Binding(
-            get: { viewModel.state.isSaved },
+            get: { viewModel.state.isSaved && viewModel.justCompletedQuest == nil },
             set: { isPresented in
                 if !isPresented { viewModel.discardSaved() }
             }
@@ -603,6 +613,16 @@ struct CaptureView: View {
                                 pendingManualMoodLog = log
                             }
                         }
+                        // Phase 21.13 — same handoff for the scan-image
+                        // flow. The view model stashed the mood-pulse
+                        // snapshot when `discardSaved()` ran with the
+                        // quest celebration pending; promote it now so
+                        // the order is celebration → mood, not mood
+                        // racing or overlaying the modal.
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 350 * NSEC_PER_MSEC)
+                            viewModel.promotePendingMoodPulse()
+                        }
                     }
                 )
                 .transition(.opacity)
@@ -743,7 +763,14 @@ struct CaptureView: View {
         // the daily check-in / photo card so the user sees the
         // suggested action right after orientation. Tappable: opens
         // the action sheet that routes to Scan or Manual Log.
-        if viewModel.state.isIdle, let quest = viewModel.dailyQuest {
+        //
+        // Phase 21.12 — gated on `profile.healthyChoicesEnabled`.
+        // When the user has disabled the Healthy Choice toggle in
+        // Profile → Preferences, the card disappears entirely (not
+        // just dimmed) so Home stays quiet for users who want it.
+        if viewModel.state.isIdle,
+           let quest = viewModel.dailyQuest,
+           profileStore.profile?.healthyChoicesEnabled ?? true {
             DailyQuestCard(
                 quest: quest,
                 completed: viewModel.questCompleted,
@@ -2377,7 +2404,6 @@ private struct DailyQuestCard: View {
     let completionMoment: CaptureViewModel.DailyQuestCompletionMoment?
     let onTap: () -> Void
 
-    @State private var pressed: Bool = false
     // Phase 21.10 — driven by the morph sequence. Start at the
     // values appropriate for "no animation pending":
     //   - `washOpacity = 0`        no overlay tint
@@ -2392,95 +2418,107 @@ private struct DailyQuestCard: View {
         completed ? quest.kind.rewardCopy : quest.kind.copy
     }
 
-    private var displayedCaption: String {
-        completed ? "Tap to log more" : "Tap to log it"
-    }
-
     var body: some View {
         Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .top) {
-                    Text("TODAY'S QUEST").eyebrow()
-                        .foregroundStyle(Color.inkMute)
-                    Spacer()
-                    if completed {
-                        Text("✨ done")
+            HStack(alignment: .top, spacing: AppSpacing.md) {
+                // Persistent quest identity badge. The leaf marks the
+                // card as "today's healthy choice" regardless of which
+                // prompt the engine picked. On completion it swaps to
+                // a checkmark in-place so the slot itself confirms the
+                // day's quest is done; the trailing greenSave pill
+                // still fires as the celebratory beat.
+                ZStack {
+                    Circle()
+                        .fill(Color.brand)
+                        .frame(width: 36, height: 36)
+                    Image(systemName: completed ? "checkmark" : "leaf.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.white)
+                        .id(completed ? "check" : "leaf")
+                        .transition(.opacity.combined(with: .scale))
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    // Eyebrow row — brandDeep ink (not gray) gives
+                    // the card its own voice. The check-circle pill
+                    // on the right carries the celebratory signal
+                    // when completion fires.
+                    HStack(alignment: .center) {
+                        Text("HEALTHY CHOICE FOR TODAY")
                             .appFont(.captionStrong)
+                            .textCase(.uppercase)
+                            .tracking(0.8)
                             .foregroundStyle(Color.brandDeep)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Capsule().fill(Color.brandSoft))
-                            .scaleEffect(pillScale)
-                            .opacity(pillScale)
+                        Spacer()
+                        if completed {
+                            // Trailing affirmative pill — greenSave
+                            // disc with a brandCreamSoft check reads
+                            // confidently against the brandSoft card
+                            // surface (different green family,
+                            // unambiguous).
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 22, weight: .regular))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(Color.brandCreamSoft, Color.greenSave)
+                                .scaleEffect(pillScale)
+                                .opacity(pillScale)
+                        }
+                    }
+
+                    Text(displayedTitle)
+                        .appFont(.title2)
+                        .foregroundStyle(completed ? Color.brandDeep : Color.ink)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                        .scaleEffect(titleScale, anchor: .leading)
+                        // .id forces SwiftUI to treat the post-morph
+                        // text as a *new* view so `.transition(.opacity)`
+                        // crossfades instead of snap-replacing.
+                        .id(displayedTitle)
+                        .transition(.opacity)
+
+                    if completed {
+                        Text("Logged · back tomorrow")
+                            .appFont(.caption)
+                            .foregroundStyle(Color.brandDeep.opacity(0.70))
+                            .padding(.top, 2)
+                            .transition(.opacity)
+                    } else {
+                        HStack(spacing: 4) {
+                            Text("Tap to log this")
+                                .appFont(.caption)
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.brandDeep)
+                        .padding(.top, 2)
+                        .transition(.opacity)
                     }
                 }
-
-                Text(displayedTitle)
-                    .appFont(.title2)
-                    .foregroundStyle(Color.ink)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 4)
-                    .scaleEffect(titleScale, anchor: .leading)
-                    // .id forces SwiftUI to treat the post-morph
-                    // text as a *new* view so `.transition(.opacity)`
-                    // crossfades instead of snap-replacing.
-                    .id(displayedTitle)
-                    .transition(.opacity)
-
-                HStack(spacing: 4) {
-                    Text(displayedCaption)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 10, weight: .heavy))
-                        .foregroundStyle(Color.inkMute)
-                }
-                .padding(.top, 2)
-                .id(displayedCaption)
-                .transition(.opacity)
             }
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: AppRadius.lg)
-                        .fill(completed ? Color.brandSoft : Color.bgSurface)
-                    // Brand wash overlay — appears during beat 1 of
-                    // the morph, fades back out at beat 4. Resting
-                    // state is `washOpacity = 0`, so the card looks
-                    // identical to before whenever no animation is
-                    // running.
-                    RoundedRectangle(cornerRadius: AppRadius.lg)
-                        .fill(Color.brandSoft)
-                        .opacity(washOpacity)
-                }
-            )
+            .background(questCardBackground)
             .overlay(
                 RoundedRectangle(cornerRadius: AppRadius.lg)
-                    .strokeBorder(Color.borderHairline, lineWidth: 1)
+                    .strokeBorder(Color.brand.opacity(0.30), lineWidth: 1)
             )
             .appShadow(.shadowCard)
-            .scaleEffect(pressed ? 0.98 : 1.0)
         }
-        .buttonStyle(.plain)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if !pressed {
-                        withAnimation(.appPress) { pressed = true }
-                    }
-                }
-                .onEnded { _ in
-                    withAnimation(.appPress) { pressed = false }
-                }
-        )
+        // Press scale lives in a ButtonStyle so SwiftUI cancels the
+        // pressed state the instant an ancestor ScrollView starts
+        // panning. A `.simultaneousGesture(DragGesture(min: 0))` here
+        // would claim the touch immediately, lose gesture arbitration
+        // against the ScrollView, and fire onTap when the user was
+        // trying to scroll.
+        .buttonStyle(QuestCardButtonStyle())
         .onAppear {
-            // Settle the pill into its resting state without animating
-            // — re-entering Home with an already-completed quest must
-            // show the pill in place, not replay yesterday's
-            // celebration.
+            // Settle the badge into its resting state without
+            // animating — re-entering Home with an already-completed
+            // quest must show the check in place, not replay
+            // yesterday's celebration.
             pillScale = completed ? 1 : 0
         }
         .onChange(of: completionMoment) { _, new in
@@ -2499,14 +2537,12 @@ private struct DailyQuestCard: View {
     /// Phase 21.10 morph sequence — runs when `completionMoment`
     /// arrives non-nil. Four beats:
     ///   1. wash overlay fades in + soft haptic
-    ///   2. title text crossfades to reward copy + title pops + success haptic
-    ///   3. ✨ done pill scales in
-    ///   4. wash overlay fades back out, leaving a clean white card
-    ///      with the persistent pill in the corner
+    ///   2. title crossfades to reward copy + pops + success haptic
+    ///   3. check-circle badge scales in
+    ///   4. wash recedes, card lands in its resting completed state
     ///
-    /// Reduce Motion path: skip the choreography, snap the pill in,
-    /// fire a single success haptic. The user still feels the
-    /// completion; no vestibular triggers.
+    /// Reduce Motion path: skip the choreography, snap the badge in,
+    /// fire a single success haptic.
     private func runCompletionAnimation() {
         guard !reduceMotion else {
             withAnimation(.appReduced) { pillScale = 1 }
@@ -2514,9 +2550,12 @@ private struct DailyQuestCard: View {
             return
         }
 
-        // Beat 1 — acknowledgment (0.00–0.25s)
+        // Beat 1 — acknowledgment (0.00–0.25s). Lower opacity than
+        // pre-redesign: the wash is now saturated `brand` over a
+        // brandSoft base, so 0.30 reads as a confident flash without
+        // overwhelming the title underneath.
         withAnimation(.easeOut(duration: 0.25)) {
-            washOpacity = 0.55
+            washOpacity = 0.30
         }
         Haptics.soft()
 
@@ -2532,21 +2571,58 @@ private struct DailyQuestCard: View {
                 titleScale = 1.0
             }
 
-            // Beat 3 — pill settles in (0.55–0.85s)
+            // Beat 3 — badge settles in (0.55–0.85s)
             try? await Task.sleep(nanoseconds: 100_000_000)
             withAnimation(.appStamp) {
                 pillScale = 1
             }
 
             // Beat 4 — wash recedes, leaving the card clean
-            // (0.85–1.15s). The persistent visual marker of
-            // completion is the pill in the corner + the reward
-            // title; the wash is a moment, not a state.
+            // (0.85–1.15s). The persistent completion signal is the
+            // badge + brand-tinted gradient; the wash is a moment,
+            // not a state.
             try? await Task.sleep(nanoseconds: 200_000_000)
             withAnimation(.easeOut(duration: 0.35)) {
                 washOpacity = 0
             }
         }
+    }
+
+    // MARK: - Background composition
+
+    /// Card background. Always `brandSoft` so the quest reads as a
+    /// distinct, branded slot vs. the white surface cards stacked
+    /// below it on Home. The completion morph layers a more saturated
+    /// `brand` wash on top for Beat 1 → Beat 4 of the choreography,
+    /// then recedes back to flat brandSoft as the resting completed
+    /// state. The web design system fills brand surfaces with single
+    /// solid colors (brandCream / brandIvory / brandSoft); the flat
+    /// lime block is the moment.
+    private var questCardBackground: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.brandSoft)
+
+            // Brand wash overlay — appears during Beat 1 of the
+            // morph, fades back out at Beat 4. Resting is 0, so
+            // the card looks identical whenever no animation runs.
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.brand)
+                .opacity(washOpacity)
+        }
+    }
+}
+
+/// Press-scale style for the quest card. Mirrors `MealCardButtonStyle`
+/// — using a ButtonStyle (rather than a `.simultaneousGesture` on a
+/// `.plain` button) lets the parent ScrollView win gesture
+/// arbitration: SwiftUI flips `isPressed` back to `false` the instant
+/// a pan is detected, so the tap action never fires on a scroll.
+private struct QuestCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+            .animation(.appPress, value: configuration.isPressed)
     }
 }
 
