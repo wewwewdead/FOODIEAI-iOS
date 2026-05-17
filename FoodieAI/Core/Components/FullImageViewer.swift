@@ -182,20 +182,26 @@ struct FullImageViewer: View {
         }
 
         revealTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 220_000_000)
-            guard !Task.isCancelled else { return }
-            withAnimation(.motionReveal) {
-                panelVisible = true
-            }
-
-            try? await Task.sleep(nanoseconds: 180_000_000)
-
-            for _ in 0..<rows {
-                if Task.isCancelled { return }
-                withAnimation(.appEntrance) {
-                    visibleDetailCount += 1
+            do {
+                try await Task.sleep(nanoseconds: 220_000_000)
+                guard !Task.isCancelled else { return }
+                withAnimation(.motionReveal) {
+                    panelVisible = true
                 }
-                try? await Task.sleep(nanoseconds: 55_000_000)
+
+                try await Task.sleep(nanoseconds: 180_000_000)
+
+                for _ in 0..<rows {
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.appEntrance) {
+                        visibleDetailCount += 1
+                    }
+                    try await Task.sleep(nanoseconds: 55_000_000)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                return
             }
         }
     }
@@ -208,19 +214,28 @@ struct FullImageViewer: View {
         }
         do {
             let url = try await Self.imageService.cachedSignedURL(for: imagePath)
+            guard !Task.isCancelled else { return }
             #if DEBUG
             NSLog("[FullImageViewer] loading %@", imagePath)
             #endif
             let (data, _) = try await URLSession.shared.data(from: url)
+            guard !Task.isCancelled else { return }
             guard let img = UIImage(data: data) else {
+                guard !Task.isCancelled else { return }
                 await MainActor.run { loadError = true }
                 return
             }
+            guard !Task.isCancelled else { return }
             await MainActor.run { self.image = img }
+        } catch is CancellationError {
+            return
+        } catch let error as URLError where error.code == .cancelled {
+            return
         } catch {
             #if DEBUG
             NSLog("[FullImageViewer] load FAILED %@: %@", imagePath, "\(error)")
             #endif
+            guard !Task.isCancelled else { return }
             await MainActor.run { loadError = true }
         }
     }

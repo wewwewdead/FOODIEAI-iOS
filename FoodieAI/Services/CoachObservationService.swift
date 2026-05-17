@@ -205,9 +205,14 @@ actor CoachObservationService {
             )
         }
 
+        // `preferred_coaches` is the allowed coach pool the server
+        // must pick from; sanitize so a starred set of one means
+        // "use only that coach."
+        let cleanedCoaches = AnalyzeService.sanitizePreferredCoaches(preferredCoaches)
+
         let body = GenerateRequestBody(
             patterns: patterns.map(GenerateRequestPattern.init(from:)),
-            preferredCoaches: preferredCoaches,
+            preferredCoaches: cleanedCoaches,
             recentMoods: moodWires.isEmpty ? nil : moodWires
         )
 
@@ -220,7 +225,7 @@ actor CoachObservationService {
         #if DEBUG
         NSLog("[CoachObs] POST %@ patterns=%d prefs=%d moods=%d",
               url.absoluteString, patterns.count,
-              preferredCoaches.count, moodWires.count)
+              cleanedCoaches.count, moodWires.count)
         #endif
 
         let (data, response) = try await session.data(for: req)

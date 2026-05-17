@@ -73,6 +73,13 @@ struct WeekView: View {
     }
 
     // MARK: - Header card
+    //
+    // "Granny Smith" treatment: single-hue vertical wash from brandBright
+    // into brand, with deep-green ink for headline + hero number. Dark
+    // type on chartreuse delivers the contrast that white-on-green was
+    // missing, while staying entirely within the existing brand palette.
+    // One soft ring outline bleeds off the upper-right for depth without
+    // creating a competing hotspot.
 
     private func headerCard(buckets: [DailyBucket], interval: DateInterval) -> some View {
         let totals = buckets.reduce(into: LocalDailyTotals.empty) { acc, b in
@@ -89,52 +96,121 @@ struct WeekView: View {
             ? (totals.totalCalories / Double(loggedDays)).rounded()
             : 0
 
-        return VStack(alignment: .leading, spacing: AppSpacing.md) {
-            Text(weekRangeLabel(interval: interval))
-                .appFont(.displayMD)
-                .fontWeight(.heavy)
-                .foregroundStyle(.white)
+        return ZStack(alignment: .topLeading) {
+            // Single-hue vertical wash — top brandBright fades into brand
+            // at the foot. Same family, no color clash, no hotspot.
+            LinearGradient(
+                colors: [Color.brandBright, Color.brand],
+                startPoint: .top,
+                endPoint: .bottom
+            )
 
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
-                    AnimatedNumber(value: totals.totalCalories,
-                                   formatter: AnimatedNumber.integerFormatter)
-                        .font(AppFont.font(.kcal))
-                        .fontWeight(.black)
-                        .foregroundStyle(.white)
-                    Text("calories this week")
-                        .appFont(.body)
-                        .foregroundStyle(.white.opacity(0.85))
+            // One thin ring outline bleeding off the top-right. Drawn in
+            // brandDeep at low opacity so it reads as a tonal texture
+            // against the chartreuse, not a competing visual.
+            Circle()
+                .strokeBorder(Color.brandDeep.opacity(0.12), lineWidth: 1.5)
+                .frame(width: 360, height: 360)
+                .offset(x: 200, y: -150)
+                .allowsHitTesting(false)
+
+            VStack(alignment: .leading, spacing: 0) {
+                // 1. Eyebrow row + days-logged pill
+                HStack(alignment: .center) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color.brandDeep)
+                            .frame(width: 6, height: 6)
+                        Text("THIS WEEK")
+                            .font(.custom(AppFont.PS.nunitoExtraBold, size: 11))
+                            .tracking(2.5)
+                            .foregroundStyle(Color.brandDeep.opacity(0.78))
+                    }
+                    Spacer()
+                    Text("\(loggedDays) of 7 logged")
+                        .font(.custom(AppFont.PS.nunitoExtraBold, size: 11))
+                        .tracking(0.4)
+                        .foregroundStyle(Color.greenCalorie)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule().fill(Color.brandIvory)
+                        )
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(Color.brandDeep.opacity(0.12),
+                                              lineWidth: 0.75)
+                        )
                 }
-                Text("Average: \(format(avg)) cal/day across \(loggedDays) day\(loggedDays == 1 ? "" : "s")")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Group {
-                    TotalLine(label: "Total sugar",   value: totals.totalSugar)
-                    TotalLine(label: "Total carbs",   value: totals.totalCarbs)
-                    TotalLine(label: "Total protein", value: totals.totalProtein)
-                    TotalLine(label: "Total fat",     value: totals.totalFat)
-                    TotalLine(label: "Total fiber",   value: totals.totalFiber)
-                }
-                .font(AppFont.font(.body))
-                .fontWeight(.semibold)
-                .foregroundStyle(.white)
-            }
-        }
-        .padding(.horizontal, AppSpacing.xl)
-        .padding(.vertical, AppSpacing.lg)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .fill(
-                    LinearGradient(
-                        colors: [.brand, .brandBright],
-                        startPoint: .topTrailing,
-                        endPoint: .bottomLeading
+
+                Spacer().frame(height: 16)
+
+                // 2. Date range — the section's anchor headline.
+                Text(weekRangeLabel(interval: interval))
+                    .font(.custom(AppFont.PS.mplusExtraBold, size: 36))
+                    .kerning(-0.5)
+                    .foregroundStyle(Color.brandDeep)
+
+                Spacer().frame(height: 18)
+
+                // 3. Hero kcal number — one statistic, dominant scale,
+                //    rendered in the deepest brand green for max read.
+                HStack(alignment: .lastTextBaseline, spacing: 8) {
+                    AnimatedNumber(
+                        value: totals.totalCalories,
+                        formatter: AnimatedNumber.integerFormatter
                     )
-                )
+                    .font(.custom(AppFont.PS.mplusBlack, size: 68))
+                    .kerning(-2.5)
+                    .foregroundStyle(Color.greenCalorie)
+
+                    Text("kcal")
+                        .font(.custom(AppFont.PS.nunitoExtraBold, size: 16))
+                        .foregroundStyle(Color.brandDeep.opacity(0.70))
+                        .padding(.bottom, 10)
+                }
+
+                Spacer().frame(height: 6)
+
+                // 4. Avg / day · days-logged subtitle.
+                HStack(spacing: 7) {
+                    Text("avg")
+                        .foregroundStyle(Color.brandDeep.opacity(0.65))
+                    AnimatedNumber(value: avg,
+                                   formatter: AnimatedNumber.integerFormatter)
+                        .fontWeight(.heavy)
+                        .foregroundStyle(Color.greenCalorie)
+                    Text("kcal / day")
+                        .foregroundStyle(Color.brandDeep.opacity(0.65))
+                    Circle()
+                        .fill(Color.brandDeep.opacity(0.35))
+                        .frame(width: 3, height: 3)
+                    Text("\(loggedDays) day\(loggedDays == 1 ? "" : "s") logged")
+                        .foregroundStyle(Color.brandDeep.opacity(0.80))
+                }
+                .font(.custom(AppFont.PS.nunitoSemiBold, size: 13))
+
+                Spacer().frame(height: 22)
+
+                // 5. Macro chip strip — 5 across, ivory cards, equal flex.
+                HStack(spacing: 6) {
+                    MacroGlassChip(label: "CARBS",   value: totals.totalCarbs)
+                    MacroGlassChip(label: "SUGAR",   value: totals.totalSugar)
+                    MacroGlassChip(label: "PROTEIN", value: totals.totalProtein)
+                    MacroGlassChip(label: "FAT",     value: totals.totalFat)
+                    MacroGlassChip(label: "FIBER",   value: totals.totalFiber)
+                }
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 22)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Color.brandDeep.opacity(0.10), lineWidth: 1)
         )
+        .shadow(color: Color.brand.opacity(0.28), radius: 16, x: 0, y: 10)
     }
 
     // MARK: - Chart card
@@ -285,6 +361,57 @@ struct WeekView: View {
     private func format(_ v: Double) -> String {
         if v == v.rounded() { return "\(Int(v))" }
         return String(format: "%.1f", v)
+    }
+}
+
+// MARK: - MacroGlassChip
+//
+// Ivory pill that sits on the brand-chartreuse hero card. Eyebrow label
+// at the top in muted brandDeep, value below in greenCalorie. The chip
+// has a fixed minHeight so 1-digit and 3-digit values share the same
+// row height; numeric Text uses lineLimit + minimumScaleFactor so
+// 3-digit values like "191g" stay on one line even at narrow widths.
+//
+// Shared with MonthView — both hero cards render the same 5-macro strip.
+struct MacroGlassChip: View {
+    let label: String
+    let value: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.custom(AppFont.PS.nunitoExtraBold, size: 9))
+                .tracking(1.4)
+                .foregroundStyle(Color.brandDeep.opacity(0.55))
+                .lineLimit(1)
+                .minimumScaleFactor(0.80)
+
+            HStack(alignment: .firstTextBaseline, spacing: 1) {
+                AnimatedNumber(value: value,
+                               formatter: AnimatedNumber.integerFormatter)
+                    .font(.custom(AppFont.PS.nunitoExtraBold, size: 17))
+                    .foregroundStyle(Color.greenCalorie)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                Text("g")
+                    .font(.custom(AppFont.PS.nunitoBold, size: 10))
+                    .foregroundStyle(Color.brandDeep.opacity(0.55))
+            }
+            .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.brandIvory)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.brandDeep.opacity(0.10), lineWidth: 0.75)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label) \(Int(value.rounded())) grams")
     }
 }
 

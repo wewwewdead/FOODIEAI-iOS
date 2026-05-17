@@ -76,9 +76,14 @@ actor AnalyzeService {
         // context fields are appended only when populated.
         let boundedMeals = Array(recentMeals.prefix(14))
         let recentMealsJSON = Self.encodeRecentMeals(boundedMeals)
-        let preferredCoachesJSON = preferredCoaches.isEmpty
+        // The server treats `preferred_coaches` as the allowed coach
+        // pool, not a weighting hint. Sanitize before sending so a
+        // single starred coach means "use only that coach" and three
+        // starred coaches means "pick uniformly from those three."
+        let cleanedCoaches = Self.sanitizePreferredCoaches(preferredCoaches)
+        let preferredCoachesJSON = cleanedCoaches.isEmpty
             ? nil
-            : Self.encodePreferredCoaches(preferredCoaches)
+            : Self.encodePreferredCoaches(cleanedCoaches)
         let boundedMoods = Array(recentMoods.prefix(10))
         let recentMoodsJSON = Self.encodeRecentMoods(boundedMoods)
         let boundedQuantities = Array(userQuantities.prefix(8))
@@ -96,7 +101,7 @@ actor AnalyzeService {
         #if DEBUG
         NSLog("[Analyze] POST %@ bytes=%d recentMeals=%d prefs=%d recentMoods=%d userQuantities=%d",
               url.absoluteString, jpegData.count,
-              boundedMeals.count, preferredCoaches.count,
+              boundedMeals.count, cleanedCoaches.count,
               boundedMoods.count, boundedQuantities.count)
         #endif
 
@@ -264,6 +269,30 @@ actor AnalyzeService {
         } catch {
             return nil
         }
+    }
+
+    /// Normalize a `preferred_coaches` array before sending it as the
+    /// allowed coach pool: trim whitespace, drop empty entries, and
+    /// dedupe case-insensitively while preserving the first occurrence
+    /// (and its canonical spelling).
+    ///
+    /// Used by `AnalyzeService`, `CoachObservationService`, and
+    /// `WeeklyRecapService` so every server round-trip applies the
+    /// same rules. Empty input → empty output (server fallback: pick
+    /// from the full canonical pool).
+    static func sanitizePreferredCoaches(_ coaches: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        out.reserveCapacity(coaches.count)
+        for raw in coaches {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted {
+                out.append(trimmed)
+            }
+        }
+        return out
     }
 
     /// Quantity Clarification — JSON-encode `user_quantities` as

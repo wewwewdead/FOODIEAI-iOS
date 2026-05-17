@@ -29,6 +29,7 @@ final class AuthService: NSObject, ObservableObject {
     let client: SupabaseClient
     private var stateChangeTask: Task<Void, Never>?
     private var presentationProvider: PresentationContextProvider?
+    private var webAuthSession: ASWebAuthenticationSession?
     /// Safety net for the "expired cached session" case below: if the SDK
     /// never emits a follow-up `tokenRefreshed` / `signedOut` event (no
     /// network, refresh token revoked, etc.) we flip out of the loading
@@ -161,6 +162,8 @@ final class AuthService: NSObject, ObservableObject {
             let resumeOnce: (Result<URL, Error>) -> Void = { result in
                 guard !didResume else { return }
                 didResume = true
+                self.webAuthSession = nil
+                self.presentationProvider = nil
                 switch result {
                 case .success(let u): cont.resume(returning: u)
                 case .failure(let e): cont.resume(throwing: e)
@@ -190,6 +193,7 @@ final class AuthService: NSObject, ObservableObject {
             self.presentationProvider = provider
             webSession.presentationContextProvider = provider
             webSession.prefersEphemeralWebBrowserSession = false
+            self.webAuthSession = webSession
             if !webSession.start() {
                 resumeOnce(.failure(AuthError.invalidCallback))
             }

@@ -715,21 +715,32 @@ struct CaptureView: View {
 
             Spacer()
 
-            ZStack {
-                Circle()
-                    .fill(Color.bgSurface)
-                    .overlay(
-                        Circle().strokeBorder(Color.borderHairline, lineWidth: 1)
-                    )
-                    .frame(width: 36, height: 36)
-                Circle()
-                    .fill(Color.brandSoft)
-                    .frame(width: 32, height: 32)
-                Text("L")
-                    .appFont(.captionStrong)
-                    .foregroundStyle(Color.brandDeep)
+            // Tap the avatar to jump to the Profile tab. Uses the
+            // notification router so the switch happens at the TabView
+            // host (MainTabView) instead of pushing a navigation stack
+            // inside Home.
+            Button {
+                Haptics.tap()
+                notifRouter.requestTab(2)
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color.bgSurface)
+                        .overlay(
+                            Circle().strokeBorder(Color.borderHairline, lineWidth: 1)
+                        )
+                        .frame(width: 36, height: 36)
+                    Circle()
+                        .fill(Color.brandSoft)
+                        .frame(width: 32, height: 32)
+                    Text("L")
+                        .appFont(.captionStrong)
+                        .foregroundStyle(Color.brandDeep)
+                }
             }
-            .accessibilityHidden(true)
+            .buttonStyle(.plain)
+            .accessibilityLabel("Profile")
+            .accessibilityHint("Opens your profile")
         }
         .frame(maxWidth: .infinity)
     }
@@ -1197,44 +1208,44 @@ struct CaptureView: View {
     private var bottomCTA: some View {
         switch viewModel.state {
         case .idle:
-            VStack(spacing: AppSpacing.sm) {
-                PrimaryButton(title: "Take a photo",
-                              leadingSystemImage: "camera.fill") {
-                    Haptics.tap()
-                    requestScan()
-                }
-                // Phase 21 — secondary path for typing-based logging.
-                // Lives directly under the primary so the user can see
-                // both options at once without an extra tap to reveal.
-                Button {
-                    Haptics.tap()
-                    showingManualLog = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "square.and.pencil")
-                            .font(.system(size: 13, weight: .heavy))
-                        Text("Or log without a photo")
-                            .appFont(.captionStrong)
+            bottomCTAChrome {
+                VStack(spacing: AppSpacing.sm) {
+                    PrimaryButton(title: "Take a photo",
+                                  leadingSystemImage: "camera.fill") {
+                        Haptics.tap()
+                        requestScan()
                     }
-                    .foregroundStyle(Color.brandDeep)
-                    .padding(.vertical, 6)
+                    // Phase 21 — secondary path for typing-based logging.
+                    // Lives directly under the primary so the user can see
+                    // both options at once without an extra tap to reveal.
+                    Button {
+                        Haptics.tap()
+                        showingManualLog = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 13, weight: .heavy))
+                            Text("Or log without a photo")
+                                .appFont(.captionStrong)
+                        }
+                        .foregroundStyle(Color.brandDeep)
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Log a meal without a photo")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Log a meal without a photo")
             }
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.bottom, AppSpacing.md)
         case .picked:
-            PrimaryButton(title: "Analyze",
-                          leadingSystemImage: "sparkles") {
-                Task { await viewModel.analyze() }
+            bottomCTAChrome {
+                PrimaryButton(title: "Analyze",
+                              leadingSystemImage: "sparkles") {
+                    Task { await viewModel.analyze() }
+                }
             }
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.bottom, AppSpacing.md)
         case .analyzing:
-            PrimaryButton(title: "Analyzing…", isLoading: true) {}
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.bottom, AppSpacing.md)
+            bottomCTAChrome {
+                PrimaryButton(title: "Analyzing…", isLoading: true) {}
+            }
         case .ready, .saving, .saved, .saveFailed, .noFood, .failed:
             // Result flow renders its own pinned PrimaryButton inside
             // AnalysisResultView (Tier 3.2). No bottom CTA at the screen
@@ -1252,6 +1263,37 @@ struct CaptureView: View {
             // quiet background, not a competing affordance.
             EmptyView()
         }
+    }
+
+    /// Background chrome for the pinned bottom CTA cluster. Wraps the
+    /// passed content with horizontal/vertical padding plus a
+    /// canvas-colored fill that extends through the bottom safe area,
+    /// preceded by a short gradient fade so the scrolling content above
+    /// dissolves into the canvas instead of bleeding through the buttons.
+    /// Applied per-case (not on the whole ZStack overlay) so the empty
+    /// CTA states — `.ready`, `.moodPulse`, `.clarifying`, etc. — don't
+    /// draw a phantom bar.
+    @ViewBuilder
+    private func bottomCTAChrome<Content: View>(
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        content()
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.top, AppSpacing.md)
+            .padding(.bottom, AppSpacing.md)
+            .frame(maxWidth: .infinity)
+            .background(alignment: .bottom) {
+                VStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [Color.bgCanvas.opacity(0), Color.bgCanvas],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 28)
+                    Color.bgCanvas
+                }
+                .ignoresSafeArea(edges: .bottom)
+            }
     }
 
     // MARK: - Calorie-goal scan warning (Phase 20)

@@ -266,6 +266,7 @@ final class CaptureViewModel: ObservableObject {
                 preferredCoaches: context.preferredCoaches,
                 recentMoods: context.recentMoods
             )
+            guard case .analyzing = state, !Task.isCancelled else { return }
             // Server emits empty-string `fallback` on success (Gemini fills the
             // structured-output field with ""); only a *non-empty* fallback
             // means "no food detected".
@@ -423,6 +424,7 @@ final class CaptureViewModel: ObservableObject {
                 recentMoods: context.recentMoods,
                 userQuantities: pairs
             )
+            guard case .analyzing = state, !Task.isCancelled else { return }
             #if DEBUG
             NSLog("[Clarify] refineAnalysis succeeded — refined food=%@ calories=%@ (original calories=%@)",
                   refined.analysis.food ?? "<nil>",
@@ -501,6 +503,7 @@ final class CaptureViewModel: ObservableObject {
                 mainData: mainData,
                 thumbnailData: thumbData
             )
+            guard case .saving = state, !Task.isCancelled else { return }
             #if DEBUG
             NSLog("[Save] uploaded main_path=%@ thumb_path=%@",
                   uploaded.mainPath, uploaded.thumbPath)
@@ -524,6 +527,7 @@ final class CaptureViewModel: ObservableObject {
             )
 
             let inserted = try await logService.insert(draft)
+            guard case .saving = state, !Task.isCancelled else { return }
             #if DEBUG
             NSLog("[Save] inserted food_logs.id=%@ user_id=%@",
                   inserted.id.uuidString, inserted.userId.uuidString)

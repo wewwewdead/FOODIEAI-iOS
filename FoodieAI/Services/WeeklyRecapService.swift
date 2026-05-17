@@ -178,12 +178,17 @@ actor WeeklyRecapService {
                                  preferredCoaches: [String]) async throws -> GenerateResponseBody? {
         let url = analyzeBaseURL.appendingPathComponent("weekly-recap")
 
+        // `preferred_coaches` is the allowed coach pool the server
+        // must pick from; sanitize so a starred set of one means
+        // "use only that coach."
+        let cleanedCoaches = AnalyzeService.sanitizePreferredCoaches(preferredCoaches)
+
         let body = GenerateRequestBody(
             weekStart: WeeklyRecap.yyyyMMdd.string(from: weekStart),
             weekEnd:   WeeklyRecap.yyyyMMdd.string(from: weekEnd),
             meals:     meals.map(WireMeal.init(from:)),
             patterns:  patterns.map(WirePattern.init(from:)),
-            preferredCoaches: preferredCoaches
+            preferredCoaches: cleanedCoaches
         )
 
         var req = URLRequest(url: url)
@@ -198,7 +203,7 @@ actor WeeklyRecapService {
 
         #if DEBUG
         NSLog("[Recap] POST %@ meals=%d patterns=%d prefs=%d",
-              url.absoluteString, meals.count, patterns.count, preferredCoaches.count)
+              url.absoluteString, meals.count, patterns.count, cleanedCoaches.count)
         #endif
 
         let (data, response) = try await session.data(for: req)

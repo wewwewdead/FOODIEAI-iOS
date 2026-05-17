@@ -69,6 +69,12 @@ struct MonthView: View {
     }
 
     // MARK: - Header
+    //
+    // Granny Smith treatment, mirroring WeekView: single-hue vertical
+    // brandBright→brand wash, deep-green ink on chartreuse, ivory chevron
+    // pills for month nav, and the shared MacroGlassChip strip at the
+    // foot. Month-specific bits: the nav row carries the chevrons and a
+    // days-logged pill; the headline is "Month YYYY".
 
     private func headerCard(buckets: [DailyBucket], interval: DateInterval) -> some View {
         let totals = buckets.reduce(into: LocalDailyTotals.empty) { acc, b in
@@ -86,89 +92,140 @@ struct MonthView: View {
             ? (totals.totalCalories / Double(loggedDays)).rounded()
             : 0
 
-        return VStack(alignment: .leading, spacing: AppSpacing.md) {
-            HStack(spacing: AppSpacing.sm) {
-                Button {
-                    Haptics.tap()
-                    Task { await viewModel.goToPreviousMonth() }
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .heavy))
-                        .foregroundStyle(.white)
-                        .padding(AppSpacing.sm)
-                        .background(Circle().fill(.white.opacity(0.2)))
+        return ZStack(alignment: .topLeading) {
+            LinearGradient(
+                colors: [Color.brandBright, Color.brand],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            Circle()
+                .strokeBorder(Color.brandDeep.opacity(0.12), lineWidth: 1.5)
+                .frame(width: 360, height: 360)
+                .offset(x: 200, y: -150)
+                .allowsHitTesting(false)
+
+            VStack(alignment: .leading, spacing: 0) {
+                // 1. Nav row — [<] [days-pill] [>]
+                HStack(spacing: 10) {
+                    chevronButton(systemName: "chevron.left",
+                                  action: { Task { await viewModel.goToPreviousMonth() } },
+                                  enabled: true,
+                                  label: "Previous month")
+
+                    Spacer()
+
+                    Text("\(loggedDays) of \(totalDays) logged")
+                        .font(.custom(AppFont.PS.nunitoExtraBold, size: 11))
+                        .tracking(0.4)
+                        .foregroundStyle(Color.greenCalorie)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.brandIvory))
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(Color.brandDeep.opacity(0.12),
+                                              lineWidth: 0.75)
+                        )
+
+                    Spacer()
+
+                    chevronButton(systemName: "chevron.right",
+                                  action: { Task { await viewModel.goToNextMonth() } },
+                                  enabled: !viewModel.isCurrentMonth,
+                                  label: "Next month")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Previous month")
 
-                Spacer(minLength: 0)
+                Spacer().frame(height: 16)
 
+                // 2. Month + year — anchor headline.
                 Text(monthYearLabel(interval: interval))
-                    .appFont(.displayMD)
-                    .fontWeight(.heavy)
-                    .foregroundStyle(.white)
+                    .font(.custom(AppFont.PS.mplusExtraBold, size: 36))
+                    .kerning(-0.5)
+                    .foregroundStyle(Color.brandDeep)
 
-                Spacer(minLength: 0)
+                Spacer().frame(height: 18)
 
-                Button {
-                    Haptics.tap()
-                    Task { await viewModel.goToNextMonth() }
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 18, weight: .heavy))
-                        .foregroundStyle(.white.opacity(viewModel.isCurrentMonth ? 0.35 : 1.0))
-                        .padding(AppSpacing.sm)
-                        .background(Circle().fill(.white.opacity(0.2)))
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isCurrentMonth)
-                .accessibilityLabel("Next month")
-            }
-
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
-                    AnimatedNumber(value: totals.totalCalories,
-                                   formatter: AnimatedNumber.integerFormatter)
-                        .font(AppFont.font(.kcal))
-                        .fontWeight(.black)
-                        .foregroundStyle(.white)
-                    Text("calories this month")
-                        .appFont(.body)
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-                Text("Average: \(format(avg)) cal/day")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Text("Logged \(loggedDays)/\(totalDays) days")
-                    .appFont(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                Group {
-                    TotalLine(label: "Total carbs",   value: totals.totalCarbs)
-                    TotalLine(label: "Total sugar",   value: totals.totalSugar)
-                    TotalLine(label: "Total protein", value: totals.totalProtein)
-                    TotalLine(label: "Total fat",     value: totals.totalFat)
-                    TotalLine(label: "Total fiber",   value: totals.totalFiber)
-                }
-                .font(AppFont.font(.body))
-                .fontWeight(.semibold)
-                .foregroundStyle(.white)
-            }
-        }
-        .padding(.horizontal, AppSpacing.xl)
-        .padding(.vertical, AppSpacing.lg)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .fill(
-                    LinearGradient(
-                        colors: [.brand, .brandBright],
-                        startPoint: .topTrailing,
-                        endPoint: .bottomLeading
+                // 3. Hero kcal number.
+                HStack(alignment: .lastTextBaseline, spacing: 8) {
+                    AnimatedNumber(
+                        value: totals.totalCalories,
+                        formatter: AnimatedNumber.integerFormatter
                     )
-                )
+                    .font(.custom(AppFont.PS.mplusBlack, size: 68))
+                    .kerning(-2.5)
+                    .foregroundStyle(Color.greenCalorie)
+
+                    Text("kcal")
+                        .font(.custom(AppFont.PS.nunitoExtraBold, size: 16))
+                        .foregroundStyle(Color.brandDeep.opacity(0.70))
+                        .padding(.bottom, 10)
+                }
+
+                Spacer().frame(height: 6)
+
+                // 4. Subtitle — avg / day.
+                HStack(spacing: 7) {
+                    Text("avg")
+                        .foregroundStyle(Color.brandDeep.opacity(0.65))
+                    AnimatedNumber(value: avg,
+                                   formatter: AnimatedNumber.integerFormatter)
+                        .fontWeight(.heavy)
+                        .foregroundStyle(Color.greenCalorie)
+                    Text("kcal / day")
+                        .foregroundStyle(Color.brandDeep.opacity(0.65))
+                }
+                .font(.custom(AppFont.PS.nunitoSemiBold, size: 13))
+
+                Spacer().frame(height: 22)
+
+                // 5. Macro chip strip — shared with WeekView.
+                HStack(spacing: 6) {
+                    MacroGlassChip(label: "CARBS",   value: totals.totalCarbs)
+                    MacroGlassChip(label: "SUGAR",   value: totals.totalSugar)
+                    MacroGlassChip(label: "PROTEIN", value: totals.totalProtein)
+                    MacroGlassChip(label: "FAT",     value: totals.totalFat)
+                    MacroGlassChip(label: "FIBER",   value: totals.totalFiber)
+                }
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 22)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Color.brandDeep.opacity(0.10), lineWidth: 1)
         )
+        .shadow(color: Color.brand.opacity(0.28), radius: 16, x: 0, y: 10)
+    }
+
+    /// Circular ivory chevron button used by the month nav. Disabled
+    /// state fades both the glyph and the fill so the next-month button
+    /// reads as inert on the current month without disappearing.
+    private func chevronButton(systemName: String,
+                               action: @escaping () -> Void,
+                               enabled: Bool,
+                               label: String) -> some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .heavy))
+                .foregroundStyle(Color.brandDeep.opacity(enabled ? 1.0 : 0.35))
+                .frame(width: 34, height: 34)
+                .background(
+                    Circle().fill(Color.brandIvory.opacity(enabled ? 1.0 : 0.6))
+                )
+                .overlay(
+                    Circle().strokeBorder(Color.brandDeep.opacity(0.12),
+                                          lineWidth: 0.75)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(label)
     }
 
     // MARK: - Calendar grid

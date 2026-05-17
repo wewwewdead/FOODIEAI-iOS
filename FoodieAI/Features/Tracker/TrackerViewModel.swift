@@ -251,8 +251,7 @@ final class TrackerViewModel: ObservableObject {
 
         // Detached Task — fire-and-forget. The dedup guardrails inside
         // generateIfNeeded keep this safe to call repeatedly.
-        Task.detached { [weak self] in
-            guard let self else { return }
+        Task.detached { [weak self, observations, patterns, preferred, recentMoods] in
             do {
                 let generated = try await observations.generateIfNeeded(
                     patterns: patterns,
@@ -260,7 +259,8 @@ final class TrackerViewModel: ObservableObject {
                     recentMoods: recentMoods
                 )
                 if let generated {
-                    await MainActor.run {
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
                         // Surface the new card in place — no need for a
                         // second tab visit. The detached generation
                         // races completion with whatever the user is

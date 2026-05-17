@@ -50,6 +50,11 @@ final class CalorieReminderService {
     /// stale totals.
     private var latestGeneration: UInt64 = 0
 
+    private enum StatusFetchResult {
+        case status(DailyCalorieGoalStatus)
+        case unavailable
+    }
+
     init(logService: FoodLogService = FoodLogService(),
          profileService: ProfileService = ProfileService(),
          scheduler: NotificationScheduler? = nil) {
@@ -97,6 +102,32 @@ final class CalorieReminderService {
     func currentStatus(now: Date = Date(),
                        timeZone: TimeZone = .current) async -> DailyCalorieGoalStatus {
         await currentSnapshot(now: now, timeZone: timeZone).status
+    }
+
+    /// Scheduling-specific fetch that preserves the difference between
+    /// "successfully fetched an invalid goal" and "could not fetch fresh
+    /// data." The former should cancel stale reminders; the latter must
+    /// leave any existing pending reminder untouched.
+    private func currentStatusFetchResult(now: Date = Date(),
+                                          timeZone: TimeZone = .current) async -> StatusFetchResult {
+        async let logsTask: [FoodLog] = logService.todaysLogs(timeZone: timeZone)
+        async let profileTask: Profile = profileService.currentProfile()
+
+        do {
+            let logs = try await logsTask
+            let profile = try await profileTask
+            let consumed = LocalDailyTotals.sum(logs).totalCalories
+            let status = DailyCalorieGoalStatus.compute(
+                consumed: consumed,
+                goal: Double(profile.dailyCalorieGoal)
+            )
+            return .status(status)
+        } catch {
+            #if DEBUG
+            NSLog("[CalorieReminder] status fetch unavailable: %@", "\(error)")
+            #endif
+            return .unavailable
+        }
     }
 
     /// Same data dependencies as `currentStatus`, but also surfaces
@@ -173,7 +204,7 @@ final class CalorieReminderService {
         repeat {
             needsAnotherFetch = false
             let generation = nextGeneration()
-            let status = await currentStatus(now: now, timeZone: timeZone)
+            let result = await currentStatusFetchResult(now: now, timeZone: timeZone)
 
             // Stale-result guard: if a `recompute(consumed:goal:)` call
             // bumped the generation while we were fetching, its decision
@@ -188,9 +219,17 @@ final class CalorieReminderService {
                 continue
             }
 
-            await applyReminderDecision(
-                status: status, now: now, timeZone: timeZone
-            )
+            switch result {
+            case .status(let status):
+                await applyReminderDecision(
+                    status: status, now: now, timeZone: timeZone
+                )
+            case .unavailable:
+                #if DEBUG
+                NSLog("[CalorieReminder] fetch unavailable — preserving existing reminder")
+                #endif
+                continue
+            }
         } while needsAnotherFetch
     }
 
