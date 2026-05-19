@@ -1,19 +1,19 @@
 import Foundation
 import Supabase
 
-/// Phase 17. Reads, writes, and orchestrates `weekly_recaps`.
+/// Phase 17. Reads `weekly_recaps` and orchestrates server-side
+/// generation.
 ///
-/// Three responsibilities:
-///   1. CRUD: `latest`, `history`, `insert`.
-///   2. Round-trip the server's `POST /weekly-recap` to compose a body.
-///   3. Orchestration: `generateIfNeeded(weekStart:weekEnd:)` consults
-///      the unique constraint via a pre-check `latest()` lookup,
-///      gathers logs + patterns + preferences, calls the server,
-///      and persists.
+/// Two responsibilities:
+///   1. CRUD reads: `latest`, `history`.
+///   2. Orchestration: `generateIfNeeded(weekStart:weekEnd:)` gathers
+///      logs + patterns + preferences, calls the server, and returns
+///      the recap. The server owns the cache check AND the DB insert
+///      under service-role so cache + write live in one place.
 ///
 /// The unique `(user_id, week_start)` constraint is the safety net for
-/// races (e.g., two devices opened on Sunday evening). The pre-check
-/// avoids the round-trip to the model when one isn't needed.
+/// races (two devices opened on Sunday evening). The server returns
+/// the existing row on cache hit OR on a unique-violation race.
 actor WeeklyRecapService {
     private let client: SupabaseClient
     private let analyzeBaseURL: URL
@@ -52,21 +52,6 @@ actor WeeklyRecapService {
         return rows.first
     }
 
-    /// Recap matching a specific Monday. Used by `generateIfNeeded` to
-    /// short-circuit the model round-trip when the unique constraint
-    /// would have rejected an insert anyway.
-    func recap(forWeekStarting weekStart: Date) async throws -> WeeklyRecap? {
-        let f = WeeklyRecap.yyyyMMdd
-        let rows: [WeeklyRecap] = try await client
-            .from("weekly_recaps")
-            .select()
-            .eq("week_start", value: f.string(from: weekStart))
-            .limit(1)
-            .execute()
-            .value
-        return rows.first
-    }
-
     /// All historical recaps, newest-first, capped at `limit`. Surfaces
     /// the future "Past Recaps" history list.
     func history(limit: Int = 12) async throws -> [WeeklyRecap] {
@@ -79,27 +64,13 @@ actor WeeklyRecapService {
             .value
     }
 
-    // MARK: - Writes
-
-    func insert(_ draft: NewWeeklyRecap) async throws -> WeeklyRecap {
-        try await client
-            .from("weekly_recaps")
-            .insert(draft, returning: .representation)
-            .single()
-            .execute()
-            .value
-    }
-
     // MARK: - Orchestration
 
-    /// Generate a recap for the given week if one doesn't already exist.
-    /// Pre-checks the table; returns the existing row when present.
+    /// Generate a recap for the given week. The server checks the cache
+    /// (returning the existing row on hit) and inserts on miss under
+    /// service-role, so this method just gathers context and round-trips.
     /// Returns `nil` when the week has no meals (the server's 204 path).
     func generateIfNeeded(weekStart: Date, weekEnd: Date) async throws -> WeeklyRecap? {
-        if let existing = try await recap(forWeekStarting: weekStart) {
-            return existing
-        }
-
         // The recap range is half-open `[weekStart, weekEnd_exclusive)`.
         // `weekEnd` from the caller is the inclusive Sunday date — push
         // it forward by one day to make the food_logs range half-open.
@@ -140,33 +111,33 @@ actor WeeklyRecapService {
         )
         guard let response else { return nil }
 
-        let draft = NewWeeklyRecap(
+        // Resolve the userId from the cached session for the model.
+        // The server owns the row write and uses the JWT-verified
+        // user_id; we mirror it locally for the in-memory model.
+        let userId = client.auth.currentUser?.id ?? UUID()
+
+        let recap = WeeklyRecap(
+            id:           response.id,
+            userId:       userId,
             weekStart:    weekStart,
             weekEnd:      weekEnd,
             coachName:    response.coachName,
             body:         response.body,
             headlineStat: response.headlineStat,
             topPattern:   response.topPattern,
-            moodSummary:  response.moodSummary
+            moodSummary:  response.moodSummary,
+            createdAt:    Date()
         )
 
-        do {
-            let inserted = try await insert(draft)
-            #if DEBUG
-            NSLog("[Recap] inserted week_start=%@ coach=%@ headline=%@",
-                  WeeklyRecap.yyyyMMdd.string(from: weekStart),
-                  inserted.coachName,
-                  inserted.headlineStat ?? "<nil>")
-            #endif
-            return inserted
-        } catch {
-            // Race: another client might have just inserted. Re-fetch
-            // the existing row so the caller still gets a recap.
-            if let existing = try? await recap(forWeekStarting: weekStart) {
-                return existing
-            }
-            throw error
-        }
+        #if DEBUG
+        NSLog("[Recap] %@ week_start=%@ coach=%@ headline=%@",
+              response.cached ? "cache hit" : "freshly generated",
+              WeeklyRecap.yyyyMMdd.string(from: weekStart),
+              recap.coachName,
+              recap.headlineStat ?? "<nil>")
+        #endif
+
+        return recap
     }
 
     // MARK: - Server round-trip
@@ -191,10 +162,21 @@ actor WeeklyRecapService {
             preferredCoaches: cleanedCoaches
         )
 
+        // Improvement A — server uses the JWT to verify the caller and
+        // to perform the cache check + insert under that user_id.
+        let authSession: Session
+        do {
+            authSession = try await client.auth.session
+        } catch {
+            throw RecapError.notAuthenticated
+        }
+        let accessToken = authSession.accessToken
+
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 60
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         let encoder = JSONEncoder()
         // Custom encoders on `WeeklyRecap` already format dates; meals
         // need an ISO timestamp for `eaten_at`.
@@ -287,6 +269,8 @@ private struct GenerateRequestBody: Encodable {
 }
 
 private struct GenerateResponseBody: Decodable {
+    /// Improvement A — server now inserts the row and returns its UUID.
+    let id: UUID
     let coachName: String
     let body: String
     let headlineStat: String?
@@ -294,13 +278,29 @@ private struct GenerateResponseBody: Decodable {
     /// Phase 18 — server returns null when fewer than 3 meals this
     /// week carry mood labels.
     let moodSummary: String?
+    /// `true` when the server returned a previously persisted row
+    /// without invoking Gemini. Useful for telemetry / debug logs.
+    let cached: Bool
 
     enum CodingKeys: String, CodingKey {
+        case id
         case coachName      = "coach_name"
         case body
         case headlineStat   = "headline_stat"
         case topPattern     = "top_pattern"
         case moodSummary    = "mood_summary"
+        case cached
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id           = try c.decode(UUID.self, forKey: .id)
+        self.coachName    = try c.decode(String.self, forKey: .coachName)
+        self.body         = try c.decode(String.self, forKey: .body)
+        self.headlineStat = try c.decodeIfPresent(String.self, forKey: .headlineStat)
+        self.topPattern   = try c.decodeIfPresent(String.self, forKey: .topPattern)
+        self.moodSummary  = try c.decodeIfPresent(String.self, forKey: .moodSummary)
+        self.cached       = (try? c.decodeIfPresent(Bool.self, forKey: .cached)) ?? false
     }
 }
 
@@ -309,6 +309,7 @@ private struct GenerateResponseBody: Decodable {
 enum RecapError: LocalizedError {
     case server(status: Int, body: String)
     case unexpectedResponse
+    case notAuthenticated
 
     var errorDescription: String? {
         switch self {
@@ -316,6 +317,8 @@ enum RecapError: LocalizedError {
             return "Weekly recap server returned HTTP \(status)."
         case .unexpectedResponse:
             return "Unexpected response from the weekly recap endpoint."
+        case .notAuthenticated:
+            return "You must be signed in to generate a weekly recap."
         }
     }
 }

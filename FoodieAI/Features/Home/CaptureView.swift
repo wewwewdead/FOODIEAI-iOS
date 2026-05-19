@@ -223,6 +223,12 @@ struct CaptureView: View {
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, 120) // breathing room above the pinned CTA
                 }
+                // Dragging the scroll content interactively pulls the
+                // keyboard down with the finger. AnalysisResultView's
+                // food-name field watches `foodNameFieldFocused`; when
+                // this gesture drops focus mid-edit, the watcher
+                // commits the typed value so the user doesn't lose it.
+                .scrollDismissesKeyboard(.interactively)
                 .onChange(of: isReady) { _, ready in
                     // Always cancel a pending scroll first — whether
                     // `ready` is flipping on or off, a stale tail would
@@ -1144,6 +1150,10 @@ struct CaptureView: View {
                     // what `predictedImpactCopy` expects to fold the
                     // analyzed calories into.
                     dailyStatus: cachedCalorieStatus,
+                    foodNameOverride: viewModel.editedFoodName,
+                    onFoodNameEdited: { name in
+                        viewModel.applyFoodNameEdit(name)
+                    },
                     onSave:   { handleSaveTapped() },
                     onCancel: { handleCancelTapped() }
                 )

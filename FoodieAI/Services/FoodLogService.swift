@@ -180,6 +180,25 @@ actor FoodLogService {
             .value
     }
 
+    /// Patch the `food_name` on a saved meal. Used by the inline
+    /// editable-name affordance on the analyze result view when the AI
+    /// got the food name wrong. RLS scopes the row by `user_id` via the
+    /// `food_logs_update_own` policy; no client-side user check needed.
+    @discardableResult
+    func updateFoodName(_ newName: String, on logId: UUID) async throws -> FoodLog {
+        struct NamePatch: Encodable {
+            let food_name: String
+        }
+        let patch = NamePatch(food_name: newName)
+        return try await client
+            .from("food_logs")
+            .update(patch, returning: .representation)
+            .eq("id", value: logId)
+            .single()
+            .execute()
+            .value
+    }
+
     /// [start, end) covering the user's local calendar day, expressed as absolute Dates.
     static func localDayBounds(now: Date = Date(),
                                timeZone: TimeZone = .current) -> (Date, Date) {

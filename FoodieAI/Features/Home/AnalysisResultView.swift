@@ -55,10 +55,35 @@ struct AnalysisResultView: View {
     /// Nil hides the line entirely — invalid/missing goals are not a
     /// place to surface vague copy.
     var dailyStatus: DailyCalorieGoalStatus? = nil
+    /// User-corrected food name from a prior tap-to-edit. When set,
+    /// shadows `analysis.food` in the detected block so the corrected
+    /// name reads first. Nil = show what the AI returned.
+    var foodNameOverride: String? = nil
+    /// Fired when the user commits an inline food-name edit. Trimmed,
+    /// non-empty value. Parent threads this into the view model so it
+    /// flows into `save()` (pre-save) or a `food_logs` row patch
+    /// (post-save).
+    var onFoodNameEdited: ((String) -> Void)? = nil
     let onSave: () -> Void
     let onCancel: () -> Void
 
     @State private var showingAllMacros: Bool = false
+    /// Inline food-name edit. When true, the detected block swaps the
+    /// title Text for a TextField focused on appear. `editedNameDraft`
+    /// holds the in-progress value; commit trims and pushes through
+    /// `onFoodNameEdited`. Empty/whitespace-only submissions revert.
+    @State private var isEditingName: Bool = false
+    @State private var editedNameDraft: String = ""
+    @FocusState private var foodNameFieldFocused: Bool
+    /// One-shot bounce trigger for the "Edit name" pill's pencil glyph.
+    /// Flips 0 → 1 once after the cascade reveal so the symbolEffect
+    /// plays exactly once per result-view lifetime.
+    @State private var ctaNudge: Int = 0
+    /// Press-state scale for the Edit pill — kept on the view so we can
+    /// drive it from button gestures if we wire one in later. For now
+    /// it stays at 1; the nudge alone is enough attention-getter
+    /// without a constant pulse.
+    @State private var ctaPressScale: CGFloat = 1.0
     /// Cascade reveal — set true on appear so the detected title and
     /// macro chips fade up in sequence after the photo card lands. Driven
     /// by a single state flag (not a per-element Task) so SwiftUI handles
@@ -137,6 +162,21 @@ struct AnalysisResultView: View {
             saveBlock
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Tap-outside-to-commit: while editing the food name, any tap
+        // that doesn't land on an interactive child (the field itself,
+        // Save/Cancel buttons, accordion headers, the PrimaryButton)
+        // falls through to this gesture and commits the edit. iOS's
+        // gesture exclusivity ensures Button-style children swallow
+        // their own taps first, so this only fires for "outside" taps.
+        // `contentShape(Rectangle())` is required because a VStack's
+        // own hit area defaults to its content's union — without it,
+        // taps on the spacing between sections wouldn't register.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isEditingName {
+                commitFoodNameEdit()
+            }
+        }
         .onAppear {
             // Idempotent: only flips on once, so re-renders (e.g. the
             // typewriter ticking) don't re-fire the cascade.
@@ -247,11 +287,309 @@ struct AnalysisResultView: View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text("Detected").eyebrow()
                 .foregroundStyle(Color.brand)
-            Text(analysis.food ?? "Unknown")
-                .appFont(.display2)
-                .foregroundStyle(Color.ink)
+            editableFoodName
             repeatChip
         }
+    }
+
+    /// Displayed food name = correction (if any) → AI value → "Unknown".
+    /// Drives both the read-only and the edit-mode renderings so the
+    /// two paths can never disagree.
+    private var displayedFoodName: String {
+        if let override = foodNameOverride, !override.isEmpty {
+            return override
+        }
+        return analysis.food ?? "Unknown"
+    }
+
+    /// Editable food name with a Duolingo-style morph between read and
+    /// edit modes. The text itself stays at the *same* display2 weight
+    /// (32pt, Nunito ExtraBold, kern -0.8) in both modes and wraps
+    /// across as many lines as the name needs — what morphs is the
+    /// brand-tinted card that materializes around the text. The field
+    /// then grows and shrinks vertically with the typed content (no
+    /// horizontal scroll, no truncation, no font-size jump).
+    ///
+    /// Animation: a single spring (response 0.45, dampingFraction 0.72)
+    /// drives padding, background fill, and border opacity in unison so
+    /// the box reads as "snapping into existence" around the text.
+    /// Reduce Motion swaps to a flat 0.22s ease.
+    ///
+    /// Edits only surface when the parent supplied `onFoodNameEdited`.
+    /// If a save-failed state renders without a callback wired, the
+    /// name reads as static display.
+    @ViewBuilder
+    private var editableFoodName: some View {
+        if onFoodNameEdited != nil {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                nameContainer
+
+                if isEditingName {
+                    editingActions
+                        .transition(
+                            .scale(scale: 0.92, anchor: .topLeading)
+                                .combined(with: .opacity)
+                        )
+                } else {
+                    editCTAButton
+                        .transition(
+                            .scale(scale: 0.92, anchor: .topLeading)
+                                .combined(with: .opacity)
+                        )
+                }
+            }
+            .animation(morphSpring, value: isEditingName)
+        } else {
+            Text(displayedFoodName)
+                .appFont(.display2)
+                .foregroundStyle(Color.ink)
+        }
+    }
+
+    /// Morph curve. Snappy spring (Duolingo principle: quick entry, a
+    /// hair of overshoot, fast settle). The shorter response keeps
+    /// the box from feeling like it's lagging behind the tap; the
+    /// 0.78 damping limits overshoot to a single subtle pulse rather
+    /// than a wobble. Reduce Motion swaps to a brief linear ease so
+    /// the section never scales.
+    private var morphSpring: Animation {
+        reduceMotion
+            ? .easeInOut(duration: 0.18)
+            : .spring(response: 0.36, dampingFraction: 0.78)
+    }
+
+    /// The text region. To keep the morph buttery-smooth we render a
+    /// single persistent TextField across both modes — no `if/else`
+    /// branch, no view-identity swap. The field is disabled in read
+    /// mode (a clear overlay catches the tap-to-edit), enabled in
+    /// edit mode. Same font + kerning + line wrapping in both states
+    /// means the text never visibly moves.
+    ///
+    /// The morphing "card" is rendered as a `.background` with
+    /// *negative* padding so it extends past the text bounds without
+    /// affecting layout. Only opacity and a small scale (0.94 → 1.0)
+    /// animate — both cheap GPU transforms, no layout recompute,
+    /// 60fps even on long multi-line names. A `compositingGroup`
+    /// flattens the fill + border + scale + opacity into a single
+    /// render pass so the spring's overshoot doesn't show artifacts
+    /// between layers.
+    ///
+    /// `TextField(axis: .vertical) + lineLimit(1...12)` lets the box
+    /// grow and shrink with what the user types — add a line and the
+    /// box tracks; delete back to a short name and it tightens.
+    private var nameContainer: some View {
+        TextField("Food name",
+                  text: $editedNameDraft,
+                  axis: .vertical)
+            .font(AppFont.font(.display2))
+            .kerning(-0.8)
+            .foregroundStyle(Color.ink)
+            .tint(Color.brand)
+            .textFieldStyle(.plain)
+            .lineLimit(1...12)
+            .multilineTextAlignment(.leading)
+            .submitLabel(.done)
+            .autocorrectionDisabled(false)
+            .textInputAutocapitalization(.sentences)
+            .focused($foodNameFieldFocused)
+            .disabled(!isEditingName)
+            // Return-to-commit. Vertical-axis TextField defaults to
+            // newline-on-return; catch the newline, strip it, route
+            // through commit so Done matches the Save button.
+            .onChange(of: editedNameDraft) { _, newValue in
+                guard isEditingName else { return }
+                if newValue.contains("\n") {
+                    editedNameDraft = newValue
+                        .replacingOccurrences(of: "\n", with: "")
+                    commitFoodNameEdit()
+                }
+            }
+            // Keep the field's text mirrored to the displayed name
+            // while not editing, so the AI's value (or a prior
+            // committed override) reads through identically.
+            .onAppear { syncDraftIfIdle() }
+            .onChange(of: foodNameOverride ?? "") { _, _ in syncDraftIfIdle() }
+            .onChange(of: analysis.food ?? "") { _, _ in syncDraftIfIdle() }
+            // Focus loss while still in edit mode = the user did
+            // something outside the field (tap on whitespace, scroll
+            // the keyboard down interactively, system dismissal).
+            // Commit the edit — preserves what they typed instead of
+            // losing it. Save/Cancel paths flip `isEditingName` first
+            // so this branch is skipped for explicit button presses.
+            .onChange(of: foodNameFieldFocused) { _, focused in
+                if !focused, isEditingName {
+                    commitFoodNameEdit()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                // Morph box: extends past the text via negative
+                // padding so it can fade in around the text without
+                // shifting layout. Only opacity + scale animate.
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .fill(Color.brandSoft)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppRadius.lg)
+                            .strokeBorder(Color.brand.opacity(0.55),
+                                          lineWidth: 1.5)
+                    )
+                    .padding(.horizontal, -AppSpacing.md)
+                    .padding(.vertical, -AppSpacing.sm)
+                    .compositingGroup()
+                    .opacity(isEditingName ? 1 : 0)
+                    .scaleEffect(isEditingName ? 1 : 0.94,
+                                 anchor: .center)
+            }
+            .overlay {
+                // Read-mode tap target. A disabled TextField won't
+                // forward touches, so a clear overlay above it
+                // catches the tap and routes to begin-edit. Removed
+                // entirely in edit mode so the TextField gets the
+                // touches it needs (cursor placement, selection).
+                if !isEditingName {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { beginFoodNameEdit() }
+                        .accessibilityLabel(
+                            "Food name: \(displayedFoodName). Double-tap to edit."
+                        )
+                }
+            }
+    }
+
+    /// While the user isn't actively editing, keep the field's bound
+    /// text matched to the canonical displayed name. Prevents drift
+    /// when the parent pushes a new `foodNameOverride` or the analysis
+    /// reloads with a different `food`.
+    private func syncDraftIfIdle() {
+        if !isEditingName {
+            editedNameDraft = displayedFoodName
+        }
+    }
+
+    /// Read-mode CTA pill. Brand-tinted fill + outline + bold pencil
+    /// glyph + "Edit name" copy — much more visible than the prior
+    /// 14pt inline pencil. A small bounce nudge on first reveal draws
+    /// the eye without becoming a constant distraction.
+    private var editCTAButton: some View {
+        Button(action: { beginFoodNameEdit() }) {
+            HStack(spacing: 6) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 13, weight: .bold))
+                    .symbolEffect(.bounce, value: ctaNudge)
+                Text("Edit name")
+                    .appFont(.captionStrong)
+            }
+            .foregroundStyle(Color.brandDeep)
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, 8)
+            .background(
+                Capsule().fill(Color.brandSoft)
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(Color.brand.opacity(0.65), lineWidth: 1.5)
+            )
+            .scaleEffect(ctaPressScale)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Edit food name")
+        .accessibilityHint("If the AI got the name wrong, fix it here.")
+        .onAppear {
+            // One-shot attention nudge after the cascade reveal: bounce
+            // the pencil glyph once so testers see the affordance even
+            // if they aren't scanning for it. Idempotent — the next
+            // re-render keeps ctaNudge at 1 and won't replay.
+            guard ctaNudge == 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                ctaNudge = 1
+            }
+        }
+    }
+
+    /// Edit-mode actions: Save (filled brand pill) + Cancel (ghost).
+    /// Save mirrors the typewriter cascade's brand palette so the
+    /// editing region reads as part of the same screen, not a system
+    /// alert. Cancel disabled-on-empty matches the "empty = silent
+    /// revert" contract from `commitFoodNameEdit`.
+    private var editingActions: some View {
+        let trimmed = editedNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canSave = !trimmed.isEmpty
+        return HStack(spacing: AppSpacing.sm) {
+            Button(action: { commitFoodNameEdit() }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .heavy))
+                    Text("Save")
+                        .appFont(.captionStrong)
+                }
+                .foregroundStyle(Color.white)
+                .padding(.horizontal, AppSpacing.md)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule().fill(canSave ? Color.brand : Color.brand.opacity(0.45))
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSave)
+            .accessibilityLabel("Save food name")
+
+            Button(action: { cancelFoodNameEdit() }) {
+                Text("Cancel")
+                    .appFont(.captionStrong)
+                    .foregroundStyle(Color.inkMute)
+                    .padding(.horizontal, AppSpacing.md)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(Color.bgSurface))
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(Color.borderHairline, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel name edit")
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func beginFoodNameEdit() {
+        Haptics.tap()
+        editedNameDraft = displayedFoodName
+        // Focus first, flip state second — both land in the same
+        // SwiftUI transaction so the morph and keyboard kick off
+        // together rather than the morph waiting on a deferred
+        // focus. Since the box morph is now pure opacity/scale (no
+        // layout work), there's nothing for the keyboard to fight.
+        foodNameFieldFocused = true
+        isEditingName = true
+    }
+
+    private func commitFoodNameEdit() {
+        let trimmed = editedNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Order matters: flip `isEditingName` BEFORE clearing focus so
+        // the `onChange(of: foodNameFieldFocused)` watcher (used to
+        // catch tap-outside / scroll-to-dismiss) sees an already-false
+        // edit state and skips its own commit. Otherwise commit would
+        // fire twice — fine because it's idempotent, but noisy.
+        isEditingName = false
+        foodNameFieldFocused = false
+        // Empty / unchanged submission = silent revert. No-op for parent.
+        guard !trimmed.isEmpty, trimmed != displayedFoodName else { return }
+        Haptics.soft()
+        onFoodNameEdited?(trimmed)
+    }
+
+    private func cancelFoodNameEdit() {
+        Haptics.tap()
+        // Same ordering rationale as `commitFoodNameEdit`: clear edit
+        // state first so the focus watcher doesn't reinterpret the
+        // dismissal as a tap-outside commit.
+        isEditingName = false
+        foodNameFieldFocused = false
+        // Restore the draft to the canonical name so a subsequent
+        // re-open doesn't show stale typing from this aborted edit.
+        editedNameDraft = displayedFoodName
     }
 
     /// Phase 15 — quiet "you've had this before" chip. Hidden until the

@@ -76,6 +76,13 @@ final class CaptureViewModel: ObservableObject {
 
     @Published private(set) var state: State = .idle
 
+    /// User-corrected food name from the inline edit affordance on the
+    /// analyze result view. When set, overrides `response.analysis.food`
+    /// at save time (pre-save edits) and is persisted via
+    /// `FoodLogService.updateFoodName` for post-save edits. Cleared on
+    /// every transition back to `.idle` so the next capture starts clean.
+    @Published private(set) var editedFoodName: String? = nil
+
     /// Where the current photo came from. Diagnostic-only for now —
     /// drives the `[Analyze-prep]` log line so we can tell whether the
     /// camera or photo-library path is producing oversized uploads.
@@ -509,8 +516,11 @@ final class CaptureViewModel: ObservableObject {
                   uploaded.mainPath, uploaded.thumbPath)
             #endif
 
+            let resolvedFoodName = editedFoodName
+                ?? response.analysis.food
+                ?? "Unknown"
             let draft = NewFoodLog(
-                foodName:        response.analysis.food ?? "Unknown",
+                foodName:        resolvedFoodName,
                 imagePath:       uploaded.mainPath,
                 imageThumbPath:  uploaded.thumbPath,
                 calories:        response.analysis.calories ?? 0,
@@ -694,6 +704,7 @@ final class CaptureViewModel: ObservableObject {
     /// logged in DEBUG.
     func recordMood(_ mood: FoodLog.Mood) async {
         guard case .moodPulse(_, _, let log) = state else { return }
+        editedFoodName = nil
         state = .idle
         do {
             _ = try await logService.setMood(mood, on: log.id)
@@ -712,6 +723,7 @@ final class CaptureViewModel: ObservableObject {
     /// User tapped Skip or drag-dismissed the pulse — no DB write.
     func skipMoodPulse() {
         if case .moodPulse = state {
+            editedFoodName = nil
             state = .idle
         }
     }
@@ -727,6 +739,7 @@ final class CaptureViewModel: ObservableObject {
             #if DEBUG
             NSLog("[Mood] pulse cancelled by background")
             #endif
+            editedFoodName = nil
             state = .idle
         default:
             break
@@ -737,13 +750,52 @@ final class CaptureViewModel: ObservableObject {
     /// the dashed drop zone shows the empty state again and the picker
     /// can be re-presented from there.
     func resetToPick() {
+        editedFoodName = nil
         state = .idle
     }
 
     /// Same as `resetToPick` for now; preserved as a separate entry point
     /// in case the design diverges (e.g. cancel-without-resetting).
     func discardCurrent() {
+        editedFoodName = nil
         state = .idle
+    }
+
+    /// User corrected the food name from the analyze result view. For
+    /// pre-save edits, just stash it on the view model so `save()` picks
+    /// it up. For post-save edits (.saved/.moodPulse), patch the row
+    /// immediately via FoodLogService. Local-first: the UI override
+    /// reads instantly; a network failure is silent in DEBUG and leaves
+    /// the local edit in place (the user sees their correction even
+    /// though it didn't persist — acceptable for v1).
+    func applyFoodNameEdit(_ newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        editedFoodName = trimmed
+
+        let savedLogId: UUID?
+        switch state {
+        case .saved(_, _, let log), .moodPulse(_, _, let log):
+            savedLogId = log.id
+        default:
+            savedLogId = nil
+        }
+
+        guard let logId = savedLogId else { return }
+        Task { [logService] in
+            do {
+                _ = try await logService.updateFoodName(trimmed, on: logId)
+                #if DEBUG
+                NSLog("[FoodLog] updated food_name for log %@ to '%@'",
+                      logId.uuidString, trimmed)
+                #endif
+            } catch {
+                #if DEBUG
+                NSLog("[FoodLog] updateFoodName FAILED log=%@ err=%@",
+                      logId.uuidString, "\(error)")
+                #endif
+            }
+        }
     }
 
     // MARK: - Phase 15: Quick re-log

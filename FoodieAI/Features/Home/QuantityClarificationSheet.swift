@@ -37,7 +37,14 @@ struct QuantityClarificationSheet: View {
     /// stays false and `onDisappear` routes through `onDismiss`.
     @State private var didConfirm: Bool = false
 
-    enum QuantityChoice: Hashable { case less, about, more }
+    /// Per-row choice. `.custom` carries the free-text quantity string
+    /// the user typed ("1.5 cups", "350 grams", "2 small bowls" — the
+    /// downstream pipeline already accepts arbitrary strings via the
+    /// `user_quantities` param on /analyze, so no parsing is done here).
+    enum QuantityChoice: Hashable {
+        case less, about, more
+        case custom(String)
+    }
 
     var body: some View {
         ZStack {
@@ -160,18 +167,27 @@ struct QuantityClarificationSheet: View {
     /// descriptive labels when the assumed quantity has no number.
     static func formattedQuantity(for item: GeminiAnalysis.AmbiguousItem,
                                   choice: QuantityChoice) -> String {
+        // Custom carries its own free-text quantity — pass it through
+        // verbatim. The server accepts arbitrary strings, so "1.5 cups"
+        // / "350 grams" / "two small bowls" all flow unchanged into the
+        // Gemini prompt.
+        if case .custom(let typed) = choice {
+            return typed
+        }
         if let parsed = ParsedQuantity(raw: item.assumedQuantity) {
             switch choice {
-            case .less:  return parsed.scaled(by: 0.5)
-            case .about: return parsed.original
-            case .more:  return parsed.scaled(by: 2.0)
+            case .less:   return parsed.scaled(by: 0.5)
+            case .about:  return parsed.original
+            case .more:   return parsed.scaled(by: 2.0)
+            case .custom: return parsed.original // unreachable; handled above
             }
         }
         // No leading number — use descriptive variants.
         switch choice {
-        case .less:  return "Half portion"
-        case .about: return item.assumedQuantity
-        case .more:  return "Double portion"
+        case .less:   return "Half portion"
+        case .about:  return item.assumedQuantity
+        case .more:   return "Double portion"
+        case .custom: return item.assumedQuantity // unreachable
         }
     }
 }
@@ -181,6 +197,30 @@ struct QuantityClarificationSheet: View {
 private struct QuantityRow: View {
     let item: GeminiAnalysis.AmbiguousItem
     @Binding var selection: QuantityClarificationSheet.QuantityChoice
+
+    /// Drives the per-row free-text input sheet. Local to the row so
+    /// each ambiguous item presents its own modal independently.
+    @State private var showingCustomInput: Bool = false
+    /// Draft of the free-text input — kept on the row (not in the
+    /// sheet itself) so re-opening to tweak shows the previous typed
+    /// value rather than wiping back to empty.
+    @State private var customAmountDraft: String = ""
+
+    /// True when the row's `selection` is the `.custom(_)` case,
+    /// regardless of the associated string. Pattern matching beats
+    /// `==` here because `.custom("a") != .custom("b")` and we just
+    /// want "is this row on the custom path."
+    private var isCustomSelected: Bool {
+        if case .custom = selection { return true }
+        return false
+    }
+
+    /// Currently committed custom quantity, or nil when the user
+    /// hasn't picked Custom yet. Drives the 4th button's label.
+    private var committedCustomAmount: String? {
+        if case .custom(let amount) = selection { return amount }
+        return nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -209,6 +249,17 @@ private struct QuantityRow: View {
                              isSelected: selection == .more) {
                     selection = .more
                 }
+                PresetButton(label: customButtonLabel,
+                             sub: customButtonSub,
+                             isSelected: isCustomSelected) {
+                    // Pre-fill the input with the previously-committed
+                    // value (if any) so reopening reads as edit, not
+                    // start-from-scratch.
+                    if let committed = committedCustomAmount {
+                        customAmountDraft = committed
+                    }
+                    showingCustomInput = true
+                }
             }
         }
         .padding(AppSpacing.md)
@@ -221,6 +272,33 @@ private struct QuantityRow: View {
             RoundedRectangle(cornerRadius: AppRadius.lg)
                 .strokeBorder(Color.borderHairline, lineWidth: 1)
         )
+        .sheet(isPresented: $showingCustomInput) {
+            CustomQuantityInputSheet(
+                itemName: item.name,
+                assumedQuantity: item.assumedQuantity,
+                amountText: $customAmountDraft,
+                onConfirm: { value in
+                    selection = .custom(value)
+                    showingCustomInput = false
+                },
+                onCancel: { showingCustomInput = false }
+            )
+        }
+    }
+
+    /// Custom button title — "Custom" when not yet picked, otherwise
+    /// the typed amount so the row reads as committed without a
+    /// secondary read.
+    private var customButtonLabel: String {
+        committedCustomAmount ?? "Custom"
+    }
+
+    /// Sub-line under the custom button. When committed, mirrors the
+    /// other three buttons' "preview of what gets sent" pattern by
+    /// repeating the typed value (since there's no transform to
+    /// preview). When uncommitted, prompts with a "tap to type" hint.
+    private var customButtonSub: String {
+        committedCustomAmount ?? "Type exact"
     }
 
     private func subLabel(for choice: QuantityClarificationSheet.QuantityChoice) -> String {
@@ -240,6 +318,8 @@ private struct PresetButton: View {
                 Text(label)
                     .appFont(.captionStrong)
                     .foregroundStyle(isSelected ? Color.ink : Color.inkMute)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
                 Text(sub)
                     .appFont(.caption)
                     .foregroundStyle(isSelected ? Color.brandDeep : Color.inkLight)
@@ -333,6 +413,115 @@ private struct ParsedQuantity {
         // Up to one decimal place, no trailing zero.
         let s = String(format: "%.1f", number)
         return s
+    }
+}
+
+// MARK: - Custom amount input
+
+/// Half-height sheet where the user types a free-form quantity for a
+/// single ambiguous item. Free-text on purpose — the downstream
+/// pipeline accepts arbitrary strings, so "1.5 cups", "350 grams",
+/// "two small bowls" all land in `user_quantities` and reach Gemini
+/// unchanged. No parsing, no unit picker — the input mirrors how a
+/// person would describe a portion out loud.
+///
+/// The header shows the AI's assumed quantity as context so the user
+/// can see what they're correcting. Confirm stays disabled until the
+/// typed value is non-empty (after trimming whitespace).
+private struct CustomQuantityInputSheet: View {
+    let itemName: String
+    let assumedQuantity: String
+    @Binding var amountText: String
+    let onConfirm: (String) -> Void
+    let onCancel: () -> Void
+
+    @FocusState private var inputFocused: Bool
+
+    private var trimmed: String {
+        amountText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canConfirm: Bool {
+        !trimmed.isEmpty
+    }
+
+    var body: some View {
+        VStack(spacing: AppSpacing.lg) {
+            HStack {
+                Button(action: onCancel) {
+                    Text("Cancel")
+                        .appFont(.captionStrong)
+                        .foregroundStyle(Color.inkMute)
+                }
+                .buttonStyle(.plain)
+                Spacer()
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.top, AppSpacing.md)
+
+            Spacer(minLength: 0)
+
+            VStack(spacing: AppSpacing.sm) {
+                Text("How much \(itemName.lowercased())?")
+                    .appFont(.title2)
+                    .foregroundStyle(Color.ink)
+                    .multilineTextAlignment(.center)
+
+                Text("AI assumed \(assumedQuantity)")
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, AppSpacing.lg)
+
+            TextField("e.g., 1.5 cups, 350 grams, 2 bowls",
+                      text: $amountText)
+                .textFieldStyle(.plain)
+                .font(AppFont.font(.title2))
+                .foregroundStyle(Color.ink)
+                .multilineTextAlignment(.center)
+                .autocorrectionDisabled(true)
+                .textInputAutocapitalization(.never)
+                .submitLabel(.done)
+                .onSubmit { if canConfirm { onConfirm(trimmed) } }
+                .focused($inputFocused)
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.md)
+                .background(
+                    RoundedRectangle(cornerRadius: AppRadius.md)
+                        .fill(Color.bgSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppRadius.md)
+                        .strokeBorder(Color.brand.opacity(0.4),
+                                      lineWidth: 1.5)
+                )
+                .padding(.horizontal, AppSpacing.lg)
+
+            Spacer(minLength: 0)
+
+            PrimaryButton(title: "Confirm",
+                          leadingSystemImage: "checkmark") {
+                guard canConfirm else { return }
+                onConfirm(trimmed)
+            }
+            .disabled(!canConfirm)
+            .opacity(canConfirm ? 1 : 0.5)
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.bottom, AppSpacing.xl)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.brandIvory.ignoresSafeArea())
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+        .onAppear {
+            // Tiny delay lets the sheet finish its present animation
+            // before the keyboard slides in — keeps the spring from
+            // fighting the keyboard's own animation.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                inputFocused = true
+            }
+        }
     }
 }
 

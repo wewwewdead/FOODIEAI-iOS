@@ -53,6 +53,28 @@ struct WeeklyRecap: Codable, Identifiable, Hashable {
         return f
     }()
 
+    init(id: UUID,
+         userId: UUID,
+         weekStart: Date,
+         weekEnd: Date,
+         coachName: String,
+         body: String,
+         headlineStat: String?,
+         topPattern: String?,
+         moodSummary: String?,
+         createdAt: Date) {
+        self.id = id
+        self.userId = userId
+        self.weekStart = weekStart
+        self.weekEnd = weekEnd
+        self.coachName = coachName
+        self.body = body
+        self.headlineStat = headlineStat
+        self.topPattern = topPattern
+        self.moodSummary = moodSummary
+        self.createdAt = createdAt
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id        = try c.decode(UUID.self,   forKey: .id)
