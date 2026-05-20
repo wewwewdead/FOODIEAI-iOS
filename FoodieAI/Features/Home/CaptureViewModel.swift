@@ -76,6 +76,16 @@ final class CaptureViewModel: ObservableObject {
 
     @Published private(set) var state: State = .idle
 
+    /// On-device pattern insight for the current analysis. Pure
+    /// enrichment — never overrides Gemini's macros, just describes
+    /// how this meal sits inside the user's history. Populated
+    /// immediately after `/analyze` returns (and after a quantity-
+    /// clarification refine) so the result UI can render the "Your
+    /// Pattern" card without re-running the service on every render.
+    /// Reset on every transition back to `.idle` so a stale insight
+    /// never leaks into a fresh capture.
+    @Published private(set) var patternInsight: FoodPatternInsight? = nil
+
     /// User-corrected food name from the inline edit affordance on the
     /// analyze result view. When set, overrides `response.analysis.food`
     /// at save time (pre-save edits) and is persisted via
@@ -198,6 +208,7 @@ final class CaptureViewModel: ObservableObject {
     private let analyzer: AnalyzeService
     private let imageService: FoodImageService
     private let logService: FoodLogService
+    private let patternInsightService = FoodPatternInsightService()
     /// Phase 16. Optional dependencies that feed coach context into
     /// `/analyze`. Both can fail or no-op without breaking the flow:
     /// the multipart body just omits the corresponding fields and the
@@ -287,6 +298,12 @@ final class CaptureViewModel: ObservableObject {
                     state = .clarifying(image, response, ambiguous)
                 } else {
                     Haptics.prepare() // warm the engine for the upcoming save tap
+                    // On-device pattern insight is enrichment only —
+                    // it never changes Gemini's calories/macros, which
+                    // stay the displayed source. Compute it before
+                    // flipping state so the result view's first render
+                    // carries the "Your Pattern" card.
+                    patternInsight = patternInsightService.insight(for: response)
                     state = .ready(image, response)
                 }
             } else {
@@ -412,6 +429,7 @@ final class CaptureViewModel: ObservableObject {
             #if DEBUG
             NSLog("[Clarify] compression FAILED; falling back to original response")
             #endif
+            patternInsight = patternInsightService.insight(for: originalResponse)
             state = .ready(image, originalResponse)
             return
         }
@@ -441,11 +459,14 @@ final class CaptureViewModel: ObservableObject {
             Haptics.prepare()
             // If the refine pass somehow lost food detection, prefer
             // the original — the user already saw it succeed once.
-            state = .ready(image, refined.analysis.hasFood ? refined : originalResponse)
+            let resolved = refined.analysis.hasFood ? refined : originalResponse
+            patternInsight = patternInsightService.insight(for: resolved)
+            state = .ready(image, resolved)
         } catch {
             #if DEBUG
             NSLog("[Clarify] refine FAILED, falling back to original: %@", "\(error)")
             #endif
+            patternInsight = patternInsightService.insight(for: originalResponse)
             state = .ready(image, originalResponse)
         }
     }
@@ -456,6 +477,7 @@ final class CaptureViewModel: ObservableObject {
     func acceptOriginalAnalysis() {
         guard case .clarifying(let image, let response, _) = state else { return }
         Haptics.prepare()
+        patternInsight = patternInsightService.insight(for: response)
         state = .ready(image, response)
     }
 
@@ -562,6 +584,21 @@ final class CaptureViewModel: ObservableObject {
             // first save of the day writes; subsequent saves on the
             // same local calendar day are a no-op.
             LoggingRhythmStore.shared.markToday()
+
+            // On-device belief update. Best-effort: the belief store
+            // is local and synchronous, but a future failure inside
+            // `update(from:)` must never propagate or back out the row
+            // that already landed in Supabase. The store itself logs
+            // in DEBUG on its own — we don't need a second catch here.
+            // Belief data is used only for pattern insights; it never
+            // mutates Gemini's response or the saved macros.
+            LocalNutritionBeliefStore.shared.update(from: inserted)
+
+            // Broadcast a "food log changed" event so the Mirror tab
+            // (and any future passive listener) can refresh without
+            // coupling to this call site. Posted only after a
+            // successful insert.
+            NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
 
             // Phase 17: increment the local saves counter (drives
             // permission-sheet timing) and suppress today's reminder
@@ -705,6 +742,14 @@ final class CaptureViewModel: ObservableObject {
     func recordMood(_ mood: FoodLog.Mood) async {
         guard case .moodPulse(_, _, let log) = state else { return }
         editedFoodName = nil
+        patternInsight = nil
+        // Late-bind the mood into the local belief so the next time
+        // this food is scanned, the "Your Pattern" mood note can
+        // reflect what the user actually felt. Idempotent within the
+        // same pulse — `recordMoodIfKnown` only updates the histogram.
+        LocalNutritionBeliefStore.shared.recordMoodIfKnown(
+            mood, for: log.foodName
+        )
         state = .idle
         do {
             _ = try await logService.setMood(mood, on: log.id)
@@ -724,6 +769,7 @@ final class CaptureViewModel: ObservableObject {
     func skipMoodPulse() {
         if case .moodPulse = state {
             editedFoodName = nil
+            patternInsight = nil
             state = .idle
         }
     }
@@ -740,6 +786,7 @@ final class CaptureViewModel: ObservableObject {
             NSLog("[Mood] pulse cancelled by background")
             #endif
             editedFoodName = nil
+            patternInsight = nil
             state = .idle
         default:
             break
@@ -751,6 +798,7 @@ final class CaptureViewModel: ObservableObject {
     /// can be re-presented from there.
     func resetToPick() {
         editedFoodName = nil
+        patternInsight = nil
         state = .idle
     }
 
@@ -758,6 +806,7 @@ final class CaptureViewModel: ObservableObject {
     /// in case the design diverges (e.g. cancel-without-resetting).
     func discardCurrent() {
         editedFoodName = nil
+        patternInsight = nil
         state = .idle
     }
 
@@ -841,6 +890,16 @@ final class CaptureViewModel: ObservableObject {
             // Retention polish — a re-log is still "the user logged
             // today," so it counts toward the local rhythm.
             LoggingRhythmStore.shared.markToday()
+            // Re-logs feed the belief store too — the user ate this
+            // again, so pattern signals (frequency, mood) reinforce.
+            // Macros stay exactly as the source row recorded them; no
+            // estimate adjustment ever happens here.
+            LocalNutritionBeliefStore.shared.update(from: inserted)
+
+            // Same broadcast as the analyzed-save path — a re-log
+            // adds a fresh `food_logs` row, so the Mirror tab should
+            // refresh next time it's on screen.
+            NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
         } catch {
             #if DEBUG
             NSLog("[Relog] FAILED for %@: %@",

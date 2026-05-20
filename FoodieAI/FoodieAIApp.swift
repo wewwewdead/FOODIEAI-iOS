@@ -391,8 +391,11 @@ struct MainTabView: View {
             TrackerView()
                 .tag(1)
                 .tabItem { Label("Tracker", systemImage: "list.bullet.rectangle") }
-            ProfileView()
+            FoodMirrorView()
                 .tag(2)
+                .tabItem { Label("Mirror", systemImage: "sparkles") }
+            ProfileView()
+                .tag(3)
                 .tabItem { Label("Profile", systemImage: "person.crop.circle") }
         }
         // brandDeep, not brand: SwiftUI's `.tint` cascades into system

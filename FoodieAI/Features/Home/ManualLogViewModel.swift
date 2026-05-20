@@ -143,7 +143,7 @@ final class ManualLogViewModel: ObservableObject {
             multiplierDesc = "\(Self.formatMultiplier(quantityMultiplier))× \(food.servingDesc)"
         }
 
-        return try await foodLogService.insertManual(
+        let inserted = try await foodLogService.insertManual(
             foodName:    food.name,
             servingDesc: multiplierDesc,
             calories:    totals.calories,
@@ -153,6 +153,10 @@ final class ManualLogViewModel: ObservableObject {
             fiberG:      totals.fiber,
             sugarG:      totals.sugar
         )
+        // Mirror tab listens for this and refreshes — same broadcast
+        // the analyzed-save and re-log paths fire.
+        NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
+        return inserted
     }
 
     func saveCustomEntry() async throws -> FoodLog {
@@ -163,7 +167,7 @@ final class ManualLogViewModel: ObservableObject {
             throw ManualLogError.missingCalories
         }
 
-        return try await foodLogService.insertManual(
+        let inserted = try await foodLogService.insertManual(
             foodName:    trimmed,
             servingDesc: "Custom entry",
             calories:    cals,
@@ -173,6 +177,8 @@ final class ManualLogViewModel: ObservableObject {
             fiberG:      Self.parseOptional(customFiber),
             sugarG:      Self.parseOptional(customSugar)
         )
+        NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
+        return inserted
     }
 
     /// "0.5" / "1.5" / "2" — drop trailing zeros so the serving

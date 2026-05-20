@@ -1,24 +1,21 @@
 import SwiftUI
 import UIKit
 
-/// Phase 14 redesign — magazine-style result page.
+/// Editorial magazine-style result page.
 ///
-/// Layout matches mockup-2-result.svg:
-///   1. ANALYSIS eyebrow centered (back chevron is provided by the
-///      surrounding nav, not rendered here)
-///   2. Photo card 4:3, radius-xl, shadow-card, with a bottom gradient
-///      overlay so the floating CoachBadge stays readable
-///   3. CoachBadge floating bottom-leading on the photo
-///   4. DETECTED eyebrow (brand) + food name in display2
-///   5. CALORIES eyebrow + HeroNumber 88pt + small ring (% of daily goal)
-///   6. MacroChip row: 3 chips visible + "+N more" tap-to-expand
-///   7. EditorialQuote for the coach advice
-///   8. Three CategoryAccordions for nutrients/benefits/drawbacks.
-///      Nutrients auto-expands on first appear after 0.5s for a moment
-///      of visual interest; the other two stay collapsed by default.
-///   9. PrimaryButton "Save to today" + Discard link, in-flow at the
-///      bottom (not pinned at the screen edge — this view is hosted in
-///      a ScrollView).
+/// Vertical zone flow (top to bottom):
+///   1. Title block — brand mark + "Meal analysis" eyebrow + headline
+///      food name (tap-to-edit) + optional repeat chip.
+///   2. Hero photo — full-width 4:3, radius-xl, card shadow. No
+///      callouts on the photo itself; the coach lives in zone 4.
+///   3. "By the numbers" — 3×2 macro grid (calories, carbs, sugar /
+///      protein, fat, fiber). Missing values render as "—".
+///   4. "From your coach" — EditorialQuote with the coach advice + a
+///      small inline reaction bubble underneath.
+///   5. "Insights" — three CategoryAccordions (nutrients / benefits /
+///      drawbacks) with the existing typewriter reveal.
+///   6. Save action — PrimaryButton + Discard link, in-flow at the
+///      bottom (this view is hosted in a ScrollView).
 ///
 /// The image is provided by the parent (`CaptureViewModel.state.image`)
 /// so we can render the user's photo without re-loading it from Storage.
@@ -45,10 +42,6 @@ struct AnalysisResultView: View {
     /// Default `.idle` keeps existing call sites silent until they
     /// opt in.
     var saveRewardPhase: SaveRewardPhase = .idle
-    /// Daily calorie goal used by the small progress arc next to the
-    /// hero number. Defaults to 2,000 — Tier 4 can wire this through to
-    /// the Profile model if desired.
-    var dailyCalorieGoal: Double = 2_000
     /// Optional pre-scan calorie status. When supplied, the result page
     /// shows a tiny day-aware line ("This still keeps you within today's
     /// goal." / etc.) computed from the *predicted* post-save total.
@@ -59,6 +52,13 @@ struct AnalysisResultView: View {
     /// shadows `analysis.food` in the detected block so the corrected
     /// name reads first. Nil = show what the AI returned.
     var foodNameOverride: String? = nil
+    /// On-device pattern insight. Pure enrichment — never overrides
+    /// Gemini's calories/macros. Renders a "Your Pattern" card below
+    /// the editorial quote when the user has prior observations for
+    /// this food; for first-time foods the card is suppressed
+    /// entirely (no empty placeholder) so a new meal looks identical
+    /// to the v1 result page.
+    var patternInsight: FoodPatternInsight? = nil
     /// Fired when the user commits an inline food-name edit. Trimmed,
     /// non-empty value. Parent threads this into the view model so it
     /// flows into `save()` (pre-save) or a `food_logs` row patch
@@ -67,7 +67,6 @@ struct AnalysisResultView: View {
     let onSave: () -> Void
     let onCancel: () -> Void
 
-    @State private var showingAllMacros: Bool = false
     /// Inline food-name edit. When true, the detected block swaps the
     /// title Text for a TextField focused on appear. `editedNameDraft`
     /// holds the in-progress value; commit trims and pushes through
@@ -103,25 +102,16 @@ struct AnalysisResultView: View {
     /// "last time" suffix instead.
     @State private var timeOfDayCluster: String? = nil
 
+    /// Display-resolution UIImage. The captured source can be up to
+    /// 2048pt long-edge JPEG; SwiftUI's `Image(uiImage:).resizable()` will
+    /// decode + rescale that on every redraw during scroll, which is the
+    /// largest source of jank on this screen. We downsample once on
+    /// appear to ~700pt long-edge (still retina-sharp at the hero size)
+    /// and render from this cache instead. Falls back to `image` until
+    /// the downsample lands so the screen never shows an empty card.
+    @State private var displayImage: UIImage? = nil
+
     private var analysis: GeminiAnalysis { response.analysis }
-
-    /// Six possible macros — the first three (carbs/sugar/protein) are
-    /// always shown; protein/fat/fiber move into the "+N more" expansion
-    /// only when present.
-    private var visibleMacros: [(label: String, value: Double, unit: String)] {
-        var ms: [(String, Double, String)] = []
-        ms.append(("CARBS",   analysis.carbs ?? 0, "g"))
-        ms.append(("SUGAR",   analysis.sugar ?? 0, "g"))
-        if let p = analysis.protein { ms.append(("PROTEIN", p, "g")) }
-        return ms
-    }
-
-    private var hiddenMacros: [(label: String, value: Double, unit: String)] {
-        var ms: [(String, Double, String)] = []
-        if let f = analysis.fat   { ms.append(("FAT",   f, "g")) }
-        if let f = analysis.fiber { ms.append(("FIBER", f, "g")) }
-        return ms
-    }
 
     /// Stable scroll target id used by `CaptureView`'s `ScrollViewReader`
     /// to focus the typewriter cascade once analyze succeeds. Always
@@ -130,24 +120,26 @@ struct AnalysisResultView: View {
     static let cascadeAnchorID = "analysisCascadeAnchor"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xl) {
-            eyebrowHeader
-            photoCard
-            detectedBlock
+        VStack(alignment: .leading, spacing: AppSpacing.xl2) {
+            // Zone 1 — editorial title block: brand mark, eyebrow,
+            // headline food name, repeat chip.
+            titleBlock
                 .opacity(cascadeOn ? 1 : 0)
                 .offset(y: cascadeOn ? 0 : 10)
-                .animation(cascadeAnim(delay: 0.15), value: cascadeOn)
-            heroBlock
-                .opacity(cascadeOn ? 1 : 0)
-                .offset(y: cascadeOn ? 0 : 10)
-                .animation(cascadeAnim(delay: 0.25), value: cascadeOn)
-            dayAwareImpactLine
-                .opacity(cascadeOn ? 1 : 0)
-                .animation(cascadeAnim(delay: 0.30), value: cascadeOn)
-            macroChipsRow
-                .opacity(cascadeOn ? 1 : 0)
-                .offset(y: cascadeOn ? 0 : 8)
-                .animation(cascadeAnim(delay: 0.35), value: cascadeOn)
+                .animation(cascadeAnim(delay: 0.10), value: cascadeOn)
+
+            // Zone 2 — annotated photo: centered hero photo with macro
+            // callouts arranged around its perimeter, each tethered by a
+            // dashed line and a small endpoint disc. Replaces the prior
+            // photo card + 3×2 grid pair.
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                sectionEyebrow("By the numbers")
+                annotatedPhotoBlock
+                dayAwareImpactLine
+            }
+            .opacity(cascadeOn ? 1 : 0)
+            .offset(y: cascadeOn ? 0 : 8)
+            .animation(cascadeAnim(delay: 0.20), value: cascadeOn)
 
             // Scroll anchor: CaptureView scrolls to this point when the
             // /analyze request returns, so the typewriter cascade fills
@@ -156,10 +148,54 @@ struct AnalysisResultView: View {
                 .frame(height: 0)
                 .id(Self.cascadeAnchorID)
 
-            quoteBlock
-            coachReactionBubble
-            accordions
+            // Zone 4 — "From your coach": editorial quote + reaction.
+            // Container fades up; the typewriter inside `EditorialQuote`
+            // continues to drive the text reveal on its own clock.
+            Group {
+                if let advice = analysis.coachAdvice, !advice.isEmpty {
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        sectionEyebrow("From your coach")
+                        quoteBlock
+                        coachReactionBubble
+                    }
+                } else if response.coach?.isEmpty == false {
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        sectionEyebrow("From your coach")
+                        coachReactionBubble
+                    }
+                }
+            }
+            .opacity(cascadeOn ? 1 : 0)
+            .offset(y: cascadeOn ? 0 : 8)
+            .animation(cascadeAnim(delay: 0.30), value: cascadeOn)
+
+            // Zone 4b — "Your Pattern": on-device insight card. Renders
+            // only when the user has enough priors for the current food
+            // to say something honest; otherwise the zone collapses to
+            // zero height (no empty placeholder).
+            yourPatternZone
+                .opacity(cascadeOn ? 1 : 0)
+                .offset(y: cascadeOn ? 0 : 8)
+                .animation(cascadeAnim(delay: 0.35), value: cascadeOn)
+
+            // Zone 5 — "Insights": the three category accordions.
+            // Container fades up; the per-accordion typewriter keeps its
+            // existing 0.5 / 0.7 / 0.9 staggered start delays.
+            if hasAnyInsights {
+                VStack(alignment: .leading, spacing: AppSpacing.md) {
+                    sectionEyebrow("Insights")
+                    accordions
+                }
+                .opacity(cascadeOn ? 1 : 0)
+                .offset(y: cascadeOn ? 0 : 8)
+                .animation(cascadeAnim(delay: 0.40), value: cascadeOn)
+            }
+
+            // Zone 6 — save action.
             saveBlock
+                .opacity(cascadeOn ? 1 : 0)
+                .offset(y: cascadeOn ? 0 : 8)
+                .animation(cascadeAnim(delay: 0.50), value: cascadeOn)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // Tap-outside-to-commit: while editing the food name, any tap
@@ -185,6 +221,63 @@ struct AnalysisResultView: View {
         }
         .task(id: analysis.food ?? "") {
             await loadPriorOccurrences()
+        }
+        // Downsample the captured image off-main exactly once per source
+        // image. Keyed off identity (object pointer + size) so a fresh
+        // analyze run replaces the cache cleanly. Scrolling never touches
+        // the JPEG decoder again — the smaller bitmap is what renders.
+        .task(id: imageIdentity) {
+            await downsampleSourceImageIfNeeded()
+        }
+    }
+
+    /// Stable identity for the source image so `.task(id:)` re-fires only
+    /// when the image itself changes, not on every re-render. UIImage is a
+    /// reference type, so `ObjectIdentifier` is sufficient; the size hash
+    /// is a belt-and-braces guard for cases where the parent passes a new
+    /// derivative with the same pointer.
+    private var imageIdentity: String {
+        guard let image else { return "nil" }
+        return "\(ObjectIdentifier(image).hashValue)-\(Int(image.size.width))x\(Int(image.size.height))"
+    }
+
+    /// Off-main downsample. Runs at user-initiated priority so it lands
+    /// before the eye notices the placeholder, and skips work entirely
+    /// when the source is already small enough.
+    @MainActor
+    private func downsampleSourceImageIfNeeded() async {
+        guard let source = image else { return }
+        let target = await Task.detached(priority: .userInitiated) {
+            Self.downsample(source, maxDimensionPt: 720)
+        }.value
+        // Bail if a newer task already populated `displayImage`.
+        guard displayImage !== target else { return }
+        displayImage = target
+    }
+
+    /// Renders a downscaled copy of `image` at `maxDimensionPt` * screen
+    /// scale. Opaque format keeps the bitmap small and avoids an alpha
+    /// channel we don't need (the rounded clip is applied by SwiftUI on
+    /// top). Returns the original when no downscale is needed.
+    private static func downsample(_ image: UIImage,
+                                   maxDimensionPt: CGFloat) -> UIImage {
+        let screenScale = UIScreen.main.scale
+        let maxPx = maxDimensionPt * screenScale
+        let widthPx = image.size.width * image.scale
+        let heightPx = image.size.height * image.scale
+        let longestPx = max(widthPx, heightPx)
+        guard longestPx > maxPx else { return image }
+        let downscale = maxPx / longestPx
+        let newSize = CGSize(
+            width: image.size.width * downscale,
+            height: image.size.height * downscale
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = screenScale
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
         }
     }
 
@@ -228,68 +321,321 @@ struct AnalysisResultView: View {
         }
     }
 
-    // MARK: - Eyebrow header
+    // MARK: - Section eyebrow helper
 
-    private var eyebrowHeader: some View {
-        Text("Analysis").eyebrow()
-            .foregroundStyle(Color.inkMute)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.top, AppSpacing.sm)
+    /// Editorial section eyebrow. Uses the existing `.eyebrow()` styling
+    /// (11pt Nunito ExtraBold, +2 tracking, uppercase) tinted brandDeep
+    /// so it reads as a magazine-style "kicker" above each zone.
+    private func sectionEyebrow(_ text: String) -> some View {
+        Text(text).eyebrow()
+            .foregroundStyle(Color.brandDeep)
     }
 
-    // MARK: - Photo card
+    // MARK: - Zone 1 — title block
 
-    @ViewBuilder
-    private var photoCard: some View {
-        ZStack(alignment: .bottomLeading) {
-            RoundedRectangle(cornerRadius: AppRadius.xl)
-                .fill(Color.bgSurfaceSoft)
-
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                // Image-shaped placeholder — happens when the parent
-                // doesn't have the source image (e.g., reopening from
-                // a saved meal). Subtle, doesn't apologize.
-                Image(systemName: "photo")
-                    .font(.system(size: 36, weight: .regular))
-                    .foregroundStyle(Color.inkLight)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    /// Editorial title: small brand-tinted mark on the leading edge,
+    /// uppercase "Meal analysis" eyebrow, then the headline food name
+    /// (with tap-to-edit + repeat chip beneath).
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            HStack(spacing: AppSpacing.sm) {
+                ZStack {
+                    Circle()
+                        .fill(Color.brand)
+                        .frame(width: 32, height: 32)
+                    Image(systemName: "leaf.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.brandDeep)
+                }
+                Text("Meal analysis").eyebrow()
+                    .foregroundStyle(Color.brandDeep)
+                    .tracking(2.4)
+                Spacer(minLength: 0)
             }
-
-            // Bottom-edge gradient so the floating badge stays readable
-            // when the photo's bottom is bright. Lifted from the mockup
-            // (mockup-2-result.svg #photoOverlay).
-            LinearGradient(
-                colors: [
-                    Color.ink.opacity(0),
-                    Color.ink.opacity(0.45)
-                ],
-                startPoint: .top, endPoint: .bottom
-            )
-
-            // Floating coach badge
-            if let coach = response.coach, !coach.isEmpty {
-                CoachBadge(name: coach)
-                    .padding(AppSpacing.md)
-            }
-        }
-        .aspectRatio(4/3, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl))
-        .appShadow(.shadowCard)
-    }
-
-    // MARK: - Detected block
-
-    private var detectedBlock: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text("Detected").eyebrow()
-                .foregroundStyle(Color.brand)
             editableFoodName
             repeatChip
         }
+    }
+
+    // MARK: - Your Pattern zone
+
+    /// Standalone card that summarizes how this meal fits inside the
+    /// user's history. NEVER claims to adjust Gemini — both the copy
+    /// and the data model are insight-only. Hidden when the insight
+    /// has no content (e.g. a brand-new food, or one that doesn't
+    /// have enough priors to compare yet).
+    @ViewBuilder
+    private var yourPatternZone: some View {
+        if let insight = patternInsight, insight.hasAnyContent {
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                sectionEyebrow("Your Pattern")
+                YourPatternCard(insight: insight)
+            }
+        }
+    }
+
+    // MARK: - Zone 2 — annotated hero photo
+
+    /// Hero photo at the center of an editorial-infographic block. The
+    /// photo renders at ~55% of the available width in a 4:5 portrait
+    /// frame; six macro callouts sit in the ~22.5% gutters on each side
+    /// (3 on left, 3 on right) connected to the photo's edge by dashed
+    /// tethers ending in a small filled disc.
+    ///
+    /// Geometry is fully proportional off the container width, so the
+    /// block scales cleanly across iPhone widths without hand-tuning.
+    /// `GeometryReader` is wrapped in an outer container of exactly the
+    /// same height as the photo, so the block participates in vertical
+    /// flow rather than collapsing to zero / overlapping siblings.
+    @ViewBuilder
+    private var annotatedPhotoBlock: some View {
+        // Layout constants. Photo is portrait (4:5) to give vertical
+        // breathing room for the side callouts; the side gutters get
+        // ~22.5% each, leaving 55% center for the photo.
+        let photoAspectH: CGFloat = 1.25   // height = width * 1.25 (4:5)
+        let photoFraction: CGFloat = 0.55
+        let sideFraction: CGFloat = 0.225
+
+        GeometryReader { geo in
+            let totalWidth = geo.size.width
+            let sideRegionWidth = totalWidth * sideFraction
+            let photoWidth = totalWidth * photoFraction
+            let photoHeight = photoWidth * photoAspectH
+            let photoLeading = sideRegionWidth
+            let photoTrailing = sideRegionWidth + photoWidth
+
+            // Vertical anchor positions for the three rows of callouts,
+            // expressed as fractions of photoHeight.
+            let rowYs: [CGFloat] = [0.15, 0.50, 0.85]
+
+            ZStack(alignment: .topLeading) {
+                // --- Photo ---
+                // `compositingGroup` + `drawingGroup` rasterizes the
+                // clipped image + hairline border + card shadow into a
+                // single GPU texture. Without this the shadow recomputes
+                // on every scroll frame and the JPEG re-samples through
+                // the rounded clip mask each pass — the prior version's
+                // top jank source.
+                photoView
+                    .frame(width: photoWidth, height: photoHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: AppRadius.lg))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppRadius.lg)
+                            .strokeBorder(Color.borderHairline, lineWidth: 0.5)
+                    )
+                    .compositingGroup()
+                    .appShadow(.shadowCard)
+                    .drawingGroup(opaque: false)
+                    .offset(x: photoLeading, y: 0)
+
+                // --- Connector lines + endpoint discs ---
+                // A single `Canvas` draws all 12 strokes / fills in one
+                // GPU pass instead of 12 separate SwiftUI shape views.
+                // The Canvas itself is wrapped in drawingGroup so the
+                // result is cached as a texture across scroll frames.
+                connectorLines(
+                    photoLeading: photoLeading,
+                    photoTrailing: photoTrailing,
+                    photoHeight: photoHeight,
+                    sideRegionWidth: sideRegionWidth,
+                    rowYs: rowYs,
+                    canvasSize: CGSize(width: totalWidth,
+                                       height: photoHeight)
+                )
+
+                // --- Left callouts: CALORIES, CARBS, PROTEIN ---
+                ForEach(Array(leftCallouts.enumerated()), id: \.offset) { idx, c in
+                    calloutLabel(c, isLeftSide: true)
+                        .frame(width: max(sideRegionWidth - 14, 0),
+                               alignment: .trailing)
+                        .offset(x: 0,
+                                y: photoHeight * rowYs[idx] - calloutHalfHeight)
+                }
+
+                // --- Right callouts: SUGAR, FAT, FIBER ---
+                ForEach(Array(rightCallouts.enumerated()), id: \.offset) { idx, c in
+                    calloutLabel(c, isLeftSide: false)
+                        .frame(width: max(sideRegionWidth - 14, 0),
+                               alignment: .leading)
+                        .offset(x: photoTrailing + 14,
+                                y: photoHeight * rowYs[idx] - calloutHalfHeight)
+                }
+            }
+            .frame(width: totalWidth, height: photoHeight, alignment: .topLeading)
+        }
+        // Reserve vertical space proportional to the parent width.
+        // Without this, GeometryReader collapses and the block would
+        // overlap neighbouring zones. Aspect = photoFraction * 1.25.
+        .aspectRatio(1.0 / (photoFraction * photoAspectH), contentMode: .fit)
+    }
+
+    /// Approximate half-height of a callout's two-line text stack, used
+    /// to vertically center the label on its row anchor. Empirically
+    /// matches a 12pt eyebrow + 20pt value at default Dynamic Type — a
+    /// pixel-perfect computation would require a measured geometry pass,
+    /// which isn't worth the complexity for a decorative block.
+    private var calloutHalfHeight: CGFloat { 22 }
+
+    /// Photo content — prefers the downsampled bitmap cached on first
+    /// appear so scrolling never re-decodes the full-resolution capture.
+    /// Falls back to the source image until the downsample lands, then to
+    /// a placeholder when nothing was passed in. `.interpolation(.medium)`
+    /// keeps the resampling cost predictable; combined with the upstream
+    /// `drawingGroup`, the photo renders once and then just translates
+    /// during scroll.
+    @ViewBuilder
+    private var photoView: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.bgSurfaceSoft)
+
+            if let shown = displayImage ?? image {
+                Image(uiImage: shown)
+                    .resizable()
+                    .interpolation(.medium)
+                    .antialiased(true)
+                    .scaledToFill()
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 32, weight: .regular))
+                    .foregroundStyle(Color.inkLight)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    /// A single macro callout's data, used for left/right ForEach loops.
+    private struct MacroCallout {
+        let eyebrow: String
+        let value: Double?
+        let unit: String
+    }
+
+    private var leftCallouts: [MacroCallout] {
+        [
+            .init(eyebrow: "CALORIES", value: analysis.calories, unit: "kcal"),
+            .init(eyebrow: "CARBS",    value: analysis.carbs,    unit: "g"),
+            .init(eyebrow: "PROTEIN",  value: analysis.protein,  unit: "g"),
+        ]
+    }
+
+    private var rightCallouts: [MacroCallout] {
+        [
+            .init(eyebrow: "SUGAR", value: analysis.sugar, unit: "g"),
+            .init(eyebrow: "FAT",   value: analysis.fat,   unit: "g"),
+            .init(eyebrow: "FIBER", value: analysis.fiber, unit: "g"),
+        ]
+    }
+
+    /// Two-line label. Left-side labels flush right toward the photo;
+    /// right-side labels flush left toward the photo. Missing macros
+    /// render as an em-dash (Phase 21.9 contract) so the layout shape
+    /// stays stable regardless of which fields came back.
+    private func calloutLabel(_ c: MacroCallout,
+                              isLeftSide: Bool) -> some View {
+        let alignment: HorizontalAlignment = isLeftSide ? .trailing : .leading
+        let baseline: HorizontalAlignment = isLeftSide ? .trailing : .leading
+
+        return VStack(alignment: alignment, spacing: 2) {
+            Text(c.eyebrow)
+                .appFont(.labelEyebrow)
+                .foregroundStyle(Color.brandDeep)
+                .tracking(1.6)
+
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                if let v = c.value, v.isFinite {
+                    Text(formatMacro(v, isCalories: c.unit == "kcal"))
+                        .appFont(.title2)
+                        .foregroundStyle(Color.ink)
+                } else {
+                    Text("—")
+                        .appFont(.title2)
+                        .foregroundStyle(Color.inkLight)
+                }
+                Text(c.unit)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+            }
+            .frame(maxWidth: .infinity, alignment: Alignment(horizontal: baseline, vertical: .center))
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            c.value.map { "\(c.eyebrow) \(Int($0.rounded())) \(c.unit)" }
+                ?? "\(c.eyebrow) not available"
+        )
+    }
+
+    /// Six dashed tethers + endpoint discs drawn into a single `Canvas`
+    /// so the whole tether layer is one GPU pass — replaces the prior
+    /// implementation that spawned 12 individual shape views (each with
+    /// its own animation/layout participation). Combined with the outer
+    /// `drawingGroup`, the layer rasterizes once and just translates
+    /// during scroll, eliminating per-frame shape stroking.
+    private func connectorLines(photoLeading: CGFloat,
+                                photoTrailing: CGFloat,
+                                photoHeight: CGFloat,
+                                sideRegionWidth: CGFloat,
+                                rowYs: [CGFloat],
+                                canvasSize: CGSize) -> some View {
+        let discRadius: CGFloat = 3
+        let dashStyle = StrokeStyle(lineWidth: 1, lineCap: .round, dash: [3, 3])
+        // Snapshot Canvas-resolved color once; closure captures by value.
+        let brand = Color.brand
+
+        return Canvas(opaque: false, rendersAsynchronously: false) { ctx, _ in
+            var tethers = Path()
+            var discs = Path()
+            for y0 in rowYs {
+                let y = photoHeight * y0
+                // Left tether.
+                tethers.move(to: CGPoint(x: sideRegionWidth - 6, y: y))
+                tethers.addLine(to: CGPoint(x: photoLeading + 4, y: y))
+                discs.addEllipse(in: CGRect(
+                    x: photoLeading + 4 - discRadius,
+                    y: y - discRadius,
+                    width: discRadius * 2,
+                    height: discRadius * 2
+                ))
+                // Right tether.
+                let rightEnd = photoTrailing + sideRegionWidth - 6
+                tethers.move(to: CGPoint(x: photoTrailing - 4, y: y))
+                tethers.addLine(to: CGPoint(x: rightEnd, y: y))
+                discs.addEllipse(in: CGRect(
+                    x: photoTrailing - 4 - discRadius,
+                    y: y - discRadius,
+                    width: discRadius * 2,
+                    height: discRadius * 2
+                ))
+            }
+            ctx.stroke(tethers, with: .color(brand), style: dashStyle)
+            ctx.fill(discs, with: .color(brand))
+        }
+        .frame(width: canvasSize.width, height: canvasSize.height)
+        .drawingGroup(opaque: false)
+        .allowsHitTesting(false)
+    }
+
+    /// Number formatter for callout values. Calories get an integer with
+    /// a thousands separator ("1,050") at four-digit territory; macros
+    /// render as integer when whole, one-decimal when fractional. Mirrors
+    /// the formatting policy on the prior macro grid so saved totals
+    /// elsewhere in the app read identically.
+    private func formatMacro(_ value: Double, isCalories: Bool) -> String {
+        if isCalories {
+            if value >= 1000 {
+                return NumberFormatter.localizedString(
+                    from: NSNumber(value: Int(value.rounded())),
+                    number: .decimal
+                )
+            }
+            return "\(Int(value.rounded()))"
+        }
+        if value.truncatingRemainder(dividingBy: 1) == 0 {
+            return "\(Int(value))"
+        }
+        return String(format: "%.1f", value)
     }
 
     /// Displayed food name = correction (if any) → AI value → "Unknown".
@@ -707,25 +1053,6 @@ struct AnalysisResultView: View {
         return f
     }()
 
-    // MARK: - Hero number + small progress arc
-
-    private var heroBlock: some View {
-        let calories = analysis.calories ?? 0
-        let pct = dailyCalorieGoal > 0
-            ? min(max(calories / dailyCalorieGoal, 0), 1)
-            : 0
-
-        return HStack(alignment: .center, spacing: AppSpacing.lg) {
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                Text("Calories").eyebrow()
-                    .foregroundStyle(Color.inkMute)
-                HeroNumber.RawDigits(value: calories)
-            }
-            Spacer(minLength: 0)
-            DailyGoalArc(percentage: pct)
-        }
-    }
-
     // MARK: - Day-aware impact line
 
     /// Tiny inline line under the calorie hero. Folds the just-analyzed
@@ -767,34 +1094,15 @@ struct AnalysisResultView: View {
         return "This would still keep you within today's goal."
     }
 
-    // MARK: - Macro chips row
+    // MARK: - Zone 5 — insights helper
 
-    @ViewBuilder
-    private var macroChipsRow: some View {
-        let allHiddenCount = hiddenMacros.count
-
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: AppSpacing.sm) {
-                ForEach(visibleMacros, id: \.label) { m in
-                    MacroChip(label: m.label, value: m.value, unit: m.unit)
-                }
-                if showingAllMacros {
-                    ForEach(hiddenMacros, id: \.label) { m in
-                        MacroChip(label: m.label, value: m.value, unit: m.unit)
-                    }
-                } else if allHiddenCount > 0 {
-                    Button {
-                        Haptics.tap()
-                        withAnimation(.motionReveal) {
-                            showingAllMacros = true
-                        }
-                    } label: {
-                        MacroChip.more(count: allHiddenCount)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
+    /// True when at least one accordion has content. Drives whether the
+    /// "Insights" section eyebrow renders at all — an empty section with
+    /// only a kicker reads as a layout glitch.
+    private var hasAnyInsights: Bool {
+        !(analysis.nutrients ?? []).isEmpty
+            || !(analysis.benefits  ?? []).isEmpty
+            || !(analysis.drawbacks ?? []).isEmpty
     }
 
     // MARK: - Coach reaction bubble
@@ -904,111 +1212,6 @@ struct AnalysisResultView: View {
             .opacity(isSaving ? 0.4 : 1)
         }
         .padding(.top, AppSpacing.md)
-    }
-}
-
-// MARK: - Hero raw-digits sub-view
-
-extension HeroNumber {
-    /// Inline raw-digit treatment for places where the parent already
-    /// provides the eyebrow label (e.g., `AnalysisResultView.heroBlock`
-    /// where the eyebrow leads the row before the number itself).
-    /// Renders the 88pt M PLUS Black number with -3 kerning, count-up,
-    /// `.motionHero` animation. No surrounding label or unit text.
-    struct RawDigits: View {
-        let value: Double
-        @State private var displayed: Double = 0
-        @State private var didAppear: Bool = false
-
-        var body: some View {
-            Text("\(Int(displayed.rounded()))")
-                .monospacedDigit()
-                .font(.custom(AppFont.PS.mplusBlack, size: 88))
-                .kerning(-3)
-                .foregroundStyle(Color.ink)
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .contentTransition(.numericText(value: displayed))
-                .onAppear {
-                    guard !didAppear else { return }
-                    didAppear = true
-                    withAnimation(.motionHero) {
-                        displayed = value
-                    }
-                }
-                .onChange(of: value) { _, newValue in
-                    withAnimation(.motionBase) {
-                        displayed = newValue
-                    }
-                }
-                .accessibilityLabel("\(Int(value.rounded())) calories")
-        }
-    }
-}
-
-// MARK: - Daily-goal arc
-
-/// Small ring next to the hero number — shows the percentage of the
-/// daily calorie goal this meal contributes. 68×68 outer, 6pt stroke.
-/// Background hairline + brand-tinted progress arc with `.round` ends.
-private struct DailyGoalArc: View {
-    let percentage: Double
-
-    @State private var arc: Double = 0
-
-    private var pctLabel: String {
-        "\(Int(round(percentage * 100)))%"
-    }
-
-    var body: some View {
-        ZStack {
-            Canvas { context, size in
-                let lineWidth: CGFloat = 6
-                let center = CGPoint(x: size.width / 2, y: size.height / 2)
-                let radius = (min(size.width, size.height) - lineWidth) / 2
-
-                var bg = Path()
-                bg.addArc(center: center, radius: radius,
-                          startAngle: .degrees(0), endAngle: .degrees(360),
-                          clockwise: false)
-                context.stroke(
-                    bg, with: .color(.borderHairline),
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                )
-
-                guard arc > 0 else { return }
-                var fg = Path()
-                fg.addArc(center: center, radius: radius,
-                          startAngle: .degrees(-90),
-                          endAngle: .degrees(-90 + 360 * arc),
-                          clockwise: false)
-                context.stroke(
-                    fg, with: .color(.brand),
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                )
-            }
-
-            VStack(spacing: 0) {
-                Text(pctLabel)
-                    .appFont(.captionStrong)
-                    .foregroundStyle(Color.ink)
-                Text("of goal")
-                    .font(.custom(AppFont.PS.nunitoBold, size: 9))
-                    .foregroundStyle(Color.inkLight)
-            }
-        }
-        .frame(width: 68, height: 68)
-        .onAppear {
-            withAnimation(.motionReveal) {
-                arc = percentage
-            }
-        }
-        .onChange(of: percentage) { _, new in
-            withAnimation(.motionReveal) {
-                arc = new
-            }
-        }
-        .accessibilityLabel("\(pctLabel) of daily calorie goal")
     }
 }
 
@@ -1170,6 +1373,140 @@ private struct RepeatChip: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)
+    }
+}
+
+// MARK: - Your Pattern card
+
+/// Multi-line card surfacing local pattern insights — never an
+/// adjusted estimate. Each row is a bullet-style line describing how
+/// this meal compares to the user's history; the underlying
+/// `FoodPatternInsight` decides which lines exist. Card hides itself
+/// entirely when no insight can be drawn (`hasAnyContent == false`),
+/// so a first-time food never sees an empty stub.
+///
+/// Visual register: a soft brand-tinted card with a hairline border
+/// and the "Your Pattern" section eyebrow rendered by the parent
+/// (Zone 4b in `AnalysisResultView`). The card body owns:
+///   - header row: similar-meal count + confidence dot
+///   - bullet rows: user-average / typical-meal / repeated / mood
+///
+/// Tap target is non-interactive on purpose — pattern is enrichment;
+/// it doesn't gate any new flow.
+private struct YourPatternCard: View {
+    let insight: FoodPatternInsight
+
+    @State private var revealed: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var confidenceLabel: String { insight.confidence.label }
+
+    /// Tone the confidence dot to match the label so the card stays
+    /// honest about how much weight the user should place on it.
+    private var confidenceDotColor: Color {
+        switch insight.confidence {
+        case .low:    return Color.inkLight
+        case .medium: return Color.brand
+        case .high:   return Color.brandDeep
+        }
+    }
+
+    /// Mirror copy used by the header — pluralizes correctly for
+    /// 1 vs. N priors. `similarMealCount` already excludes the
+    /// current scan (we count before save).
+    private var headerCopy: String {
+        let n = insight.similarMealCount
+        if n <= 1 { return "1 similar meal so far" }
+        return "\(n) similar meals so far"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            header
+            bulletLines
+        }
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.brandSoft.opacity(0.55))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.brand.opacity(0.35), lineWidth: 1)
+        )
+        .opacity(revealed ? 1 : 0)
+        .offset(y: revealed || reduceMotion ? 0 : 6)
+        .onAppear {
+            guard !revealed else { return }
+            let anim: Animation = reduceMotion ? .appReduced : .motionReveal
+            withAnimation(anim.delay(0.5)) {
+                revealed = true
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityCopy)
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chart.bar.doc.horizontal")
+                .font(.system(size: 12, weight: .bold))
+            Text(headerCopy)
+                .appFont(.captionStrong)
+            Spacer(minLength: 4)
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(confidenceDotColor)
+                    .frame(width: 6, height: 6)
+                Text(confidenceLabel)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+            }
+        }
+        .foregroundStyle(Color.brandDeep)
+    }
+
+    @ViewBuilder
+    private var bulletLines: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let line = insight.comparisonToUserAverage?.copy {
+                bullet(line)
+            }
+            if let line = insight.comparisonToTypicalMeal?.copy {
+                bullet(line)
+            }
+            if let line = insight.repeatedFoodNote {
+                bullet(line)
+            }
+            if let line = insight.moodNote {
+                bullet(line)
+            }
+        }
+    }
+
+    private func bullet(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(Color.brand)
+                .frame(width: 4, height: 4)
+                .padding(.top, 7)
+            Text(text)
+                .appFont(.caption)
+                .foregroundStyle(Color.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+        }
+    }
+
+    private var accessibilityCopy: String {
+        var parts: [String] = ["Your pattern card, \(confidenceLabel) confidence", headerCopy]
+        if let s = insight.comparisonToUserAverage?.copy { parts.append(s) }
+        if let s = insight.comparisonToTypicalMeal?.copy { parts.append(s) }
+        if let s = insight.repeatedFoodNote { parts.append(s) }
+        if let s = insight.moodNote { parts.append(s) }
+        return parts.joined(separator: ". ")
     }
 }
 

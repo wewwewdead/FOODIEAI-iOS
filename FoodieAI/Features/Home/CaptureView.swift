@@ -100,6 +100,10 @@ struct CaptureView: View {
     /// line ("First check-in logged.") and the personalized empty state
     /// updates when the user crosses midnight without restarting the app.
     @StateObject private var rhythmStore = LoggingRhythmStore.shared
+    /// Small "Food Mirror is learning" preview shown below the daily
+    /// check-in card. Hidden when no message resolves. Refreshes on
+    /// Home appearance and after `.foodLogDidChange` posts.
+    @StateObject private var mirrorPreview = HomeMirrorPreviewViewModel()
 
     /// Phase 21 — manual log sheet presentation flag.
     @State private var showingManualLog: Bool = false
@@ -576,8 +580,13 @@ struct CaptureView: View {
             isPresented: $showingQuestActionSheet,
             titleVisibility: .visible
         ) {
-            Button("Take Photo") {
-                requestScan()
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button("Take Photo") {
+                    requestScan()
+                }
+            }
+            Button("Choose from Library") {
+                presentLibraryPicker()
             }
             Button("Log Without Photo") {
                 showingManualLog = true
@@ -591,11 +600,24 @@ struct CaptureView: View {
         // on failure.
         .task {
             await viewModel.loadQuest()
+            // Refresh the Home Mirror preview alongside the daily
+            // quest load. Both are fire-and-forget; failures resolve
+            // to a silent hide rather than an error UI.
+            await mirrorPreview.refresh()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await viewModel.loadQuest() }
+                Task { await mirrorPreview.refresh() }
             }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .foodLogDidChange)
+        ) { _ in
+            // Mirror tab listens to the same event; Home does the
+            // same so the preview card stays in sync after a save
+            // without the user having to leave Home.
+            Task { await mirrorPreview.refresh() }
         }
         // Phase 21.11 — quest-completion celebration modal. Sits on
         // top of all main Home content (zIndex pushes it above the
@@ -645,6 +667,11 @@ struct CaptureView: View {
     /// reward + free-tier scan nudge.
     private func handleManualLogSaved(_ inserted: FoodLog) {
         LoggingRhythmStore.shared.markToday()
+        // Manual logs (database picks + custom entries) feed the same
+        // on-device belief store as the photo flow, so the next time
+        // the user scans the same dish the personalization chip can
+        // light up from the typed entries too.
+        LocalNutritionBeliefStore.shared.update(from: inserted)
 
         // Streak + quest in a detached Task so the toast renders
         // immediately. The quest evaluator's result drives the
@@ -776,15 +803,37 @@ struct CaptureView: View {
         }
         .padding(.top, AppSpacing.xl2) // 48pt breathing room
 
-        // Phase 21.5 — daily quest card. Sits between hero copy and
-        // the daily check-in / photo card so the user sees the
-        // suggested action right after orientation. Tappable: opens
-        // the action sheet that routes to Scan or Manual Log.
-        //
-        // Phase 21.12 — gated on `profile.healthyChoicesEnabled`.
-        // When the user has disabled the Healthy Choice toggle in
-        // Profile → Preferences, the card disappears entirely (not
-        // just dimmed) so Home stays quiet for users who want it.
+        // Photo card sits directly under the hero so a first-time
+        // user sees the scan affordance within the first viewport —
+        // no scrolling past secondary cards to find the primary
+        // action. The pinned bottom "Take a photo" CTA mirrors it.
+        photoCard
+            .padding(.top, AppSpacing.xl)
+
+        if viewModel.state.isIdle {
+            // First-time activation hint sits closest to the photo
+            // card so the encouragement lands where the user is
+            // looking. Drops out after the first save (rhythm store
+            // flips totalLoggedDays to 1).
+            if rhythmStore.rhythm().totalLoggedDays == 0 {
+                firstScanActivationHint
+                    .padding(.top, AppSpacing.md)
+                    .frame(maxWidth: .infinity)
+                    .transition(.opacity)
+            }
+
+            // Quick re-log link — secondary path for returning users.
+            // Quiet text link; visually subordinate to the photo card
+            // and pinned CTA.
+            quickRelogLink
+                .padding(.top, AppSpacing.sm)
+                .frame(maxWidth: .infinity)
+                .transition(.opacity)
+        }
+
+        // Phase 21.5 — daily quest card. Now lives below the primary
+        // scan surface so it never crowds the photo card. Gated on
+        // `profile.healthyChoicesEnabled` (Phase 21.12).
         if viewModel.state.isIdle,
            let quest = viewModel.dailyQuest,
            profileStore.profile?.healthyChoicesEnabled ?? true {
@@ -797,26 +846,11 @@ struct CaptureView: View {
                     showingQuestActionSheet = true
                 }
             )
-            .padding(.top, AppSpacing.lg)
+            .padding(.top, AppSpacing.xl)
             .transition(.opacity)
-            // Phase 21.10's 1.2s self-clear timer was removed in
-            // Phase 21.11 — the celebration modal (overlaid below)
-            // now owns the trigger's lifecycle. It auto-dismisses
-            // after ~2.5s or on tap, then nils
-            // `viewModel.justCompletedQuest` itself via its
-            // `onDismiss`. The in-place card morph still fires
-            // because the card observes the same trigger, and its
-            // own animation is short enough to finish before the
-            // modal goes away.
         }
 
-        // Daily Check-in / Today Pulse — combined card. Renders the
-        // daily check-in line (count-aware, deterministic, non-shaming)
-        // as the primary copy, plus an optional calorie sub-line when
-        // the user has a valid daily goal, plus an end-of-day return
-        // hook after 20:00 once at least one meal is logged. Reads
-        // entirely from caches populated by the same `.task` that
-        // feeds the scan-warning dialog — no extra polling/timers.
+        // Daily Check-in line. Count-aware, deterministic.
         if viewModel.state.isIdle, let count = cachedTodayMealCount {
             DailyCheckInCard(
                 mealCount: count,
@@ -824,52 +858,19 @@ struct CaptureView: View {
                 status: cachedCalorieStatus,
                 now: Date()
             )
-            .padding(.top, AppSpacing.lg)
+            .padding(.top, AppSpacing.md)
             .transition(.opacity)
         }
 
-        // Photo card (always 354 wide-ish via maxWidth; aspect-ratio 1)
-        photoCard
-            .padding(.top, AppSpacing.xl2)
-
-        // Subtle hint chip
-        if viewModel.state.isIdle {
-            hintChip
-                .padding(.top, AppSpacing.lg)
-                .frame(maxWidth: .infinity)
-                .transition(.opacity)
-
-            // First-time activation hint. Surfaces only for users whose
-            // local rhythm store has never recorded a save — i.e. lifetime
-            // empty. `markToday()` on first successful save flips
-            // `totalLoggedDays` to 1 and this element drops out naturally
-            // (no dismissal state required).
-            if rhythmStore.rhythm().totalLoggedDays == 0 {
-                firstScanActivationHint
-                    .padding(.top, AppSpacing.sm)
-                    .frame(maxWidth: .infinity)
-                    .transition(.opacity)
+        // Food Mirror preview — lives below the scan surface so it
+        // never competes with "Take a photo". Reads as a calm,
+        // tappable side-glance rather than a primary action.
+        if viewModel.state.isIdle, let preview = mirrorPreview.cardModel {
+            HomeMirrorPreviewCard(model: preview) {
+                notifRouter.requestTab(2)
             }
-
-            // Phase 15 — secondary affordance under the photo card so the
-            // re-log path is visible without competing with the primary
-            // CTA. Only shown in idle state; once a photo is picked the
-            // user is committed to the analyze flow.
-            quickRelogLink
-                .padding(.top, AppSpacing.md)
-                .frame(maxWidth: .infinity)
-                .transition(.opacity)
-
-            // Quick-log favorite shortcut. Visible only when the user
-            // has at least one hearted meal — otherwise the link points
-            // to an empty list. Reuses RecentMealsSheet's data path so
-            // there's no new fetch.
-            if !favoritesStore.favorites.isEmpty {
-                quickFavoriteLink
-                    .padding(.top, 4)
-                    .frame(maxWidth: .infinity)
-                    .transition(.opacity)
-            }
+            .padding(.top, AppSpacing.md)
+            .transition(.opacity)
         }
 
         // Analyze status / errors hover here while a request is in flight
@@ -1070,12 +1071,12 @@ struct CaptureView: View {
     /// first save; this view drops out on the next render — no dismissal
     /// flag needed.
     private var firstScanActivationHint: some View {
-        Text("Your first scan builds today's pulse.")
+        Text("Your first photo starts the picture.")
             .appFont(.caption)
             .foregroundStyle(Color.brandDeep)
             .multilineTextAlignment(.center)
             .fixedSize(horizontal: false, vertical: true)
-            .accessibilityLabel("Tip: your first scan builds today's pulse.")
+            .accessibilityLabel("Tip: your first photo starts the picture.")
     }
 
     @ViewBuilder
@@ -1151,6 +1152,7 @@ struct CaptureView: View {
                     // analyzed calories into.
                     dailyStatus: cachedCalorieStatus,
                     foodNameOverride: viewModel.editedFoodName,
+                    patternInsight: viewModel.patternInsight,
                     onFoodNameEdited: { name in
                         viewModel.applyFoodNameEdit(name)
                     },
