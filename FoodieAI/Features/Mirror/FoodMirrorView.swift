@@ -37,6 +37,14 @@ struct FoodMirrorView: View {
     /// feedback chips. Pauses auto-advance so they can sit on that
     /// card and read the confirmation; resets on manual page change.
     @State private var storyPaused: Bool = false
+    /// Namespace for the album → expanded-card matchedGeometryEffect
+    /// transition. Declared once on the view so both the thumbnail
+    /// and the overlay can attach to the same identifier.
+    @Namespace private var albumNamespace
+    /// Which page (if any) the user has expanded out of the album
+    /// grid. nil means the album is showing its thumbnail grid; a
+    /// non-nil value shows that page full-size as an overlay.
+    @State private var expandedCard: StoryPageKind? = nil
     /// Drives the per-tick auto-advance loop. Subscribed via
     /// `.onReceive` in body so SwiftUI tears it down with the view.
     private var storyTicker: Publishers.Autoconnect<Timer.TimerPublisher> {
@@ -506,6 +514,10 @@ struct FoodMirrorView: View {
         case moodInsight
         case timingInsight
         case suggestedExperiment
+        /// Terminal recap grid appended after the last content page
+        /// when the story has more than one card. Lets the user
+        /// revisit any card via a tappable thumbnail grid.
+        case album
         var id: String { rawValue }
     }
 
@@ -529,6 +541,10 @@ struct FoodMirrorView: View {
         if summary.moodInsight         != nil { pages.append(.moodInsight) }
         if summary.timingInsight       != nil { pages.append(.timingInsight) }
         if summary.suggestedExperiment != nil { pages.append(.suggestedExperiment) }
+        // Append the album as a terminal page when there's more
+        // than one content card to revisit. A single-card story
+        // doesn't need a recap grid.
+        if pages.count > 1 { pages.append(.album) }
         return pages
     }
 
@@ -582,7 +598,9 @@ struct FoodMirrorView: View {
                 )
             }
 
-            if pageCount > 0 && clampedIndex == pageCount - 1 {
+            if pageCount > 0,
+               clampedIndex == pageCount - 1,
+               pages[clampedIndex] != .album {
                 storyEndCaption
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.sm)
@@ -608,10 +626,15 @@ struct FoodMirrorView: View {
             RoundedRectangle(cornerRadius: AppRadius.xl)
                 .strokeBorder(Color.brand.opacity(0.18), lineWidth: 1)
         )
+        .overlay(expandedCardOverlay(summary: summary))
         .appShadow(.shadowCard)
         .onChange(of: storyIndex) { _, _ in
             storyProgress = 0
             storyPaused = false
+            // Any page change (including swiping back off the
+            // album) collapses an expanded card so the overlay
+            // never strands itself over the wrong page.
+            if expandedCard != nil { expandedCard = nil }
         }
         .onChange(of: pageCount) { _, newCount in
             if storyIndex >= newCount {
@@ -781,6 +804,8 @@ struct FoodMirrorView: View {
                     evidence: "Patterns shift slowly — small experiments work best."
                 )
             }
+        case .album:
+            storyAlbumPage(summary)
         }
     }
 
@@ -934,6 +959,292 @@ struct FoodMirrorView: View {
                     }
                 }
                 .padding(.top, AppSpacing.xs)
+            }
+        }
+    }
+
+    // MARK: - Album recap
+
+    /// Display metadata for an album thumbnail. Mirrors the badge/
+    /// eyebrow/title language of each content page so a thumbnail
+    /// reads as a miniature of the card it came from.
+    fileprivate struct AlbumCardMeta {
+        let badge: MirrorBadge
+        let eyebrow: String
+        let shortTitle: String
+    }
+
+    /// Maps each content `StoryPageKind` to the badge/eyebrow/title
+    /// trio used by its full-size card, so the album thumbnails
+    /// stay in lockstep with `storyPageView` without trying to
+    /// scale the full layout down (which would look broken).
+    private func albumCardMeta(_ kind: StoryPageKind,
+                               summary: FoodMirrorSummary) -> AlbumCardMeta {
+        switch kind {
+        case .quickStats:
+            return .init(
+                badge: .init(symbol: "sparkles",
+                             tint: .brandDeep, bg: .brandSoft),
+                eyebrow: "YOUR WEEK",
+                shortTitle: "Where you are right now."
+            )
+        case .moment:
+            let moment = viewModel.currentMoment
+            return .init(
+                badge: .init(
+                    symbol: moment.map(momentBadgeSymbol(for:)) ?? "sparkles",
+                    tint: .brandDeep, bg: .brandSoft
+                ),
+                eyebrow: "FOODOS MOMENT",
+                shortTitle: moment?.title ?? "A moment for you."
+            )
+        case .todaysNudge:
+            return .init(
+                badge: .init(symbol: "leaf.fill",
+                             tint: .brandDeep, bg: .brandSoft),
+                eyebrow: "TODAY'S NUDGE",
+                shortTitle: summary.todaysGentleNudge ?? ""
+            )
+        case .thisWeekChanged:
+            return .init(
+                badge: .init(symbol: "chart.line.uptrend.xyaxis",
+                             tint: .catBenefitsInk, bg: .catBenefits),
+                eyebrow: "THIS WEEK CHANGED",
+                shortTitle: summary.thisWeekChanged ?? ""
+            )
+        case .weeklySummary:
+            return .init(
+                badge: .init(symbol: "calendar",
+                             tint: .accentCool, bg: .catBenefits),
+                eyebrow: "THIS WEEK",
+                shortTitle: summary.weeklySummary ?? ""
+            )
+        case .mostCommonFoods:
+            let names = summary.mostCommonFoods.prefix(2)
+                .map { $0.name }
+                .joined(separator: ", ")
+            return .init(
+                badge: .init(symbol: "fork.knife",
+                             tint: .brandDeep, bg: .brandSoft),
+                eyebrow: "MOST COMMON",
+                shortTitle: names.isEmpty
+                    ? "Meals you keep coming back to."
+                    : names
+            )
+        case .moodInsight:
+            return .init(
+                badge: .init(symbol: "heart.fill",
+                             tint: .accentWarm, bg: .catDrawbacks),
+                eyebrow: "MOOD & FOOD",
+                shortTitle: summary.moodInsight ?? ""
+            )
+        case .timingInsight:
+            return .init(
+                badge: .init(symbol: "clock.fill",
+                             tint: .accentCool, bg: .catBenefits),
+                eyebrow: "MEAL TIMING",
+                shortTitle: summary.timingInsight ?? ""
+            )
+        case .suggestedExperiment:
+            return .init(
+                badge: .init(symbol: "wand.and.stars",
+                             tint: .catBenefitsInk, bg: .catBenefits),
+                eyebrow: "A SMALL EXPERIMENT",
+                shortTitle: summary.suggestedExperiment ?? ""
+            )
+        case .album:
+            // Never rendered as a thumbnail (filtered out of the
+            // grid), but the enum is exhaustive so we still need
+            // a case. Empty values make the bug obvious if it
+            // ever does slip through.
+            return .init(
+                badge: .init(symbol: "square.grid.2x2.fill",
+                             tint: .brandDeep, bg: .brandSoft),
+                eyebrow: "",
+                shortTitle: ""
+            )
+        }
+    }
+
+    /// Terminal recap page. A header + 2-column grid of compact
+    /// thumbnails, one per content card seen in the story. Tapping
+    /// any thumbnail expands it into a full-size overlay via
+    /// `matchedGeometryEffect`; tapping the dim background or the
+    /// expanded card collapses it back to the grid.
+    private func storyAlbumPage(_ summary: FoodMirrorSummary) -> some View {
+        let contentPages = storyPageKinds(for: summary).filter { $0 != .album }
+
+        return VStack(alignment: .leading, spacing: AppSpacing.md) {
+            HStack(alignment: .center, spacing: AppSpacing.sm) {
+                ZStack {
+                    Circle()
+                        .fill(Color.brandSoft)
+                        .frame(width: 44, height: 44)
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color.brandDeep)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("YOUR MOMENTS")
+                        .eyebrow()
+                        .foregroundStyle(Color.brandDeep)
+                    Text("Tap any card to revisit it.")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                }
+                Spacer(minLength: 0)
+            }
+
+            ScrollView(showsIndicators: false) {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: AppSpacing.sm),
+                        GridItem(.flexible(), spacing: AppSpacing.sm)
+                    ],
+                    spacing: AppSpacing.sm
+                ) {
+                    ForEach(contentPages) { kind in
+                        albumThumbnail(kind, summary: summary)
+                            .matchedGeometryEffect(
+                                id: kind.id,
+                                in: albumNamespace
+                            )
+                            .contentShape(
+                                RoundedRectangle(cornerRadius: AppRadius.lg)
+                            )
+                            .onTapGesture {
+                                Haptics.tap()
+                                storyPaused = true
+                                if reduceMotion {
+                                    expandedCard = kind
+                                } else {
+                                    withAnimation(
+                                        .spring(response: 0.4,
+                                                dampingFraction: 0.82)
+                                    ) {
+                                        expandedCard = kind
+                                    }
+                                }
+                            }
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityLabel(
+                                Text(albumCardMeta(kind, summary: summary).eyebrow)
+                            )
+                            .accessibilityHint(
+                                Text("Opens this card.")
+                            )
+                    }
+                }
+                .padding(.top, AppSpacing.xs)
+            }
+        }
+        .padding(AppSpacing.cardPad)
+        .frame(maxWidth: .infinity,
+               maxHeight: .infinity,
+               alignment: .topLeading)
+    }
+
+    /// Compact tile for one content page in the album grid. Shows
+    /// the page's badge, eyebrow, and a short title clipped to
+    /// three lines so the grid stays uniform regardless of which
+    /// pages happened to be in the story.
+    private func albumThumbnail(_ kind: StoryPageKind,
+                                summary: FoodMirrorSummary) -> some View {
+        let meta = albumCardMeta(kind, summary: summary)
+        return VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            ZStack {
+                Circle()
+                    .fill(meta.badge.bg)
+                    .frame(width: 32, height: 32)
+                Image(systemName: meta.badge.symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(meta.badge.tint)
+            }
+            Text(meta.eyebrow)
+                .eyebrow()
+                .foregroundStyle(Color.brandDeep.opacity(0.85))
+                .lineLimit(1)
+            Text(meta.shortTitle)
+                .appFont(.captionStrong)
+                .foregroundStyle(Color.ink)
+                .lineLimit(3)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(AppSpacing.md)
+        .frame(height: 130, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.brand.opacity(0.15), lineWidth: 1)
+        )
+        .appShadow(.shadowCard)
+    }
+
+    /// Full-size overlay shown while `expandedCard` is non-nil.
+    /// Attached to the story container so it stays bounded inside
+    /// the 500pt stage (no full-screen escape). The matched
+    /// geometry id is the page kind's rawValue so the expansion
+    /// reads as the thumbnail growing into the card.
+    @ViewBuilder
+    private func expandedCardOverlay(summary: FoodMirrorSummary) -> some View {
+        if let kind = expandedCard, kind != .album {
+            ZStack {
+                Color.black.opacity(0.18)
+                    .clipShape(
+                        RoundedRectangle(cornerRadius: AppRadius.xl)
+                    )
+                    .onTapGesture {
+                        collapseExpandedCard()
+                    }
+                    .transition(.opacity)
+
+                storyPageView(kind, summary: summary)
+                    .padding(AppSpacing.md)
+                    .frame(maxWidth: .infinity)
+                    .frame(maxHeight: 420)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppRadius.xl)
+                            .fill(Color.bgSurface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppRadius.xl)
+                            .strokeBorder(Color.brand.opacity(0.22),
+                                          lineWidth: 1)
+                    )
+                    .appShadow(.shadowFloating)
+                    .matchedGeometryEffect(
+                        id: kind.id,
+                        in: albumNamespace
+                    )
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.xl)
+                    .onTapGesture {
+                        collapseExpandedCard()
+                    }
+                    .accessibilityAddTraits(.isModal)
+            }
+            .transition(.opacity)
+        }
+    }
+
+    /// Collapse helper used by both the dim background and the
+    /// expanded card itself. Centralises the animation choice so
+    /// the spring matches what played on expand.
+    private func collapseExpandedCard() {
+        Haptics.tap()
+        if reduceMotion {
+            expandedCard = nil
+        } else {
+            withAnimation(
+                .spring(response: 0.4, dampingFraction: 0.82)
+            ) {
+                expandedCard = nil
             }
         }
     }
