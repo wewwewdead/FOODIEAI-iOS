@@ -74,10 +74,16 @@ struct FoodMirrorInsightService {
             timeZone:      timeZone
         )
 
+        let moodLogCount = thirtyDayLogs.reduce(into: 0) { count, log in
+            if log.mood != nil { count += 1 }
+        }
+
         return FoodMirrorSummary(
             hasEnoughData:       progress.state == .ready,
             learningProgress:    progress,
             thirtyDayLogCount:   thirtyDayLogs.count,
+            sevenDayLogCount:    sevenDayLogs.count,
+            moodLogCount:        moodLogCount,
             eatingIdentity:      identity,
             weeklySummary:       weekly,
             mostCommonFoods:     topFoods,
@@ -255,26 +261,36 @@ struct FoodMirrorInsightService {
 
     /// One soft, descriptive line — never prescriptive, never clinical.
     /// Returns nil when the data doesn't support any honest framing.
+    ///
+    /// Delegates to `FoodOSStoryBuilder.heroIdentityLine` so the hero
+    /// copy obeys the project rule "never claim 'rarely repeat' when
+    /// a food has crossed the anchor floor" — the headline trust
+    /// problem the storytelling pass was written to fix. The
+    /// dinner-leans-heavier branch stays here because it's purely a
+    /// timing observation, not a repeat-vs-explore claim.
     private static func eatingIdentity(thirtyDayLogs: [FoodLog],
                                        topFoods: [FoodMirrorSummary.FoodCount],
                                        timing: TimingStats?) -> String? {
         guard thirtyDayLogs.count >= 5 else { return nil }
 
-        if let top = topFoods.first,
-           Double(top.count) / Double(thirtyDayLogs.count) >= 0.3 {
-            return "You're a creature of habit — \(top.name) shows up often in your week."
-        }
-
-        if let timing, timing.dinnerCount >= 3, timing.lunchCount >= 3,
-           timing.dinnerAvgKcal >= timing.lunchAvgKcal * 1.25 {
-            return "Your eating leans toward bigger evening meals."
-        }
-
         let uniqueFoods = Set(thirtyDayLogs.map {
             LocalNutritionBeliefStore.normalize($0.foodName)
         })
-        if Double(uniqueFoods.count) / Double(thirtyDayLogs.count) >= 0.7 {
-            return "You're an explorer — your meals rarely repeat."
+
+        if let line = FoodOSStoryBuilder.heroIdentityLine(
+            thirtyDayLogCount: thirtyDayLogs.count,
+            topFoods:          topFoods,
+            uniqueFoodCount:   uniqueFoods.count
+        ) {
+            return line
+        }
+
+        // Timing-leaning fallback — only when no repeat-or-explore
+        // line surfaced. Keeps "bigger evening meals" out of the way
+        // of the anchor / explorer story when those apply.
+        if let timing, timing.dinnerCount >= 3, timing.lunchCount >= 3,
+           timing.dinnerAvgKcal >= timing.lunchAvgKcal * 1.25 {
+            return "Your eating leans toward bigger evening meals."
         }
 
         return nil
@@ -605,10 +621,97 @@ struct FoodMirrorInsightService {
             .filter { $0.loved >= 2 && $0.tough == 0 }
             .max { $0.loved < $1.loved }
         if let favorite {
-            return "A meal like \(favorite.displayName) often seems to work well for you."
+            return FoodOSStoryBuilder.positiveMoodFoodNudge(
+                food:        favorite.displayName,
+                lovedCount:  favorite.loved
+            )
         }
 
         return nil
+    }
+}
+
+// MARK: - Presentation helpers
+
+/// Purely presentational helpers for the Mirror surfaces. Render
+/// "evidence" and "freshness" captions in a consistent, warm voice
+/// without scattering the copy across views.
+///
+/// These never gate behavior — callers pass in whatever they have
+/// and the helpers decide whether to surface a string. Returning nil
+/// is normal and means "stay silent rather than overclaim."
+enum FoodMirrorPresentation {
+
+    /// One-line evidence caption derived from the summary's log
+    /// counts. Cites meals and (optionally) mood notes so the user
+    /// can see the substrate the Mirror is reflecting back. Returns
+    /// nil when the 30-day window is too thin to claim anything
+    /// stronger than the learning state already says.
+    ///
+    ///   30+ meals  → "Based on 30 days of meals and N mood notes."
+    ///                (mood clause dropped if N == 0)
+    ///   ≥ 8 meals  → "Based on X meals and Y mood notes logged."
+    ///   ≥ 3 meals  → "Based on your recent meals."
+    ///   else       → nil
+    static func evidenceLine(for summary: FoodMirrorSummary) -> String? {
+        let meals = summary.thirtyDayLogCount
+        let moods = summary.moodLogCount
+        if meals >= 20 {
+            if moods >= 1 {
+                let noun = moods == 1 ? "mood note" : "mood notes"
+                return "Based on 30 days of meals and \(moods) \(noun)."
+            }
+            return "Based on 30 days of meals."
+        }
+        if meals >= summary.learningProgress.target {
+            let mealNoun = meals == 1 ? "meal" : "meals"
+            if moods >= 1 {
+                let moodNoun = moods == 1 ? "mood note" : "mood notes"
+                return "Based on \(meals) \(mealNoun) and \(moods) \(moodNoun)."
+            }
+            return "Based on \(meals) \(mealNoun) logged."
+        }
+        if meals >= 3 {
+            return "Based on your recent meals."
+        }
+        return nil
+    }
+
+    /// "Updated …" caption derived from the time elapsed since the
+    /// last successful refresh. Returns nil when `updatedAt` is nil
+    /// (we've never completed a refresh yet) so the caller can hide
+    /// the line entirely rather than render placeholder text.
+    ///
+    ///   < 60s            → "Updated just now"
+    ///   < 60min          → "Updated N min ago"
+    ///   same local day   → "Updated today"
+    ///   prior local day  → "Updated yesterday"
+    ///   older            → "Updated on <Mon D>"
+    static func freshnessLine(updatedAt: Date?,
+                              now: Date = Date(),
+                              calendar: Calendar = .current) -> String? {
+        guard let updatedAt else { return nil }
+        let delta = now.timeIntervalSince(updatedAt)
+        if delta < 60 { return "Updated just now" }
+        if delta < 60 * 60 {
+            let minutes = max(1, Int(delta / 60))
+            return "Updated \(minutes) min ago"
+        }
+        // Use the supplied calendar's timezone — tests can pin this.
+        let cal = calendar
+        let startOfNow      = cal.startOfDay(for: now)
+        let startOfUpdated  = cal.startOfDay(for: updatedAt)
+        let dayDelta = cal.dateComponents([.day],
+                                          from: startOfUpdated,
+                                          to: startOfNow).day ?? 0
+        if dayDelta <= 0 { return "Updated today" }
+        if dayDelta == 1 { return "Updated yesterday" }
+        let formatter = DateFormatter()
+        formatter.calendar = cal
+        formatter.locale = cal.locale ?? .current
+        formatter.timeZone = cal.timeZone
+        formatter.setLocalizedDateFormatFromTemplate("MMM d")
+        return "Updated on \(formatter.string(from: updatedAt))"
     }
 }
 
@@ -638,6 +741,17 @@ struct FoodMirrorSummary: Equatable {
     /// evidence base honestly once the user is past the readiness floor
     /// ("Based on 22 meals logged" vs the clamped "8 of 8 meals").
     let thirtyDayLogCount: Int
+
+    /// Raw 7-day log count — used by the Mirror's evidence/freshness
+    /// caption alongside the 30-day count. Purely descriptive; never
+    /// gates insight computation.
+    let sevenDayLogCount: Int
+
+    /// Number of logs in the 30-day window that carry a non-nil mood.
+    /// Surfaced in the Mirror's evidence line ("based on 12 meals and
+    /// 5 mood notes") so users can see the substrate the surface is
+    /// reflecting back to them.
+    let moodLogCount: Int
 
     let eatingIdentity: String?
     let weeklySummary: String?
@@ -674,6 +788,8 @@ struct FoodMirrorSummary: Equatable {
         hasEnoughData:       false,
         learningProgress:    LearningProgress.from(thirtyDayLogCount: 0),
         thirtyDayLogCount:   0,
+        sevenDayLogCount:    0,
+        moodLogCount:        0,
         eatingIdentity:      nil,
         weeklySummary:       nil,
         mostCommonFoods:     [],

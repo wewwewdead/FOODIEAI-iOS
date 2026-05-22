@@ -64,8 +64,19 @@ enum HomeMirrorPreview {
             )
         }
 
+        // Sharper-first title chain: when a single food is becoming
+        // a regular ("anchor" framing kicks in at the storybuilder's
+        // anchorFloor), surface that line over the older identity
+        // copy. The eatingIdentity helper now produces nuanced
+        // sentences too, but a top-food anchor reads tighter on
+        // Home where space is scarce.
+        let anchorTitle = FoodOSStoryBuilder.homePreviewAnchorTitle(
+            topFoods: summary.mostCommonFoods
+        )
         let title: String
-        if let identity = summary.eatingIdentity {
+        if let anchor = anchorTitle {
+            title = anchor
+        } else if let identity = summary.eatingIdentity {
             title = identity
         } else if let changed = summary.thisWeekChanged {
             title = changed
@@ -77,11 +88,26 @@ enum HomeMirrorPreview {
 
         let body = summary.moodInsight ?? summary.timingInsight
 
+        // When the anchor copy fires, prefer the sharper
+        // "6 logs · recent mood notes steady" footer. The default
+        // evidence line still applies everywhere else so the legacy
+        // "Based on 30 days of logs" surface is preserved.
+        let evidence: String = {
+            if anchorTitle != nil,
+               let sharper = FoodOSStoryBuilder.homePreviewAnchorEvidence(
+                   topFood:      summary.mostCommonFoods.first,
+                   moodLogCount: summary.moodLogCount
+               ) {
+                return "Based on " + sharper
+            }
+            return evidenceLine(for: summary)
+        }()
+
         return HomeMirrorPreviewCardModel(
             eyebrow:      eyebrowCopy,
             title:        title,
             body:         body,
-            evidenceLine: evidenceLine(for: summary),
+            evidenceLine: evidence,
             nudgeLine:    summary.todaysGentleNudge,
             ctaText:      "Open Mirror →",
             kind:         .ready

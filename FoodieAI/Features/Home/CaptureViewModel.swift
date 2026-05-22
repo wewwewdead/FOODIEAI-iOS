@@ -215,17 +215,23 @@ final class CaptureViewModel: ObservableObject {
     /// server falls back to v1 behavior.
     private let history: MealHistoryService
     private let profileService: ProfileService
+    /// FoodOS V2 — shared learning store. Mood notes recorded through
+    /// this view-model close the loop on "I'll try this" experiments
+    /// armed earlier in Mirror.
+    private let feedbackStore: FoodOSMomentFeedbackStore
 
     init(analyzer: AnalyzeService = AnalyzeService(),
          imageService: FoodImageService = FoodImageService(),
          logService: FoodLogService = FoodLogService(),
          history: MealHistoryService = MealHistoryService(),
-         profileService: ProfileService = ProfileService()) {
+         profileService: ProfileService = ProfileService(),
+         feedbackStore: FoodOSMomentFeedbackStore = .shared) {
         self.analyzer = analyzer
         self.imageService = imageService
         self.logService = logService
         self.history = history
         self.profileService = profileService
+        self.feedbackStore = feedbackStore
     }
 
     /// Pick from the photo library or capture from the camera. Always
@@ -753,10 +759,24 @@ final class CaptureViewModel: ObservableObject {
         state = .idle
         do {
             _ = try await logService.setMood(mood, on: log.id)
+            // Mirror's dominant-mood insights read from the same
+            // row we just patched; nudge subscribers so the tab and
+            // Home preview refresh without waiting for the next
+            // foreground.
+            NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
             #if DEBUG
             NSLog("[Mood] set log=%@ mood=%@",
                   log.id.uuidString, mood.rawValue)
             #endif
+            // FoodOS Feedback V2: a fresh mood note resolves any
+            // pending "I'll try this" experiment. We deliberately
+            // do this *after* the DB patch succeeds — a network
+            // failure must not advance the learning state. The
+            // store call is local-only and never throws, and a nil
+            // return (no active experiment) is the common case.
+            _ = feedbackStore.resolveExperiment(
+                for: log, mood: mood, now: Date()
+            )
         } catch {
             #if DEBUG
             NSLog("[Mood] set FAILED log=%@ mood=%@ err=%@",

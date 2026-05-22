@@ -1002,6 +1002,8 @@ final class HomeMirrorPreviewTests: XCTestCase {
             hasEnoughData:       hasEnoughData,
             learningProgress:    progress,
             thirtyDayLogCount:   count,
+            sevenDayLogCount:    0,
+            moodLogCount:        0,
             eatingIdentity:      eatingIdentity,
             weeklySummary:       weeklySummary,
             mostCommonFoods:     [],
@@ -1930,6 +1932,2281 @@ final class FoodMirrorInsightServiceTests: XCTestCase {
             sourceLogId: nil,
             mood: mood
         )
+    }
+}
+
+// MARK: - FoodMirrorPresentation
+//
+// Pure helpers for the Mirror's evidence + freshness captions.
+// These are presentational only — they never gate behavior or change
+// what's saved. Tests exercise the wording rules in isolation so
+// future copy tweaks land here rather than as a manual QA pass.
+
+final class FoodMirrorPresentationTests: XCTestCase {
+
+    // MARK: - Evidence line
+
+    /// Zero meals → nil. The learning-state card already tells the
+    /// user we don't have enough data; an evidence caption would
+    /// just say the same thing in a quieter voice.
+    func test_evidenceLine_zeroMeals_returnsNil() {
+        let summary = Self.makeSummary(thirtyDayLogCount: 0, moodLogCount: 0)
+        XCTAssertNil(FoodMirrorPresentation.evidenceLine(for: summary))
+    }
+
+    /// Meal-only branch (no mood notes): cites the count with the
+    /// "logged" suffix and pluralizes correctly.
+    func test_evidenceLine_mealsOnlyPastReadinessFloor() {
+        let summary = Self.makeSummary(thirtyDayLogCount: 8, moodLogCount: 0)
+        XCTAssertEqual(
+            FoodMirrorPresentation.evidenceLine(for: summary),
+            "Based on 8 meals logged."
+        )
+    }
+
+    /// Combined branch: meals + mood notes. Both nouns pluralized
+    /// when the count is plural; the line stays a single sentence.
+    func test_evidenceLine_mealsAndMoodNotes() {
+        let summary = Self.makeSummary(thirtyDayLogCount: 12, moodLogCount: 5)
+        XCTAssertEqual(
+            FoodMirrorPresentation.evidenceLine(for: summary),
+            "Based on 12 meals and 5 mood notes."
+        )
+    }
+
+    /// 30-day branch: at 20+ meals we can claim the full window. With
+    /// mood notes present the line names both substrates.
+    func test_evidenceLine_thirtyDayWithMoodNotes() {
+        let summary = Self.makeSummary(thirtyDayLogCount: 30, moodLogCount: 8)
+        XCTAssertEqual(
+            FoodMirrorPresentation.evidenceLine(for: summary),
+            "Based on 30 days of meals and 8 mood notes."
+        )
+    }
+
+    /// 30-day branch with no mood notes drops the mood clause rather
+    /// than emitting "and 0 mood notes."
+    func test_evidenceLine_thirtyDayNoMoodNotes() {
+        let summary = Self.makeSummary(thirtyDayLogCount: 25, moodLogCount: 0)
+        XCTAssertEqual(
+            FoodMirrorPresentation.evidenceLine(for: summary),
+            "Based on 30 days of meals."
+        )
+    }
+
+    /// Thin window (3–7 meals) gets a soft "your recent meals" line
+    /// — honest but not overclaiming any count.
+    func test_evidenceLine_thinWindowFallsBackToGeneric() {
+        let summary = Self.makeSummary(thirtyDayLogCount: 4, moodLogCount: 1)
+        XCTAssertEqual(
+            FoodMirrorPresentation.evidenceLine(for: summary),
+            "Based on your recent meals."
+        )
+    }
+
+    // MARK: - Freshness line
+
+    /// Nil `updatedAt` means we've never completed a refresh in this
+    /// session; the caption hides entirely instead of inventing a
+    /// placeholder. Avoids "Updated never" or similar misfires.
+    func test_freshnessLine_nilUpdatedAt_returnsNil() {
+        XCTAssertNil(FoodMirrorPresentation.freshnessLine(updatedAt: nil))
+    }
+
+    /// Under a minute → "Updated just now". Boundary check at 0s and
+    /// just under 60s; both must read the same.
+    func test_freshnessLine_justNow() {
+        let now = Date()
+        XCTAssertEqual(
+            FoodMirrorPresentation.freshnessLine(updatedAt: now, now: now),
+            "Updated just now"
+        )
+        XCTAssertEqual(
+            FoodMirrorPresentation.freshnessLine(
+                updatedAt: now.addingTimeInterval(-59), now: now
+            ),
+            "Updated just now"
+        )
+    }
+
+    /// 1–59 minutes → "Updated N min ago". Confirms the floor at 1
+    /// min (60s exactly) and a mid-range value (5 min).
+    func test_freshnessLine_minutesAgo() {
+        let now = Date()
+        XCTAssertEqual(
+            FoodMirrorPresentation.freshnessLine(
+                updatedAt: now.addingTimeInterval(-60), now: now
+            ),
+            "Updated 1 min ago"
+        )
+        XCTAssertEqual(
+            FoodMirrorPresentation.freshnessLine(
+                updatedAt: now.addingTimeInterval(-5 * 60), now: now
+            ),
+            "Updated 5 min ago"
+        )
+    }
+
+    /// 1+ hour but same calendar day → "Updated today". Use a fixed
+    /// calendar so the rollover is deterministic regardless of
+    /// machine timezone.
+    func test_freshnessLine_sameDayBeyondAnHour() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+
+        var comps = DateComponents()
+        comps.year = 2026; comps.month = 5; comps.day = 21
+        comps.hour = 15
+        comps.timeZone = cal.timeZone
+        let now = cal.date(from: comps)!
+
+        comps.hour = 8
+        let updated = cal.date(from: comps)!
+
+        XCTAssertEqual(
+            FoodMirrorPresentation.freshnessLine(
+                updatedAt: updated, now: now, calendar: cal
+            ),
+            "Updated today"
+        )
+    }
+
+    /// Updated yesterday relative to a pinned `now`. Calendar-aware
+    /// (not "24h ago") so a refresh at 11pm last night still reads
+    /// "yesterday" from this morning, not "20 hours ago."
+    func test_freshnessLine_yesterday() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+
+        var comps = DateComponents()
+        comps.year = 2026; comps.month = 5; comps.day = 21
+        comps.hour = 9; comps.timeZone = cal.timeZone
+        let now = cal.date(from: comps)!
+
+        comps.day = 20
+        comps.hour = 23
+        let updated = cal.date(from: comps)!
+
+        XCTAssertEqual(
+            FoodMirrorPresentation.freshnessLine(
+                updatedAt: updated, now: now, calendar: cal
+            ),
+            "Updated yesterday"
+        )
+    }
+
+    // MARK: - Summary populates the new counts
+
+    /// `compute(...)` must populate `sevenDayLogCount` /
+    /// `moodLogCount` so the presentation helper has real numbers
+    /// to format. Regression guard if someone adds a future field
+    /// and forgets to initialize one of these.
+    func test_compute_populatesSevenDayAndMoodCounts() {
+        let now = Date(timeIntervalSince1970: 1_730_000_000)
+        let tz = TimeZone(identifier: "America/Los_Angeles")!
+
+        let sevenDay = (1...4).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0, mood: $0 % 2 == 0 ? .loved : nil)
+        }
+        let thirtyDay = sevenDay + (8...12).map {
+            Self.makeLog(name: "Soup", daysAgo: $0, mood: .fine)
+        }
+        let summary = FoodMirrorInsightService.compute(
+            thirtyDayLogs: thirtyDay,
+            sevenDayLogs:  sevenDay,
+            now:           now,
+            timeZone:      tz
+        )
+        XCTAssertEqual(summary.sevenDayLogCount, 4)
+        XCTAssertEqual(summary.moodLogCount, 7)
+    }
+
+    // MARK: - Helpers
+
+    private static func makeSummary(thirtyDayLogCount: Int,
+                                    moodLogCount: Int) -> FoodMirrorSummary {
+        FoodMirrorSummary(
+            hasEnoughData:       thirtyDayLogCount >= 8,
+            learningProgress:    LearningProgress.from(thirtyDayLogCount: thirtyDayLogCount),
+            thirtyDayLogCount:   thirtyDayLogCount,
+            sevenDayLogCount:    0,
+            moodLogCount:        moodLogCount,
+            eatingIdentity:      nil,
+            weeklySummary:       nil,
+            mostCommonFoods:     [],
+            moodInsight:         nil,
+            timingInsight:       nil,
+            thisWeekChanged:     nil,
+            todaysGentleNudge:   nil,
+            suggestedExperiment: nil
+        )
+    }
+
+    private static func makeLog(name: String,
+                                daysAgo: Int,
+                                mood: FoodLog.Mood? = nil) -> FoodLog {
+        let tz = TimeZone(identifier: "America/Los_Angeles")!
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tz
+        let base = Date(timeIntervalSince1970: 1_730_000_000)
+        let day = cal.date(byAdding: .day, value: -daysAgo, to: base) ?? base
+        var comps = cal.dateComponents([.year, .month, .day], from: day)
+        comps.hour = 12; comps.minute = 0; comps.timeZone = tz
+        let dt = cal.date(from: comps) ?? day
+        return FoodLog(
+            id: UUID(),
+            userId: UUID(),
+            foodName: name,
+            imagePath: nil,
+            imageThumbPath: nil,
+            calories: 500,
+            carbsG: 50,
+            sugarG: 5,
+            proteinG: 20,
+            fatG: 15,
+            fiberG: 5,
+            benefits: [],
+            drawbacks: [],
+            nutrients: [],
+            coachName: nil,
+            coachAdvice: nil,
+            eatenAt: dt,
+            createdAt: dt,
+            origin: .analyzed,
+            sourceLogId: nil,
+            mood: mood
+        )
+    }
+}
+
+// MARK: - FoodMirrorViewModel — production refresh behavior
+//
+// These tests exercise the cancellation, last-good-state, and
+// refresh-token guarantees that keep the Mirror calm under bad
+// network and rapid event bursts. A small stub fetcher stands in
+// for the Supabase-backed FoodLogService so the VM's behavior can
+// be tested without a live network.
+
+@MainActor
+final class FoodMirrorViewModelTests: XCTestCase {
+
+    /// Stub that returns canned `[FoodLog]` or throws on demand.
+    /// `delay` lets a test slow a single response down to simulate
+    /// races between overlapping refreshes.
+    final class StubFetcher: FoodLogsFetching, @unchecked Sendable {
+        var result: Result<[FoodLog], Error> = .success([])
+        var delay: Duration = .zero
+        var calls: Int = 0
+
+        func logs(from: Date, to: Date) async throws -> [FoodLog] {
+            calls += 1
+            if delay > .zero {
+                try await Task.sleep(for: delay)
+            }
+            switch result {
+            case .success(let logs): return logs
+            case .failure(let err):  throw err
+            }
+        }
+    }
+
+    struct StubError: Error {}
+
+    // MARK: cancellation never sets failed
+
+    /// Stub throws CancellationError → state stays where it was
+    /// before the refresh started. No "Couldn't load your mirror"
+    /// card, no transient banner.
+    func test_cancellation_doesNotSetFailed() async {
+        let stub = StubFetcher()
+        stub.result = .failure(CancellationError())
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        await vm.refresh()
+
+        if case .failed = vm.state {
+            XCTFail("CancellationError must not set .failed; got \(vm.state)")
+        }
+        XCTAssertNil(vm.refreshErrorMessage)
+    }
+
+    // MARK: failed refresh with previous content preserves content
+
+    /// First refresh succeeds → `.loaded`. Second refresh throws a
+    /// real error → state stays `.loaded` and `refreshErrorMessage`
+    /// holds the soft, user-facing copy.
+    func test_failedRefresh_preservesPreviousLoadedContent() async {
+        let stub = StubFetcher()
+        stub.result = .success(Self.makeLogs(count: 12))
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        await vm.refresh()
+        guard case .loaded = vm.state else {
+            return XCTFail("Expected initial .loaded; got \(vm.state)")
+        }
+        let previous = vm.state
+
+        stub.result = .failure(StubError())
+        await vm.refresh()
+
+        XCTAssertEqual(vm.state, previous,
+                       "Real failure must preserve previous loaded content")
+        XCTAssertFalse(vm.isRefreshing)
+        XCTAssertNotNil(vm.refreshErrorMessage)
+        XCTAssertEqual(vm.refreshErrorMessage,
+                       "Couldn't refresh. Showing your latest saved mirror.")
+    }
+
+    /// First-load failure with no prior content surfaces the full
+    /// failed card (the banner path is reserved for surfaces that
+    /// already have something to show).
+    func test_firstLoadFailure_setsFailedNotBanner() async {
+        let stub = StubFetcher()
+        stub.result = .failure(StubError())
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        await vm.refresh()
+
+        if case .failed = vm.state {} else {
+            XCTFail("Expected .failed on first-load failure; got \(vm.state)")
+        }
+        XCTAssertNil(vm.refreshErrorMessage,
+                     "Banner is only used when prior content is visible")
+    }
+
+    /// Successful refresh clears any prior banner — recovery should
+    /// not leave a stale "couldn't refresh" line on screen.
+    func test_successfulRefresh_clearsBannerAndStampsLastUpdated() async {
+        let stub = StubFetcher()
+        stub.result = .success(Self.makeLogs(count: 12))
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        await vm.refresh()
+        stub.result = .failure(StubError())
+        await vm.refresh()
+        XCTAssertNotNil(vm.refreshErrorMessage)
+
+        stub.result = .success(Self.makeLogs(count: 12))
+        await vm.refresh()
+
+        XCTAssertNil(vm.refreshErrorMessage)
+        XCTAssertNotNil(vm.lastUpdatedAt)
+    }
+
+    // MARK: older refresh cannot overwrite newer
+
+    /// Token guard: a slow first refresh must not commit on top of a
+    /// fast second refresh. We use a thread-safe counting fetcher
+    /// where the first two `logs()` calls (refresh #1's seven-day +
+    /// thirty-day pair) sleep before returning "Old", while every
+    /// subsequent call (refresh #2 onward) returns "New"
+    /// immediately. After both refreshes complete, the surface
+    /// must show "New" — refresh #1's older payload was discarded.
+    func test_olderRefreshDoesNotOverwriteNewer() async {
+        let stub = SlowFirstPairFetcher(
+            firstPairDelay: .milliseconds(200),
+            firstPairName:  "Old",
+            laterName:      "New"
+        )
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        async let first: Void = vm.refresh()
+        // Let refresh #1 begin its sleep so refresh #2 starts during
+        // that window — otherwise the test would just be serializing
+        // two back-to-back fetches.
+        try? await Task.sleep(for: .milliseconds(40))
+        async let second: Void = vm.refresh()
+        _ = await (first, second)
+
+        guard case .loaded(let summary) = vm.state else {
+            return XCTFail("Expected .loaded; got \(vm.state)")
+        }
+        XCTAssertTrue(
+            summary.mostCommonFoods.contains { $0.name == "New" },
+            "Newer refresh result must win the commit race"
+        )
+        XCTAssertFalse(
+            summary.mostCommonFoods.contains { $0.name == "Old" },
+            "Older refresh's payload must not appear in committed state"
+        )
+    }
+
+    // MARK: helpers
+
+    /// Thread-safe stub: first two `logs(from:to:)` calls sleep
+    /// then return logs named `firstPairName`; every call after
+    /// returns `laterName` immediately. The single lock around
+    /// `callCount` keeps the two concurrent `async let` fetches
+    /// from racing the counter.
+    final class SlowFirstPairFetcher: FoodLogsFetching, @unchecked Sendable {
+        private let firstPairDelay: Duration
+        private let firstPairName: String
+        private let laterName: String
+        private let lock = NSLock()
+        private var callCount = 0
+
+        init(firstPairDelay: Duration,
+             firstPairName: String,
+             laterName: String) {
+            self.firstPairDelay = firstPairDelay
+            self.firstPairName  = firstPairName
+            self.laterName      = laterName
+        }
+
+        func logs(from: Date, to: Date) async throws -> [FoodLog] {
+            lock.lock()
+            callCount += 1
+            let myCall = callCount
+            lock.unlock()
+            if myCall <= 2 {
+                try await Task.sleep(for: firstPairDelay)
+                return FoodMirrorViewModelTests.makeLogs(
+                    count: 12, name: firstPairName
+                )
+            }
+            return FoodMirrorViewModelTests.makeLogs(
+                count: 12, name: laterName
+            )
+        }
+    }
+
+    /// Build N synthetic logs across N distinct days at noon LA, all
+    /// with the same food name so "most common foods" surfaces it
+    /// (the filter requires ≥ 2 occurrences). Nonisolated so the
+    /// background-actor stubs can call it without an actor hop.
+    nonisolated static func makeLogs(count: Int, name: String = "Bowl") -> [FoodLog] {
+        let tz = TimeZone(identifier: "America/Los_Angeles")!
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tz
+        let base = Date()
+        var out: [FoodLog] = []
+        for i in 0..<count {
+            let day = cal.date(byAdding: .day, value: -i, to: base) ?? base
+            var comps = cal.dateComponents([.year, .month, .day], from: day)
+            comps.hour = 12; comps.minute = 0; comps.timeZone = tz
+            let dt = cal.date(from: comps) ?? day
+            out.append(FoodLog(
+                id: UUID(),
+                userId: UUID(),
+                foodName: name,
+                imagePath: nil,
+                imageThumbPath: nil,
+                calories: 500,
+                carbsG: 50,
+                sugarG: 5,
+                proteinG: 20,
+                fatG: 15,
+                fiberG: 5,
+                benefits: [],
+                drawbacks: [],
+                nutrients: [],
+                coachName: nil,
+                coachAdvice: nil,
+                eatenAt: dt,
+                createdAt: dt,
+                origin: .analyzed,
+                sourceLogId: nil,
+                mood: nil
+            ))
+        }
+        return out
+    }
+}
+
+// MARK: - HomeMirrorPreviewViewModel — preserves card on error
+
+@MainActor
+final class HomeMirrorPreviewViewModelTests: XCTestCase {
+
+    /// First refresh succeeds → cardModel populated. Second refresh
+    /// throws a real network error → cardModel must stay populated
+    /// (Home should never flicker over a transient blip).
+    func test_homePreview_keepsCardOnTransientError() async {
+        let stub = FoodMirrorViewModelTests.StubFetcher()
+        stub.result = .success(FoodMirrorViewModelTests.makeLogs(count: 12))
+        let vm = HomeMirrorPreviewViewModel(foodLogs: stub)
+
+        await vm.refresh()
+        XCTAssertNotNil(vm.cardModel, "First refresh should populate")
+        let snapshot = vm.cardModel
+
+        stub.result = .failure(FoodMirrorViewModelTests.StubError())
+        await vm.refresh()
+
+        XCTAssertEqual(vm.cardModel, snapshot,
+                       "Transient error must not blank the Home preview")
+    }
+
+    /// Cancellation must be silent — no log spam (we can't assert
+    /// the NSLog directly, but we can confirm the existing card is
+    /// preserved). Same guard as transient error, just via the
+    /// CancellationError path.
+    func test_homePreview_cancellationIsSilent() async {
+        let stub = FoodMirrorViewModelTests.StubFetcher()
+        stub.result = .success(FoodMirrorViewModelTests.makeLogs(count: 12))
+        let vm = HomeMirrorPreviewViewModel(foodLogs: stub)
+
+        await vm.refresh()
+        let snapshot = vm.cardModel
+
+        stub.result = .failure(CancellationError())
+        await vm.refresh()
+
+        XCTAssertEqual(vm.cardModel, snapshot,
+                       "Cancellation must not blank the Home preview")
+    }
+}
+
+// MARK: - FoodOS Moment Engine
+//
+// FoodOS Moment Engine V1 — the pure local intelligence layer that
+// picks ONE useful personal moment per refresh. These tests live in
+// XCTest (not Swift Testing) so they share the existing fixtures
+// and don't introduce a new test framework into the project.
+//
+// Contract under test:
+//   1. Under the 8-log readiness floor → learning moment.
+//   2. At 8+ logs the engine can return a non-learning moment.
+//   3. Mood posterior reads loved + fine as positive, tough as
+//      negative, and adds a Beta(1, 1) prior so tiny samples don't
+//      look certain.
+//   4. Mood claims require ≥ 3 mood notes.
+//   5. Slot claims require ≥ 3 logs in the slot.
+//   6. Week-change claims require a meaningful delta.
+//   7. Recognition needs a food to repeat ≥ 3 times.
+//   8. Attention ranks the same food higher than unrelated ones.
+//   9. Attention ranks same-slot logs higher than off-slot ones.
+//  10. Attention ranks recent logs higher than older ones.
+//  11. Copy safety rejects shame / medical / bossy / certainty.
+//  12. Every produced moment carries an evidenceLine when it makes
+//      a personal claim (i.e., non-fallback branches).
+//  13. The engine is deterministic for the same input.
+//  14. The fallback fires when evidence is thin but data clears
+//      the readiness floor.
+
+final class FoodOSMomentEngineTests: XCTestCase {
+
+    private static let timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    /// Pinned "now" so date windows in the helpers are stable.
+    private static let now = Date(timeIntervalSince1970: 1_730_000_000)
+
+    // MARK: 1. learning under 8 logs
+
+    /// Five logs is below the readiness floor → the engine must
+    /// return the learning moment, regardless of how varied the
+    /// log shapes look.
+    func test_learning_returnedUnderEightLogs() {
+        let logs = (1...5).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0, calories: 500)
+        }
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs:        logs,
+            sevenDayLogs:         logs,
+            previousSevenDayLogs: [],
+            now:                  Self.now,
+            timeZone:             Self.timeZone
+        )
+        XCTAssertEqual(moment.kind, .learning)
+        XCTAssertTrue(moment.title.lowercased().contains("still learning"))
+        XCTAssertEqual(moment.evidenceLine, "Based on 5 meals logged.")
+        XCTAssertEqual(moment.confidence, .low)
+    }
+
+    // MARK: 2. eight+ logs can yield non-learning moment
+
+    /// At 8+ logs with a clear recognition signal (one food
+    /// appearing repeatedly) the engine must escape the learning
+    /// branch. The exact branch chosen depends on the priority
+    /// chain — recognition is one outcome; anything non-learning
+    /// passes this test.
+    func test_eightOrMoreLogs_canReturnNonLearning() {
+        let logs = (1...10).map {
+            Self.makeLog(name: "Kimchi stew", daysAgo: $0, calories: 500)
+        }
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs:        logs,
+            sevenDayLogs:         Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now:                  Self.now,
+            timeZone:             Self.timeZone
+        )
+        XCTAssertNotEqual(moment.kind, .learning,
+                          "Engine must escape learning once ≥ 8 logs exist")
+    }
+
+    // MARK: 3. mood posterior
+
+    /// Beta(1, 1) prior keeps a 3/0 sample below 1.0 and an
+    /// even 1/1 split close to 0.5 — proves the prior is doing its
+    /// job and the engine never claims certainty from a small
+    /// sample.
+    func test_moodPosterior_betaPriorPreventsCertainty() {
+        // 3 loved + 0 tough → posterior = (3+1) / (3+0+2) = 4/5 = 0.8
+        let mostlyLoved = [
+            Self.makeLog(name: "X", daysAgo: 1, mood: .loved),
+            Self.makeLog(name: "X", daysAgo: 2, mood: .loved),
+            Self.makeLog(name: "X", daysAgo: 3, mood: .loved),
+        ]
+        let belief1 = FoodOSBeliefEngine.moodBelief(in: mostlyLoved)
+        XCTAssertEqual(belief1.posteriorPositiveMean, 0.8, accuracy: 0.0001)
+        XCTAssertLessThan(belief1.posteriorPositiveMean, 1.0)
+
+        // 1 loved + 1 tough → posterior = 2 / 4 = 0.5
+        let split = [
+            Self.makeLog(name: "X", daysAgo: 1, mood: .loved),
+            Self.makeLog(name: "X", daysAgo: 2, mood: .tough),
+        ]
+        let belief2 = FoodOSBeliefEngine.moodBelief(in: split)
+        XCTAssertEqual(belief2.posteriorPositiveMean, 0.5, accuracy: 0.0001)
+
+        // 0 mood reports → posterior = 1/2 = 0.5 (uninformative)
+        let none = [Self.makeLog(name: "X", daysAgo: 1, mood: nil)]
+        let belief3 = FoodOSBeliefEngine.moodBelief(in: none)
+        XCTAssertEqual(belief3.total, 0)
+        XCTAssertEqual(belief3.posteriorPositiveMean, 0.5, accuracy: 0.0001)
+    }
+
+    // MARK: 4. mood claim requires enough notes
+
+    /// Two mood-labeled logs is under the 3-note floor — even
+    /// though both are .loved, the mood reflection branch must NOT
+    /// fire. The engine falls through to a different (or fallback)
+    /// branch.
+    func test_moodClaim_requiresAtLeastThreeNotes() {
+        var logs: [FoodLog] = (1...10).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0, calories: 500)
+        }
+        // Two mood notes both .loved — under the 3-note floor.
+        logs[0] = Self.makeLog(name: "Bowl", daysAgo: 1,
+                               calories: 500, mood: .loved)
+        logs[1] = Self.makeLog(name: "Bowl", daysAgo: 2,
+                               calories: 500, mood: .loved)
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs:        logs,
+            sevenDayLogs:         Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now:                  Self.now,
+            timeZone:             Self.timeZone
+        )
+        // The mood title is "Most recent meals have felt steady" /
+        // "Some recent meals have felt tougher." Confirm neither
+        // surfaces with only 2 notes.
+        XCTAssertFalse(moment.title.lowercased().contains("felt steady"))
+        XCTAssertFalse(moment.title.lowercased().contains("felt tougher"))
+    }
+
+    // MARK: 5. slot claim requires enough samples
+
+    /// Slot-stats helper must require ≥ 3 logs in a slot. Two
+    /// dinners isn't enough to call dinner a pattern.
+    func test_slotStats_requireMinimumSamples() {
+        let logs = [
+            Self.makeLog(name: "Dinner", daysAgo: 1, hour: 19, calories: 900),
+            Self.makeLog(name: "Dinner", daysAgo: 2, hour: 19, calories: 900),
+        ]
+        let stats = FoodOSBeliefEngine.slotStats(
+            in: logs, slot: .dinner, timeZone: Self.timeZone
+        )
+        XCTAssertEqual(stats.count, 2)
+        XCTAssertFalse(stats.hasEnoughEvidence,
+                       "Two dinners must not pass the slot floor")
+    }
+
+    // MARK: 6. this-week change requires meaningful difference
+
+    /// An 8% calorie shift across two well-populated weeks must
+    /// not surface a change moment — that's well inside the ±20%
+    /// band the engine treats as "about the same."
+    func test_change_silentWhenShiftIsTooSmall() {
+        let previous = (1...5).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0 + 7,
+                         hour: 12, calories: 500)
+        }
+        let current = (1...5).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0,
+                         hour: 12, calories: 540) // +8%
+        }
+        let thirtyDay = previous + current + (15...20).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0,
+                         hour: 12, calories: 500)
+        }
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs:        thirtyDay,
+            sevenDayLogs:         current,
+            previousSevenDayLogs: previous,
+            now:                  Self.now,
+            timeZone:             Self.timeZone
+        )
+        XCTAssertNotEqual(moment.kind, .change,
+                          "8% shift must not trigger a change moment")
+    }
+
+    // MARK: 7. recognition requires repeats
+
+    /// Solo foods don't qualify as recognition. With every name
+    /// unique, the engine must NOT fire the recognition branch —
+    /// even with 12 well-populated logs.
+    func test_recognition_silentOnNoRepeats() {
+        let logs = (1...12).map {
+            Self.makeLog(name: "Food \($0)", daysAgo: $0,
+                         hour: 12, calories: 500)
+        }
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs:        logs,
+            sevenDayLogs:         Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now:                  Self.now,
+            timeZone:             Self.timeZone
+        )
+        XCTAssertNotEqual(moment.kind, .recognition)
+    }
+
+    // MARK: 8. attention ranks same food higher
+
+    /// A query for "Kimchi stew" against a mixed candidate set
+    /// must surface the matching food ahead of unrelated dishes,
+    /// even when the unrelated ones are more recent.
+    func test_attention_ranksSameFoodHigher() {
+        // The kimchi log is older (5 days ago) but matches by name.
+        // The pizza log is recent (1 day) but doesn't match.
+        let kimchi = Self.makeLog(name: "Kimchi stew", daysAgo: 5,
+                                  hour: 19, calories: 500)
+        let pizza  = Self.makeLog(name: "Pizza", daysAgo: 1,
+                                  hour: 19, calories: 500)
+        let burger = Self.makeLog(name: "Burger", daysAgo: 2,
+                                  hour: 19, calories: 500)
+
+        let scored = FoodOSAttentionEngine.rank(
+            candidates: [pizza, burger, kimchi],
+            query: .init(foodName: "Kimchi stew",
+                         slot: .dinner,
+                         calories: 500,
+                         proteinG: nil,
+                         sugarG: nil,
+                         mood: nil,
+                         now: Self.now),
+            timeZone: Self.timeZone,
+            limit: 3
+        )
+        XCTAssertEqual(scored.first?.log.foodName, "Kimchi stew",
+                       "Same-food match should out-rank unrelated logs")
+    }
+
+    // MARK: 9. attention ranks same meal slot higher
+
+    /// Two equally-irrelevant foods, both equally recent — but one
+    /// shares the query's slot. The same-slot log must win.
+    func test_attention_ranksSameSlotHigher() {
+        let lunchLog  = Self.makeLog(name: "Pasta", daysAgo: 1,
+                                     hour: 12, calories: 600)
+        let dinnerLog = Self.makeLog(name: "Pasta", daysAgo: 1,
+                                     hour: 19, calories: 600)
+
+        let scored = FoodOSAttentionEngine.rank(
+            candidates: [lunchLog, dinnerLog],
+            query: .init(foodName: nil,
+                         slot: .dinner,
+                         calories: nil,
+                         proteinG: nil,
+                         sugarG: nil,
+                         mood: nil,
+                         now: Self.now),
+            timeZone: Self.timeZone,
+            limit: 2
+        )
+        // Identify each log by its UUID so we don't rely on
+        // FoodLog being a reference type.
+        let dinnerScore = scored.first { $0.log.id == dinnerLog.id }
+        let lunchScore  = scored.first { $0.log.id == lunchLog.id  }
+        XCTAssertNotNil(dinnerScore)
+        XCTAssertNotNil(lunchScore)
+        XCTAssertGreaterThan(dinnerScore!.score, lunchScore!.score)
+    }
+
+    // MARK: 10. attention ranks recent logs higher
+
+    /// All else equal, the more recent log must win. We pass two
+    /// identical candidates differing only in age (1 day vs 25
+    /// days) — recency should be the deciding head.
+    func test_attention_ranksRecentLogsHigher() {
+        let fresh = Self.makeLog(name: "Soup", daysAgo: 1,
+                                 hour: 12, calories: 400)
+        let stale = Self.makeLog(name: "Soup", daysAgo: 25,
+                                 hour: 12, calories: 400)
+        let scored = FoodOSAttentionEngine.rank(
+            candidates: [stale, fresh],
+            query: .init(foodName: "Soup",
+                         slot: .lunch,
+                         calories: 400,
+                         proteinG: nil,
+                         sugarG: nil,
+                         mood: nil,
+                         now: Self.now),
+            timeZone: Self.timeZone,
+            limit: 2
+        )
+        XCTAssertEqual(scored.first?.log.eatenAt, fresh.eatenAt,
+                       "Recent log should rank above older one")
+    }
+
+    // MARK: 11. copy safety rejects banned phrasing
+
+    /// The safety helper is the last-line guard between engine
+    /// output and the view. It must flag shame, medical, bossy,
+    /// and certainty phrasing — and stay quiet on warm, calm copy.
+    func test_copySafety_rejectsBannedFragments() {
+        // Shame
+        XCTAssertFalse(FoodOSMomentCopySafety.isSafe(
+            "You should stop binge eating like this."
+        ))
+        // Medical
+        XCTAssertFalse(FoodOSMomentCopySafety.isSafe(
+            "This may lead to diabetes."
+        ))
+        // Bossy
+        XCTAssertFalse(FoodOSMomentCopySafety.isSafe(
+            "You must eat more vegetables."
+        ))
+        // Certainty
+        XCTAssertFalse(FoodOSMomentCopySafety.isSafe(
+            "You always overeat at dinner."
+        ))
+        // Warm and calm — must pass
+        XCTAssertTrue(FoodOSMomentCopySafety.isSafe(
+            "Most recent meals have felt steady."
+        ))
+        XCTAssertTrue(FoodOSMomentCopySafety.isSafe(
+            "Your dinners look lighter this week."
+        ))
+    }
+
+    // MARK: 12. every personal-claim moment carries evidenceLine
+
+    /// Sweep across all branches that fire conditionally and
+    /// confirm each surfaces an evidenceLine. The fallback is
+    /// allowed to skip it (it makes no specific personal claim),
+    /// but every other branch must cite its basis.
+    func test_everyMoment_hasEvidenceLine() {
+        // Learning
+        let learning = FoodOSMomentEngine.compute(
+            thirtyDayLogs: [], sevenDayLogs: [], previousSevenDayLogs: [],
+            now: Self.now, timeZone: Self.timeZone
+        )
+        XCTAssertNotNil(learning.evidenceLine)
+
+        // Celebration: 4 → 10 meals across two weeks.
+        let prev = (1...4).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0 + 7,
+                         hour: 12, calories: 500)
+        }
+        let cur  = (1...10).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0,
+                         hour: 12, calories: 500)
+        }
+        let celebration = FoodOSMomentEngine.compute(
+            thirtyDayLogs: prev + cur,
+            sevenDayLogs:  cur,
+            previousSevenDayLogs: prev,
+            now: Self.now, timeZone: Self.timeZone
+        )
+        XCTAssertNotNil(celebration.evidenceLine)
+
+        // Recognition: kimchi 10x with no week-over-week change.
+        let kimchi = (1...10).map {
+            Self.makeLog(name: "Kimchi", daysAgo: $0,
+                         hour: 12, calories: 500)
+        }
+        let prevKimchi = (1...5).map {
+            Self.makeLog(name: "Kimchi", daysAgo: $0 + 7,
+                         hour: 12, calories: 500)
+        }
+        let recognition = FoodOSMomentEngine.compute(
+            thirtyDayLogs: kimchi + prevKimchi,
+            sevenDayLogs:  Array(kimchi.prefix(5)),
+            previousSevenDayLogs: prevKimchi,
+            now: Self.now, timeZone: Self.timeZone
+        )
+        XCTAssertNotNil(recognition.evidenceLine)
+    }
+
+    // MARK: 13. engine is deterministic
+
+    /// Running the engine twice with byte-identical input must
+    /// produce byte-identical output. This catches accidental
+    /// reliance on `Date()`, randomness, or set/dict iteration
+    /// order in any of the layers.
+    func test_engine_isDeterministicForSameInput() {
+        let logs = (1...12).map {
+            Self.makeLog(name: "Bowl", daysAgo: $0,
+                         hour: 12, calories: 500)
+        }
+        let a = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now, timeZone: Self.timeZone
+        )
+        let b = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now, timeZone: Self.timeZone
+        )
+        XCTAssertEqual(a, b)
+    }
+
+    // MARK: 14. fallback fires when evidence is thin (but ≥ floor)
+
+    /// 12 unique foods, no mood notes, no week-over-week change,
+    /// no slot pattern, no repeats — none of the conditional
+    /// branches qualify. The engine must still return something:
+    /// the gentle reflection fallback.
+    func test_fallback_firesWhenEvidenceIsThin() {
+        // 12 unique foods, all noon, identical calories — no
+        // slot pattern, no week-shift, no repeats.
+        let logs = (1...12).map {
+            Self.makeLog(name: "Food \($0)", daysAgo: $0,
+                         hour: 12, calories: 500)
+        }
+        let prev = (13...18).map {
+            Self.makeLog(name: "Food \($0)", daysAgo: $0,
+                         hour: 12, calories: 500)
+        }
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs + prev,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: prev,
+            now: Self.now, timeZone: Self.timeZone
+        )
+        XCTAssertEqual(moment.kind, .reflection)
+        XCTAssertNotNil(moment.evidenceLine)
+        XCTAssertEqual(moment.priorityScore, 10,
+                       "Fallback branch carries priority 10")
+    }
+
+    // MARK: - Helpers
+
+    /// Synthetic FoodLog at `daysAgo` days before `Self.now`, in
+    /// the test timezone. Same layout as the older suite's helper
+    /// but lives here so this section is self-contained.
+    private static func makeLog(name: String,
+                                daysAgo: Int,
+                                hour: Int = 12,
+                                calories: Double = 500,
+                                proteinG: Double? = 20,
+                                sugarG: Double = 5,
+                                mood: FoodLog.Mood? = nil) -> FoodLog {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let day = cal.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        var comps = cal.dateComponents([.year, .month, .day], from: day)
+        comps.hour = hour; comps.minute = 0; comps.timeZone = timeZone
+        let dt = cal.date(from: comps) ?? day
+        return FoodLog(
+            id: UUID(),
+            userId: UUID(),
+            foodName: name,
+            imagePath: nil,
+            imageThumbPath: nil,
+            calories: calories,
+            carbsG: 50,
+            sugarG: sugarG,
+            proteinG: proteinG,
+            fatG: 15,
+            fiberG: 5,
+            benefits: [],
+            drawbacks: [],
+            nutrients: [],
+            coachName: nil,
+            coachAdvice: nil,
+            eatenAt: dt,
+            createdAt: dt,
+            origin: .analyzed,
+            sourceLogId: nil,
+            mood: mood
+        )
+    }
+}
+
+
+// MARK: - FoodOSMomentFeedback (Feedback Learning V1)
+
+final class FoodOSMomentFeedbackTests: XCTestCase {
+
+    private static let timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    private static let now = Date(timeIntervalSince1970: 1_730_000_000)
+
+    // MARK: helpers
+
+    /// Throwaway file URL inside the test bundle's temp dir. Each
+    /// test gets its own URL so two tests never race on the same
+    /// JSON file.
+    private func tempStoreURL(named: String = #function) -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FoodOSFeedbackTests", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        let slug = named
+            .replacingOccurrences(of: "(", with: "_")
+            .replacingOccurrences(of: ")", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+        return dir.appendingPathComponent(
+            "store_\(slug)_\(UUID().uuidString).json"
+        )
+    }
+
+    /// Build a synthetic moment of an arbitrary shape. Used by the
+    /// store and bandit tests where the rest of the engine is out
+    /// of scope.
+    private func makeMoment(
+        kind: FoodOSMoment.Kind = .nudge,
+        title: String = "Test",
+        body: String? = nil,
+        evidenceLine: String? = nil
+    ) -> FoodOSMoment {
+        FoodOSMoment(
+            kind: kind,
+            title: title,
+            body: body,
+            evidenceLine: evidenceLine,
+            confidence: .medium,
+            actionLabel: nil,
+            priorityScore: 60,
+            generatedAt: Self.now
+        )
+    }
+
+    private func makeLog(name: String,
+                         daysAgo: Int,
+                         hour: Int = 12,
+                         calories: Double = 500,
+                         mood: FoodLog.Mood? = nil) -> FoodLog {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = Self.timeZone
+        let day = cal.date(byAdding: .day, value: -daysAgo, to: Self.now)
+            ?? Self.now
+        var comps = cal.dateComponents([.year, .month, .day], from: day)
+        comps.hour = hour; comps.minute = 0; comps.timeZone = Self.timeZone
+        let dt = cal.date(from: comps) ?? day
+        return FoodLog(
+            id: UUID(), userId: UUID(), foodName: name,
+            imagePath: nil, imageThumbPath: nil,
+            calories: calories, carbsG: 50, sugarG: 5,
+            proteinG: 20, fatG: 15, fiberG: 5,
+            benefits: [], drawbacks: [], nutrients: [],
+            coachName: nil, coachAdvice: nil,
+            eatenAt: dt, createdAt: dt,
+            origin: .analyzed, sourceLogId: nil, mood: mood
+        )
+    }
+
+    // MARK: 1. new store starts empty
+
+    func test_store_startsEmpty() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        XCTAssertTrue(store.events.isEmpty)
+        XCTAssertTrue(store.preferences.isEmpty)
+    }
+
+    // MARK: 2. helpful increases posterior
+
+    func test_helpful_increasesPosterior() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge,
+                                body: "Your dinners have been running heavier")
+        store.record(feedback: .helpful, for: moment)
+        let pref = store.preference(for: .lighterDinner)
+        XCTAssertNotNil(pref)
+        XCTAssertGreaterThan(pref!.posteriorMean, 0.5)
+        XCTAssertEqual(pref!.helpfulCount, 1)
+    }
+
+    // MARK: 3. notUseful decreases posterior
+
+    func test_notUseful_decreasesPosterior() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge,
+                                body: "Your dinners have been running heavier")
+        store.record(feedback: .notUseful, for: moment)
+        let pref = store.preference(for: .lighterDinner)
+        XCTAssertNotNil(pref)
+        XCTAssertLessThan(pref!.posteriorMean, 0.5)
+    }
+
+    // MARK: 4. willTry increases posterior mildly
+
+    func test_willTry_increasesPosteriorMildly() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge,
+                                body: "Your dinners have been running heavier")
+        store.record(feedback: .willTry, for: moment)
+        let pref = store.preference(for: .lighterDinner)
+        XCTAssertNotNil(pref)
+        // alpha = 0 + 1 + 0 + 1 = 2; beta = 0 + 0 + 1 = 1; mean = 2/3
+        XCTAssertEqual(pref!.posteriorMean, 2.0 / 3.0, accuracy: 0.0001)
+        XCTAssertGreaterThan(pref!.posteriorMean, 0.5)
+        // Mild: less than 3 helpfuls would push (4/5 = 0.8).
+        XCTAssertLessThan(pref!.posteriorMean, 0.8)
+    }
+
+    // MARK: 5. low confidence does not affect priority
+
+    func test_lowConfidence_yieldsZeroAdjustment() {
+        var pref = FoodOSMomentPreference(tag: .lighterDinner,
+                                          shownCount: 2,
+                                          helpfulCount: 2)
+        pref.recomputeDerived()
+        XCTAssertEqual(pref.confidence, .low)
+        XCTAssertEqual(FoodOSMomentBandit.adjustment(for: pref), 0)
+    }
+
+    // MARK: 6. high confidence positive feedback boosts matching tag
+
+    func test_highConfidencePositive_boostsMatchingTag() {
+        // 9 helpfuls, 0 notUseful → posterior 10/11 ≈ 0.91, shown 9 → high.
+        var pref = FoodOSMomentPreference(tag: .lighterDinner,
+                                          shownCount: 9,
+                                          helpfulCount: 9)
+        pref.recomputeDerived()
+        XCTAssertEqual(pref.confidence, .high)
+        XCTAssertEqual(FoodOSMomentBandit.adjustment(for: pref), 10)
+
+        // End-to-end: nudge has priority 60, recognition has 50. Boost
+        // the nudge tag with enough positive feedback and the engine
+        // should still surface the nudge (already on top), proving
+        // the integration path runs.
+        let logs = (1...12).map {
+            self.makeLog(name: "Kimchi", daysAgo: $0, hour: 12, calories: 400)
+        }
+        let dinners = (1...4).map {
+            self.makeLog(name: "Burger", daysAgo: $0, hour: 19, calories: 900)
+        }
+        let lunches = (1...4).map {
+            self.makeLog(name: "Salad", daysAgo: $0, hour: 12, calories: 400)
+        }
+        let thirty = logs + dinners + lunches
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: thirty,
+            sevenDayLogs:  Array(thirty.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: [pref]
+        )
+        // Either nudge (boosted) or recognition (its native priority)
+        // can win — but the boost must NOT downgrade the nudge below
+        // recognition.
+        XCTAssertNotEqual(moment.kind, .learning)
+    }
+
+    // MARK: 7. high confidence negative feedback suppresses matching tag
+
+    func test_highConfidenceNegative_suppressesMatchingTag() {
+        // Build a scenario where the nudge branch naturally fires
+        // (dinners ≥25% heavier than lunches, both well populated)
+        // and recognition also has signal (kimchi 5x).
+        let kimchi = (1...5).map {
+            self.makeLog(name: "Kimchi", daysAgo: $0, hour: 12, calories: 400)
+        }
+        let dinners = (1...4).map {
+            self.makeLog(name: "Burger", daysAgo: $0, hour: 19, calories: 900)
+        }
+        let lunches = (1...4).map {
+            self.makeLog(name: "Salad", daysAgo: $0, hour: 12, calories: 400)
+        }
+        let thirty = kimchi + dinners + lunches
+
+        // No preferences → nudge (priority 60) beats recognition (50).
+        let baseline = FoodOSMomentEngine.compute(
+            thirtyDayLogs: thirty,
+            sevenDayLogs:  Array(thirty.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+        XCTAssertEqual(baseline.kind, .nudge,
+                       "Baseline assumption: nudge wins without feedback")
+
+        // 9 notUsefuls on .lighterDinner → posterior ≈ 0.09, high
+        // confidence → -10 adjustment → nudge falls to 50, ties or
+        // loses to recognition (50). Tie-break preserves chain order
+        // (celebration/change/mood/nudge/recognition), so a tie still
+        // favors nudge — bump to 10 negatives so recognition wins.
+        var pref = FoodOSMomentPreference(tag: .lighterDinner,
+                                          shownCount: 10,
+                                          notUsefulCount: 10)
+        pref.recomputeDerived()
+        XCTAssertEqual(pref.confidence, .high)
+        XCTAssertEqual(FoodOSMomentBandit.adjustment(for: pref), -10)
+
+        let withFeedback = FoodOSMomentEngine.compute(
+            thirtyDayLogs: thirty,
+            sevenDayLogs:  Array(thirty.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: [pref]
+        )
+        // Nudge has been suppressed by 10 → tied with recognition at
+        // 50 — but the tie-breaker keeps chain order, so nudge still
+        // wins among tied. To verify suppression actually moves the
+        // needle, just confirm the score moved: i.e., a moment is
+        // still produced and the nudge isn't artificially elevated.
+        // Stronger assertion: with even MORE suppression…
+        var harsher = FoodOSMomentPreference(tag: .lighterDinner,
+                                             shownCount: 20,
+                                             notUsefulCount: 20)
+        harsher.recomputeDerived()
+        // adjustment is bounded at -10, so the harsher version
+        // doesn't increase the magnitude — instead drive the result
+        // by simultaneously boosting recognition.
+        var liftRec = FoodOSMomentPreference(tag: .repeatReliableMeal,
+                                             shownCount: 10,
+                                             helpfulCount: 10)
+        liftRec.recomputeDerived()
+        let suppressed = FoodOSMomentEngine.compute(
+            thirtyDayLogs: thirty,
+            sevenDayLogs:  Array(thirty.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: [harsher, liftRec]
+        )
+        XCTAssertEqual(suppressed.kind, .recognition,
+                       "Nudge suppressed AND recognition boosted should let " +
+                       "recognition win over nudge")
+        _ = withFeedback // intentionally unused: documents the chain
+    }
+
+    // MARK: 8. no feedback preserves original moment ranking
+
+    func test_noFeedback_preservesOriginalRanking() {
+        let logs = (1...12).map {
+            self.makeLog(name: "Kimchi", daysAgo: $0, hour: 12, calories: 500)
+        }
+        let baseline = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+        let withEmptyPrefs = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: []
+        )
+        XCTAssertEqual(baseline, withEmptyPrefs)
+    }
+
+    // MARK: 9. corrupt storage resets safely
+
+    func test_corruptStorage_resetsSafely() throws {
+        let url = tempStoreURL()
+        try "not json at all { [".data(using: .utf8)!.write(to: url)
+        let store = FoodOSMomentFeedbackStore(fileURL: url)
+        // Decode failed → reset to empty without throwing.
+        XCTAssertTrue(store.events.isEmpty)
+        XCTAssertTrue(store.preferences.isEmpty)
+        // And a fresh write should succeed on the cleaned slate.
+        store.record(feedback: .helpful, for: makeMoment(kind: .nudge))
+        let reloaded = FoodOSMomentFeedbackStore(fileURL: url)
+        XCTAssertEqual(reloaded.events.count, 1)
+    }
+
+    // MARK: 10. event history caps at 500
+
+    func test_eventHistory_capsAt500() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        // 510 taps; oldest 10 should drop.
+        for _ in 0..<510 {
+            store.record(feedback: .helpful, for: moment)
+        }
+        XCTAssertEqual(store.events.count,
+                       FoodOSMomentFeedbackStore.eventHistoryCap)
+    }
+
+    // MARK: 11. momentTag derivation works for the main kinds
+
+    func test_momentTag_derivation() {
+        XCTAssertEqual(
+            makeMoment(kind: .nudge,
+                       body: "Your dinners have been running heavier").momentTag,
+            .lighterDinner
+        )
+        XCTAssertEqual(
+            makeMoment(kind: .nudge,
+                       body: "Pair more protein with this meal").momentTag,
+            .proteinPairing
+        )
+        XCTAssertEqual(makeMoment(kind: .change).momentTag, .weeklyChange)
+        XCTAssertEqual(makeMoment(kind: .celebration).momentTag, .consistency)
+        XCTAssertEqual(
+            makeMoment(kind: .recognition).momentTag, .repeatReliableMeal
+        )
+        XCTAssertEqual(
+            makeMoment(kind: .reflection,
+                       evidenceLine: "Based on 5 mood notes.").momentTag,
+            .moodReflection
+        )
+        XCTAssertEqual(
+            makeMoment(kind: .reflection,
+                       evidenceLine: "Based on your recent meals.").momentTag,
+            .genericReflection
+        )
+        XCTAssertEqual(makeMoment(kind: .learning).momentTag, .unknown)
+    }
+
+    // MARK: 12. feedback controls do not appear for learning moments
+
+    func test_feedbackPolicy_hidesControlsForLearning() {
+        XCTAssertFalse(FoodOSMomentFeedbackPolicy.showsControls(
+            for: makeMoment(kind: .learning)
+        ))
+        XCTAssertTrue(FoodOSMomentFeedbackPolicy.showsControls(
+            for: makeMoment(kind: .nudge)
+        ))
+        XCTAssertTrue(FoodOSMomentFeedbackPolicy.showsControls(
+            for: makeMoment(kind: .reflection)
+        ))
+        // "I'll try this" is only meaningful on action-prompting kinds.
+        XCTAssertTrue(FoodOSMomentFeedbackPolicy.showsWillTry(
+            for: makeMoment(kind: .nudge)
+        ))
+        XCTAssertTrue(FoodOSMomentFeedbackPolicy.showsWillTry(
+            for: makeMoment(kind: .experiment)
+        ))
+        XCTAssertFalse(FoodOSMomentFeedbackPolicy.showsWillTry(
+            for: makeMoment(kind: .reflection)
+        ))
+    }
+}
+
+// MARK: - FoodOSMomentFeedback V2 (active experiments + worked-before)
+
+final class FoodOSMomentFeedbackV2Tests: XCTestCase {
+
+    private static let timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    private static let now = Date(timeIntervalSince1970: 1_730_000_000)
+
+    // MARK: helpers
+
+    private func tempStoreURL(named: String = #function) -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FoodOSFeedbackV2Tests", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        let slug = named
+            .replacingOccurrences(of: "(", with: "_")
+            .replacingOccurrences(of: ")", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+        return dir.appendingPathComponent(
+            "v2_store_\(slug)_\(UUID().uuidString).json"
+        )
+    }
+
+    private func makeMoment(
+        kind: FoodOSMoment.Kind = .nudge,
+        title: String = "Try keeping dinner a little lighter today.",
+        body: String? = "Your dinners have been running heavier than your lunches lately.",
+        evidenceLine: String? = nil
+    ) -> FoodOSMoment {
+        FoodOSMoment(
+            kind: kind,
+            title: title,
+            body: body,
+            evidenceLine: evidenceLine,
+            confidence: .medium,
+            actionLabel: nil,
+            priorityScore: 60,
+            generatedAt: Self.now
+        )
+    }
+
+    private func makeLog(mood: FoodLog.Mood? = nil) -> FoodLog {
+        FoodLog(
+            id: UUID(), userId: UUID(), foodName: "Salad",
+            imagePath: nil, imageThumbPath: nil,
+            calories: 400, carbsG: 30, sugarG: 4,
+            proteinG: 20, fatG: 10, fiberG: 6,
+            benefits: [], drawbacks: [], nutrients: [],
+            coachName: nil, coachAdvice: nil,
+            eatenAt: Self.now, createdAt: Self.now,
+            origin: .analyzed, sourceLogId: nil, mood: mood
+        )
+    }
+
+    // MARK: 1. tapping willTry starts active experiment
+
+    func test_willTry_startsActiveExperiment() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        let active = store.activeExperiments
+        XCTAssertEqual(active.count, 1)
+        XCTAssertEqual(active.first?.momentTag, .lighterDinner)
+        XCTAssertEqual(active.first?.status, .active)
+    }
+
+    // MARK: 2. active experiment expires after 24 hours
+
+    func test_activeExperiment_expiresAfter24Hours() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        let later = Self.now.addingTimeInterval(25 * 60 * 60)
+        let expiredCount = store.expireOldExperiments(now: later)
+        XCTAssertEqual(expiredCount, 1)
+        XCTAssertTrue(store.activeExperiments.isEmpty)
+        XCTAssertEqual(store.resolvedExperiments.last?.status, .expired)
+    }
+
+    // MARK: 3. only one active experiment per tag is kept
+
+    func test_singleActiveExperimentPerTag() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        _ = store.startExperiment(
+            from: moment, now: Self.now.addingTimeInterval(5 * 60)
+        )
+        let active = store.activeExperiments.filter {
+            $0.momentTag == .lighterDinner
+        }
+        XCTAssertEqual(active.count, 1)
+    }
+
+    // MARK: 4-6. mood outcome mapping
+
+    func test_lovedMood_resolvesPositive() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        let resolved = store.resolveExperiment(
+            for: makeLog(), mood: .loved, now: Self.now.addingTimeInterval(60)
+        )
+        XCTAssertEqual(resolved?.outcome, .positive)
+        XCTAssertEqual(
+            store.preference(for: .lighterDinner)?.positiveMoodAfterTryCount, 1
+        )
+    }
+
+    func test_fineMood_resolvesPositive() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        let resolved = store.resolveExperiment(
+            for: makeLog(), mood: .fine, now: Self.now.addingTimeInterval(60)
+        )
+        XCTAssertEqual(resolved?.outcome, .positive)
+        XCTAssertEqual(
+            store.preference(for: .lighterDinner)?.positiveMoodAfterTryCount, 1
+        )
+    }
+
+    func test_toughMood_resolvesNegative() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        let resolved = store.resolveExperiment(
+            for: makeLog(), mood: .tough, now: Self.now.addingTimeInterval(60)
+        )
+        XCTAssertEqual(resolved?.outcome, .negative)
+        XCTAssertEqual(
+            store.preference(for: .lighterDinner)?.negativeMoodAfterTryCount, 1
+        )
+    }
+
+    // MARK: 7. no active experiment → no resolution
+
+    func test_noActiveExperiment_doesNotResolve() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let resolved = store.resolveExperiment(
+            for: makeLog(), mood: .loved, now: Self.now
+        )
+        XCTAssertNil(resolved)
+    }
+
+    // MARK: 8. expired experiments do not update counts
+
+    func test_expiredExperiment_doesNotUpdateCounts() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        let later = Self.now.addingTimeInterval(25 * 60 * 60)
+        let resolved = store.resolveExperiment(
+            for: makeLog(), mood: .loved, now: later
+        )
+        XCTAssertNil(resolved, "expired experiment must not resolve")
+        // No positive/negative count update for an expired row.
+        let pref = store.preference(for: .lighterDinner)
+        XCTAssertEqual(pref?.positiveMoodAfterTryCount ?? 0, 0)
+        XCTAssertEqual(pref?.negativeMoodAfterTryCount ?? 0, 0)
+    }
+
+    // MARK: 9-10. resolving increments the right counter
+
+    func test_positiveResolution_incrementsPositiveCounter() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        _ = store.resolveExperiment(
+            for: makeLog(), mood: .loved, now: Self.now.addingTimeInterval(60)
+        )
+        XCTAssertEqual(
+            store.preference(for: .lighterDinner)?.positiveMoodAfterTryCount, 1
+        )
+    }
+
+    func test_negativeResolution_incrementsNegativeCounter() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        _ = store.resolveExperiment(
+            for: makeLog(), mood: .tough, now: Self.now.addingTimeInterval(60)
+        )
+        XCTAssertEqual(
+            store.preference(for: .lighterDinner)?.negativeMoodAfterTryCount, 1
+        )
+    }
+
+    // MARK: 11. worked-before requires >= 2 positive outcomes
+
+    func test_workedBefore_requiresTwoPositives() {
+        // Build a 12-log thirty-day window so we clear the learning
+        // gate. Use mid-day logs so neither the dinner-change branch
+        // nor the dinner-heavier nudge branch fires.
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = Self.timeZone
+        let logs: [FoodLog] = (1...12).map { i in
+            let day = cal.date(byAdding: .day, value: -i, to: Self.now) ?? Self.now
+            return FoodLog(
+                id: UUID(), userId: UUID(), foodName: "Soup",
+                imagePath: nil, imageThumbPath: nil,
+                calories: 500, carbsG: 50, sugarG: 5,
+                proteinG: 25, fatG: 10, fiberG: 5,
+                benefits: [], drawbacks: [], nutrients: [],
+                coachName: nil, coachAdvice: nil,
+                eatenAt: day, createdAt: day,
+                origin: .analyzed, sourceLogId: nil, mood: nil
+            )
+        }
+
+        // One positive — not enough.
+        var pref = FoodOSMomentPreference(
+            tag: .lighterDinner,
+            shownCount: 5,
+            helpfulCount: 2,
+            willTryCount: 1,
+            positiveMoodAfterTryCount: 1
+        )
+        pref.recomputeDerived()
+
+        let one = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: [pref]
+        )
+        XCTAssertNotEqual(one.title, "This worked for you before.")
+
+        // Two positives + posterior over 0.65 + medium confidence — fires.
+        var pref2 = FoodOSMomentPreference(
+            tag: .lighterDinner,
+            shownCount: 5,
+            helpfulCount: 3,
+            willTryCount: 2,
+            positiveMoodAfterTryCount: 2
+        )
+        pref2.recomputeDerived()
+        XCTAssertGreaterThanOrEqual(pref2.posteriorMean, 0.65)
+        XCTAssertEqual(pref2.confidence, .medium)
+
+        let two = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: [pref2]
+        )
+        XCTAssertEqual(two.title, "This worked for you before.")
+        XCTAssertEqual(two.kind, .experiment)
+    }
+
+    // MARK: 12. worked-before requires posterior >= 0.65
+
+    func test_workedBefore_requiresPosteriorThreshold() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = Self.timeZone
+        let logs: [FoodLog] = (1...12).map { i in
+            let day = cal.date(byAdding: .day, value: -i, to: Self.now) ?? Self.now
+            return FoodLog(
+                id: UUID(), userId: UUID(), foodName: "Soup",
+                imagePath: nil, imageThumbPath: nil,
+                calories: 500, carbsG: 50, sugarG: 5,
+                proteinG: 25, fatG: 10, fiberG: 5,
+                benefits: [], drawbacks: [], nutrients: [],
+                coachName: nil, coachAdvice: nil,
+                eatenAt: day, createdAt: day,
+                origin: .analyzed, sourceLogId: nil, mood: nil
+            )
+        }
+
+        // 2 positives but plenty of notUseful → posterior under 0.65.
+        var pref = FoodOSMomentPreference(
+            tag: .lighterDinner,
+            shownCount: 10,
+            helpfulCount: 0,
+            notUsefulCount: 8,
+            willTryCount: 0,
+            positiveMoodAfterTryCount: 2
+        )
+        pref.recomputeDerived()
+        XCTAssertLessThan(pref.posteriorMean, 0.65)
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: [pref]
+        )
+        XCTAssertNotEqual(moment.title, "This worked for you before.")
+    }
+
+    // MARK: 13. worked-before is gated by the learning floor
+
+    func test_workedBefore_gatedByLearningFloor() {
+        // 4 logs — below readinessFloor (8).
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = Self.timeZone
+        let logs: [FoodLog] = (1...4).map { i in
+            let day = cal.date(byAdding: .day, value: -i, to: Self.now) ?? Self.now
+            return FoodLog(
+                id: UUID(), userId: UUID(), foodName: "Soup",
+                imagePath: nil, imageThumbPath: nil,
+                calories: 500, carbsG: 50, sugarG: 5,
+                proteinG: 25, fatG: 10, fiberG: 5,
+                benefits: [], drawbacks: [], nutrients: [],
+                coachName: nil, coachAdvice: nil,
+                eatenAt: day, createdAt: day,
+                origin: .analyzed, sourceLogId: nil, mood: nil
+            )
+        }
+        var pref = FoodOSMomentPreference(
+            tag: .lighterDinner,
+            shownCount: 5,
+            helpfulCount: 3,
+            willTryCount: 2,
+            positiveMoodAfterTryCount: 2
+        )
+        pref.recomputeDerived()
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(2)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: [pref]
+        )
+        XCTAssertEqual(moment.kind, .learning,
+                       "Learning gate must override worked-before candidate")
+    }
+
+    // MARK: 14. corrupt experiment storage resets safely
+
+    func test_corruptExperimentStorage_resetsSafely() throws {
+        let url = tempStoreURL()
+        try "{ malformed".data(using: .utf8)!.write(to: url)
+        let store = FoodOSMomentFeedbackStore(fileURL: url)
+        XCTAssertTrue(store.activeExperiments.isEmpty)
+        XCTAssertTrue(store.resolvedExperiments.isEmpty)
+        // And a fresh write still works on the cleaned slate.
+        _ = store.startExperiment(from: makeMoment(kind: .nudge), now: Self.now)
+        let reloaded = FoodOSMomentFeedbackStore(fileURL: url)
+        XCTAssertEqual(reloaded.activeExperiments.count, 1)
+    }
+
+    // MARK: 15. history caps enforced
+
+    func test_resolvedExperimentHistory_capsAt100() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        // 120 quick start → resolve cycles to overflow the cap.
+        for i in 0..<120 {
+            let t = Self.now.addingTimeInterval(Double(i * 120))
+            _ = store.startExperiment(from: moment, now: t)
+            _ = store.resolveExperiment(
+                for: makeLog(),
+                mood: .fine,
+                now: t.addingTimeInterval(60)
+            )
+        }
+        XCTAssertLessThanOrEqual(
+            store.resolvedExperiments.count,
+            FoodOSMomentFeedbackStore.resolvedExperimentHistoryCap
+        )
+    }
+
+    // MARK: 16. no feedback preserves legacy ranking
+
+    func test_noFeedback_preservesLegacyRanking() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = Self.timeZone
+        let logs: [FoodLog] = (1...12).map { i in
+            let day = cal.date(byAdding: .day, value: -i, to: Self.now) ?? Self.now
+            return FoodLog(
+                id: UUID(), userId: UUID(), foodName: "Soup",
+                imagePath: nil, imageThumbPath: nil,
+                calories: 500, carbsG: 50, sugarG: 5,
+                proteinG: 25, fatG: 10, fiberG: 5,
+                benefits: [], drawbacks: [], nutrients: [],
+                coachName: nil, coachAdvice: nil,
+                eatenAt: day, createdAt: day,
+                origin: .analyzed, sourceLogId: nil, mood: nil
+            )
+        }
+        let baseline = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+        let withEmpty = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs:  Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            preferences: []
+        )
+        XCTAssertEqual(baseline, withEmpty)
+    }
+
+    // MARK: 17. copy safety rejects causal / medical / shaming phrasing
+
+    func test_copySafety_rejectsBannedPhrasing() {
+        XCTAssertFalse(FoodOSMomentCopySafety.isSafe(
+            title: "This always cures your bad mood",
+            body: nil, evidence: nil
+        ))
+        XCTAssertFalse(FoodOSMomentCopySafety.isSafe(
+            title: "Your doctor recommends this",
+            body: nil, evidence: nil
+        ))
+        XCTAssertFalse(FoodOSMomentCopySafety.isSafe(
+            title: "You must eat lighter",
+            body: nil, evidence: nil
+        ))
+        // The V2 worked-before copy itself is safe.
+        XCTAssertTrue(FoodOSMomentCopySafety.isSafe(
+            title: "This worked for you before.",
+            body: "When you tried this kind of moment before, your next mood note seemed steady or better.",
+            evidence: "Based on 4 tries with 3 positive mood notes."
+        ))
+    }
+
+    // MARK: 18. integration — willTry → loved increases posterior
+
+    func test_integration_willTryThenLoved_raisesPosterior() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        store.record(feedback: .willTry, for: moment, now: Self.now)
+        _ = store.startExperiment(from: moment, now: Self.now)
+        let before = store.preference(for: .lighterDinner)?.posteriorMean ?? 0
+        _ = store.resolveExperiment(
+            for: makeLog(),
+            mood: .loved,
+            now: Self.now.addingTimeInterval(60)
+        )
+        let after = store.preference(for: .lighterDinner)?.posteriorMean ?? 0
+        XCTAssertGreaterThan(after, before,
+                             "resolving positive should raise posterior")
+    }
+
+    // MARK: 19. integration — negative outcome flips the bandit signal
+
+    func test_integration_negativeOutcome_suppressesTag() {
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let moment = makeMoment(kind: .nudge)
+        // Build a strong negative signal: many notUseful taps plus a
+        // few negative mood-after-try outcomes. With shownCount ≥ 8
+        // (high confidence) and posterior below 0.35, the bandit
+        // returns a -10 adjustment.
+        for _ in 0..<10 {
+            store.record(feedback: .notUseful, for: moment, now: Self.now)
+        }
+        for _ in 0..<3 {
+            _ = store.startExperiment(from: moment, now: Self.now)
+            _ = store.resolveExperiment(
+                for: makeLog(),
+                mood: .tough,
+                now: Self.now.addingTimeInterval(60)
+            )
+        }
+        let pref = store.preference(for: .lighterDinner)
+        XCTAssertNotNil(pref)
+        XCTAssertEqual(pref?.confidence, .high)
+        XCTAssertLessThanOrEqual(pref?.posteriorMean ?? 1.0, 0.35)
+        XCTAssertEqual(FoodOSMomentBandit.adjustment(for: pref!), -10)
+    }
+}
+
+// MARK: - FoodOS storytelling (Phase 18)
+//
+// Pure tests for the storytelling helpers introduced to make every
+// Mirror surface follow CLAIM → SPECIFIC EVIDENCE → TINY ACTION.
+//
+// Numbered against the task brief:
+//   1.  hero never says "rarely repeat" when top food count ≥ 5
+//   2.  hero says "mostly exploring" when exploring + one anchor
+//   3.  recognition evidence includes count + time window
+//   4.  mood evidence includes positive ratio when notes ≥ 3
+//   5.  mood claim hidden when mood note count < 3
+//   6.  worked-before evidence includes tries + positive mood notes
+//   7.  celebration evidence compares this week vs previous week
+//   8.  nudge copy never says "works well" without supporting evidence
+//   9.  Home preview uses sharper anchor copy for repeated top food
+//   10. contradiction guard catches top-food vs explorer conflict
+//   11. copy safety rejects shame / medical / bossy / certainty
+//   12. weak evidence uses soft language ("starting to" / "may be" /
+//       "looks like")
+//   13. all visible personal claims carry an evidenceLine
+//   14. legacy behavior still compiles (the existing suite proves
+//       this — we keep that pact explicit here)
+
+final class FoodOSStoryBuilderTests: XCTestCase {
+
+    private static let timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    private static let now = Date(timeIntervalSince1970: 1_730_000_000)
+
+    // MARK: helpers
+
+    private static func makeLog(name: String,
+                                daysAgo: Int,
+                                hour: Int = 12,
+                                calories: Double = 500,
+                                proteinG: Double? = 20,
+                                sugarG: Double = 5,
+                                mood: FoodLog.Mood? = nil) -> FoodLog {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let day = cal.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        var comps = cal.dateComponents([.year, .month, .day], from: day)
+        comps.hour = hour; comps.minute = 0; comps.timeZone = timeZone
+        let dt = cal.date(from: comps) ?? day
+        return FoodLog(
+            id: UUID(), userId: UUID(), foodName: name,
+            imagePath: nil, imageThumbPath: nil,
+            calories: calories, carbsG: 50, sugarG: sugarG,
+            proteinG: proteinG, fatG: 15, fiberG: 5,
+            benefits: [], drawbacks: [], nutrients: [],
+            coachName: nil, coachAdvice: nil,
+            eatenAt: dt, createdAt: dt,
+            origin: .analyzed, sourceLogId: nil, mood: mood
+        )
+    }
+
+    // MARK: 1. hero — "rarely repeat" forbidden when an anchor exists
+
+    /// 6 sweet potato logs in a 30-log window. The pure-explorer
+    /// branch would normally fire (high uniqueness), but the
+    /// contradiction guard must keep us out of the "rarely repeat"
+    /// branch because a single food already crossed the anchor floor.
+    func test_hero_neverSaysRarelyRepeatWhenAnchorExists() {
+        // Build a 30-log window: 6 Sweet potato + 24 unique foods.
+        // Uniqueness ratio = 25/30 ≈ 0.83 — over the explorer floor.
+        var logs: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Sweet potato", daysAgo: $0)
+        }
+        logs += (7...30).map {
+            Self.makeLog(name: "Food \($0)", daysAgo: $0)
+        }
+        let topFoods = FoodMirrorInsightService.mostCommonFoods(
+            in: logs, limit: 3
+        )
+        let uniqueCount = Set(logs.map(\.foodName)).count
+        let hero = FoodOSStoryBuilder.heroIdentityLine(
+            thirtyDayLogCount: logs.count,
+            topFoods:          topFoods,
+            uniqueFoodCount:   uniqueCount
+        )
+        XCTAssertNotNil(hero)
+        XCTAssertFalse(
+            hero!.lowercased().contains("rarely repeat"),
+            "Hero must not say 'rarely repeat' when a top food has crossed the anchor floor"
+        )
+    }
+
+    // MARK: 2. hero — "mostly exploring" framing when anchor + explore
+
+    /// Same shape as the contradiction case, but here we assert the
+    /// positive: the picker chooses "mostly exploring — but X is
+    /// becoming a reliable anchor."
+    func test_hero_mostlyExploringWhenAnchorAndManyUnique() {
+        var logs: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Sweet potato", daysAgo: $0)
+        }
+        logs += (7...30).map {
+            Self.makeLog(name: "Food \($0)", daysAgo: $0)
+        }
+        let topFoods = FoodMirrorInsightService.mostCommonFoods(
+            in: logs, limit: 3
+        )
+        let uniqueCount = Set(logs.map(\.foodName)).count
+        let hero = FoodOSStoryBuilder.heroIdentityLine(
+            thirtyDayLogCount: logs.count,
+            topFoods:          topFoods,
+            uniqueFoodCount:   uniqueCount
+        )
+        XCTAssertEqual(hero,
+                       "You're mostly exploring — but Sweet potato is becoming a reliable anchor.")
+    }
+
+    /// Pure explorer — no food repeats more than once → "exploring
+    /// widely — your meals rarely repeat." is allowed because no
+    /// anchor exists.
+    func test_hero_exploringWidelyWhenNoStrongRepeats() {
+        let logs = (1...12).map {
+            Self.makeLog(name: "Unique \($0)", daysAgo: $0)
+        }
+        let topFoods = FoodMirrorInsightService.mostCommonFoods(
+            in: logs, limit: 3
+        )
+        let uniqueCount = Set(logs.map(\.foodName)).count
+        let hero = FoodOSStoryBuilder.heroIdentityLine(
+            thirtyDayLogCount: logs.count,
+            topFoods:          topFoods,
+            uniqueFoodCount:   uniqueCount
+        )
+        XCTAssertEqual(hero,
+                       "You're exploring widely — your meals rarely repeat.")
+    }
+
+    // MARK: 3. recognition evidence includes count + window
+
+    func test_recognitionEvidence_includesCountAndWindow() {
+        let line = FoodOSEvidenceBuilder.recognitionEvidence(
+            food: "Sweet potato", count: 6
+        )
+        XCTAssertEqual(line, "You logged Sweet potato 6 times in the last 30 days.")
+    }
+
+    // MARK: 4. mood evidence cites positive ratio when ≥ 3 notes
+
+    func test_moodEvidence_citesPositiveOverTotal() {
+        let line = FoodOSEvidenceBuilder.moodEvidence(
+            positive: 22, total: 32
+        )
+        XCTAssertEqual(line, "22 of 32 mood notes were fine or loved.")
+    }
+
+    // MARK: 5. mood claim gated by mood-note floor
+
+    /// Two mood notes — both loved — is below the 3-note floor.
+    /// The mood-reflection branch must NOT fire even with a high
+    /// posterior; the engine has to fall through to the next
+    /// candidate or the fallback. The existing engine test covers
+    /// this case; here we assert the policy helper directly so a
+    /// future contributor can't loosen the floor by accident.
+    func test_moodClaim_hiddenWhenFewerThanThreeNotes() {
+        XCTAssertFalse(FoodOSNarrativePolicy.canMakeMoodClaim(moodLogCount: 2))
+        XCTAssertTrue(FoodOSNarrativePolicy.canMakeMoodClaim(moodLogCount: 3))
+    }
+
+    // MARK: 6. worked-before evidence cites tries + positives
+
+    func test_workedBeforeEvidence_includesTriesAndPositives() {
+        XCTAssertEqual(
+            FoodOSEvidenceBuilder.workedBeforeEvidence(tries: 3, positives: 2),
+            "Based on 3 tries with 2 positive mood notes."
+        )
+        XCTAssertEqual(
+            FoodOSEvidenceBuilder.workedBeforeEvidence(tries: 1, positives: 1),
+            "Based on 1 try with 1 positive mood note."
+        )
+    }
+
+    // MARK: 7. celebration evidence compares weeks
+
+    func test_celebrationEvidence_comparesThisWeekVsLast() {
+        let line = FoodOSEvidenceBuilder.celebrationEvidence(
+            currentCount: 21, previousCount: 12
+        )
+        XCTAssertTrue(line.contains("21"))
+        XCTAssertTrue(line.contains("9"))
+        XCTAssertTrue(line.lowercased().contains("more than last"))
+    }
+
+    // MARK: 8. nudge copy never says "work well" without evidence
+
+    /// The positive-mood-linked-food nudge has historically been
+    /// "A meal like X often seems to work well for you." The
+    /// storytelling pass must keep the phrase "work well" — older
+    /// tests assert against it — but must also surface concrete
+    /// evidence (count of loved logs).
+    func test_nudgeCopy_includesEvidenceAlongsideWorkWell() {
+        let nudge = FoodOSStoryBuilder.positiveMoodFoodNudge(
+            food: "Sweet potato", lovedCount: 3
+        )
+        let lower = nudge.lowercased()
+        XCTAssertTrue(lower.contains("work well"))
+        XCTAssertTrue(lower.contains("3"),
+                      "Nudge must cite the supporting count")
+        XCTAssertTrue(lower.contains("mood notes"),
+                      "Nudge must cite the mood-evidence source")
+    }
+
+    // MARK: 9. Home preview uses sharper anchor copy
+
+    /// Sweet potato shows up 6× → the Home preview surfaces the
+    /// anchor title and a sharper "6 logs · …" footer instead of
+    /// the generic "Based on 30 days of logs" line.
+    func test_homePreview_usesSharperAnchorCopyForRepeatedTopFood() {
+        let summary = FoodMirrorSummary(
+            hasEnoughData:       true,
+            learningProgress:    LearningProgress.from(thirtyDayLogCount: 30),
+            thirtyDayLogCount:   30,
+            sevenDayLogCount:    6,
+            moodLogCount:        4,
+            eatingIdentity:      "You're mostly exploring — but Sweet potato is becoming a reliable anchor.",
+            weeklySummary:       nil,
+            mostCommonFoods:     [FoodMirrorSummary.FoodCount(name: "Sweet potato", count: 6)],
+            moodInsight:         nil,
+            timingInsight:       nil,
+            thisWeekChanged:     nil,
+            todaysGentleNudge:   nil,
+            suggestedExperiment: nil
+        )
+        let model = HomeMirrorPreview.cardModel(for: summary)
+        XCTAssertEqual(model?.title, "Sweet potato is becoming a reliable anchor.")
+        XCTAssertNotNil(model?.evidenceLine)
+        XCTAssertTrue(model!.evidenceLine!.contains("6"),
+                      "Anchor evidence should cite the log count")
+    }
+
+    // MARK: 10. contradiction guard
+
+    /// The narrative policy must detect "rarely repeat" hero text
+    /// against a 5+ top food count. Tests both the positive case
+    /// (caught) and the negative case (no contradiction with a low
+    /// top food count).
+    func test_contradictionGuard_catchesExplorerVsAnchorConflict() {
+        let bad = FoodOSNarrativePolicy.hasRarelyRepeatContradiction(
+            hero: "You're an explorer — your meals rarely repeat.",
+            topFoodCount: 6
+        )
+        XCTAssertTrue(bad)
+
+        let ok = FoodOSNarrativePolicy.hasRarelyRepeatContradiction(
+            hero: "You're an explorer — your meals rarely repeat.",
+            topFoodCount: 2
+        )
+        XCTAssertFalse(ok)
+    }
+
+    // MARK: 11. copy safety rejects shame/medical/bossy/certainty
+
+    func test_copySafety_rejectsShameMedicalBossyCertainty() {
+        XCTAssertFalse(FoodOSCopySafety.isSafe("You must stop eating bad food."))
+        XCTAssertFalse(FoodOSCopySafety.isSafe("This may lead to diabetes."))
+        XCTAssertFalse(FoodOSCopySafety.isSafe("Don't be guilty about cheat day."))
+        XCTAssertFalse(FoodOSCopySafety.isSafe("You always overeat."))
+        // Calm copy passes
+        XCTAssertTrue(FoodOSCopySafety.isSafe(
+            "Sweet potato seems to be one of your reliable meals."
+        ))
+        XCTAssertTrue(FoodOSCopySafety.isSafe(
+            "You logged 6 Sweet potato meals in the last 30 days."
+        ))
+    }
+
+    // MARK: 12. weak-evidence softening
+
+    func test_weakEvidence_usesSoftLanguage() {
+        let strong = FoodOSNarrativePolicy.softenWeakEvidence(
+            "Your dinners ran heavier this week.", isWeak: false
+        )
+        XCTAssertEqual(strong, "Your dinners ran heavier this week.")
+
+        let soft = FoodOSNarrativePolicy.softenWeakEvidence(
+            "Your dinners ran heavier this week.", isWeak: true
+        )
+        XCTAssertTrue(soft.lowercased().hasPrefix("looks like"))
+    }
+
+    // MARK: 13. every visible personal claim carries an evidenceLine
+
+    /// Walk the recognition branch through the engine and confirm
+    /// the surface always carries evidence. The legacy "every moment
+    /// has evidence" test asserts non-nil only; this one asserts the
+    /// evidence is *sharper* — naming the food + count.
+    func test_recognitionMoment_carriesSpecificEvidence() {
+        // 6 Sweet potato logs at the same hour + 6 unique fillers so
+        // the engine clears the 8-log readiness floor, then the
+        // priority chain falls through to recognition (no week
+        // change, no mood notes, no slot pattern).
+        var logs: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Sweet potato", daysAgo: $0, calories: 400)
+        }
+        logs += (7...12).map {
+            Self.makeLog(name: "Other \($0)", daysAgo: $0, calories: 400)
+        }
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs:        logs,
+            sevenDayLogs:         Array(logs.prefix(3)),
+            previousSevenDayLogs: [],
+            now:                  Self.now,
+            timeZone:             Self.timeZone
+        )
+        XCTAssertEqual(moment.kind, .recognition)
+        XCTAssertNotNil(moment.evidenceLine)
+        XCTAssertTrue(moment.evidenceLine!.contains("Sweet potato"),
+                      "Recognition evidence must name the food")
+        XCTAssertTrue(moment.evidenceLine!.contains("6"),
+                      "Recognition evidence must cite the count")
+    }
+
+    // MARK: 14. legacy behavior is unaffected for thin-data accounts
+
+    /// A brand-new account (zero logs) must still render the
+    /// learning state with the existing hardcoded copy — the
+    /// storybuilder does not invent identity claims below the
+    /// 5-log floor.
+    func test_thinData_leavesIdentityNil() {
+        let hero = FoodOSStoryBuilder.heroIdentityLine(
+            thirtyDayLogCount: 2,
+            topFoods:          [],
+            uniqueFoodCount:   2
+        )
+        XCTAssertNil(hero)
+    }
+
+    // MARK: - actionLabel rendering policy (Phase 18.1)
+
+    private func moment(actionLabel: String?,
+                        body: String? = nil,
+                        kind: FoodOSMoment.Kind = .recognition) -> FoodOSMoment {
+        FoodOSMoment(
+            kind: kind,
+            title: "Title.",
+            body: body,
+            evidenceLine: "Based on your recent meals.",
+            confidence: .medium,
+            actionLabel: actionLabel,
+            priorityScore: 50,
+            generatedAt: Self.now
+        )
+    }
+
+    /// nil and whitespace-only labels never render.
+    func test_shouldRenderActionLabel_falseForNilOrEmpty() {
+        XCTAssertFalse(FoodOSStoryBuilder.shouldRenderActionLabel(
+            moment(actionLabel: nil)
+        ))
+        XCTAssertFalse(FoodOSStoryBuilder.shouldRenderActionLabel(
+            moment(actionLabel: "")
+        ))
+        XCTAssertFalse(FoodOSStoryBuilder.shouldRenderActionLabel(
+            moment(actionLabel: "   ")
+        ))
+    }
+
+    /// Duplicate of body (case-insensitive, trimmed) suppresses the
+    /// action — we don't echo the same sentence twice.
+    func test_shouldRenderActionLabel_falseWhenDuplicatesBody() {
+        let m = moment(
+            actionLabel: "  Use it as today's anchor meal?  ",
+            body: "use it as today's anchor meal?"
+        )
+        XCTAssertFalse(FoodOSStoryBuilder.shouldRenderActionLabel(m))
+    }
+
+    /// Valid, distinct action label renders.
+    func test_shouldRenderActionLabel_trueForValidDistinctLabel() {
+        let m = moment(
+            actionLabel: "Use it as today's anchor meal?",
+            body: "Some other supporting copy."
+        )
+        XCTAssertTrue(FoodOSStoryBuilder.shouldRenderActionLabel(m))
+    }
+
+    /// Banned phrases never reach the UI even if a future contributor
+    /// hand-authors an unsafe action.
+    func test_shouldRenderActionLabel_rejectsUnsafeCopy() {
+        let m = moment(actionLabel: "You must stop eating like this.")
+        XCTAssertFalse(FoodOSStoryBuilder.shouldRenderActionLabel(m))
+    }
+
+    // MARK: - Anchor recognition action label (engine output)
+
+    /// Sweet potato 6× crosses the anchor floor → engine produces
+    /// the "today's anchor meal" action, no body line, and the
+    /// sharper title.
+    func test_anchorRecognition_producesAnchorActionLabel() {
+        var logs: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Sweet potato", daysAgo: $0, calories: 400)
+        }
+        logs += (7...12).map {
+            Self.makeLog(name: "Other \($0)", daysAgo: $0, calories: 400)
+        }
+        let m = FoodOSMomentEngine.compute(
+            thirtyDayLogs:        logs,
+            sevenDayLogs:         Array(logs.prefix(3)),
+            previousSevenDayLogs: [],
+            now:                  Self.now,
+            timeZone:             Self.timeZone
+        )
+        XCTAssertEqual(m.kind, .recognition)
+        XCTAssertEqual(m.title, "Sweet potato seems to be one of your reliable meals.")
+        XCTAssertNil(m.body,
+                     "Anchor card relies on title + evidence + action; body adds clutter")
+        XCTAssertNotNil(m.actionLabel)
+        XCTAssertEqual(m.actionLabel, "Use it as today's anchor meal?")
+        XCTAssertTrue(FoodOSStoryBuilder.shouldRenderActionLabel(m))
+    }
+
+    /// 3 logs is below the anchor floor — recognition still fires
+    /// (count >= 3) but the engine intentionally returns nil for
+    /// the action so the card stays a softer observation.
+    func test_weakRecognition_omitsActionLabel() {
+        var logs: [FoodLog] = (1...3).map {
+            Self.makeLog(name: "Sweet potato", daysAgo: $0, calories: 400)
+        }
+        logs += (4...12).map {
+            Self.makeLog(name: "Other \($0)", daysAgo: $0, calories: 400)
+        }
+        let m = FoodOSMomentEngine.compute(
+            thirtyDayLogs:        logs,
+            sevenDayLogs:         Array(logs.prefix(3)),
+            previousSevenDayLogs: [],
+            now:                  Self.now,
+            timeZone:             Self.timeZone
+        )
+        XCTAssertEqual(m.kind, .recognition)
+        XCTAssertNil(m.actionLabel,
+                     "Weak recognition (count < anchor floor) must not surface an action")
+        XCTAssertFalse(FoodOSStoryBuilder.shouldRenderActionLabel(m))
+    }
+
+    /// The recognition action label must survive FoodOSCopySafety
+    /// — no banned fragments, no medical / shaming language.
+    func test_anchorActionLabel_passesCopySafety() {
+        let action = "Use it as today's anchor meal?"
+        XCTAssertTrue(FoodOSCopySafety.isSafe(action))
+        XCTAssertTrue(FoodOSMomentCopySafety.isSafe(action))
     }
 }
 

@@ -544,7 +544,7 @@ struct CaptureView: View {
         .sheet(item: $pendingManualMoodLog) { log in
             MoodPulseSheet(
                 onPick: { mood in
-                    Task { await recordMoodForManualLog(log.id, mood: mood) }
+                    Task { await recordMoodForManualLog(log, mood: mood) }
                 },
                 onSkip: {}
             )
@@ -726,14 +726,22 @@ struct CaptureView: View {
     /// standalone — the manual path doesn't enter `.moodPulse` state,
     /// so there's no view-model anchor to reuse. Failures are silent;
     /// mood is enrichment, not critical.
-    private func recordMoodForManualLog(_ logId: UUID, mood: FoodLog.Mood) async {
+    ///
+    /// FoodOS V2: after a successful DB patch, resolve any pending
+    /// "I'll try this" experiment against this log + mood so the
+    /// learning loop also closes on the manual flow.
+    private func recordMoodForManualLog(_ log: FoodLog, mood: FoodLog.Mood) async {
         let service = FoodLogService()
         do {
-            _ = try await service.setMood(mood, on: logId)
+            _ = try await service.setMood(mood, on: log.id)
+            NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
+            _ = FoodOSMomentFeedbackStore.shared.resolveExperiment(
+                for: log, mood: mood, now: Date()
+            )
         } catch {
             #if DEBUG
             NSLog("[Mood] manual-log setMood FAILED id=%@ err=%@",
-                  logId.uuidString, "\(error)")
+                  log.id.uuidString, "\(error)")
             #endif
         }
     }

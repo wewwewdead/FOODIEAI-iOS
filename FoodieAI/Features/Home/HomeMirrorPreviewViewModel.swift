@@ -260,25 +260,38 @@ private struct MirrorOrb: View {
 /// kept separate so Home stays independent of the Mirror tab's own
 /// `@StateObject`.
 ///
-/// Errors and empty result sets resolve to `cardModel = nil`, which
-/// the view simply hides — the preview should never surface a
-/// failure UI over the scan flow.
+/// Production behavior:
+///   - First successful refresh populates `cardModel`.
+///   - Subsequent failures preserve the previous card (the Home
+///     surface stays "quietly correct" instead of flickering empty
+///     on a flaky network).
+///   - `CancellationError` is silently swallowed; no log spam.
+///   - A monotonic refresh token guards against an older fetch
+///     overwriting a newer one when refreshes overlap.
 @MainActor
 final class HomeMirrorPreviewViewModel: ObservableObject {
 
     @Published private(set) var cardModel: HomeMirrorPreviewCardModel?
 
-    private let foodLogs: FoodLogService
+    private let foodLogs: any FoodLogsFetching
 
-    init(foodLogs: FoodLogService = FoodLogService()) {
+    /// Monotonic token. Each `refresh()` captures it on entry and
+    /// bails on commit if a newer refresh has overtaken it — older,
+    /// slower fetches can't overwrite the newer, fresher result.
+    private var refreshToken: UInt64 = 0
+
+    init(foodLogs: any FoodLogsFetching = FoodLogService()) {
         self.foodLogs = foodLogs
     }
 
     /// Refresh the preview. Two narrow PostgREST queries; quietly
-    /// fails to `cardModel = nil` so a transient network blip never
-    /// blocks the scan path.
+    /// keeps the previous card on transient failure so a network
+    /// blip never blanks the Home surface.
     func refresh(now: Date = Date(),
                  timeZone: TimeZone = .current) async {
+        refreshToken &+= 1
+        let myToken = refreshToken
+
         let (sevenStart, sevenEnd) =
             FoodMirrorViewModel.window(daysBack: 7,  now: now, timeZone: timeZone)
         let (thirtyStart, thirtyEnd) =
@@ -292,6 +305,12 @@ final class HomeMirrorPreviewViewModel: ObservableObject {
 
             let sevenLogs  = try await sevenTask
             let thirtyLogs = try await thirtyTask
+
+            // A newer refresh started while we were waiting on the
+            // network — let it win, even if our payload is fine. The
+            // newer fetch saw a strictly newer database state.
+            guard myToken == refreshToken else { return }
+
             let prevSevenLogs = thirtyLogs.filter {
                 $0.eatenAt >= prevSevenStart && $0.eatenAt < prevSevenEnd
             }
@@ -304,11 +323,20 @@ final class HomeMirrorPreviewViewModel: ObservableObject {
                 timeZone:             timeZone
             )
             cardModel = HomeMirrorPreview.cardModel(for: summary)
+        } catch is CancellationError {
+            // Swallow silently — cancellation is normal (tab switch,
+            // view disappear) and doesn't deserve a log entry.
+            return
         } catch {
             #if DEBUG
             NSLog("[HomeMirrorPreview] refresh failed: %@", "\(error)")
             #endif
-            cardModel = nil
+            // Only blank the surface when we've never shown anything
+            // yet. Once we have a successful render, keep showing it —
+            // a transient blip should never flicker the Home card.
+            if cardModel == nil {
+                cardModel = nil
+            }
         }
     }
 }
