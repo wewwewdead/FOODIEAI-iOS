@@ -26,46 +26,11 @@ struct FoodMirrorView: View {
 
     // MARK: - Story mode state
 
-    /// Wrapped-style story carousel state. Lives in this view because
-    /// the pages are derived from the loaded summary + currentMoment,
-    /// both of which already sit on this view's view model.
-    @State private var storyIndex: Int = 0
-    /// Wall-clock instant the current story page was first shown.
-    /// Drives both the progress-bar fill (via a TimelineView scoped
-    /// to the bar) and the elapsed-time auto-advance check, so we
-    /// no longer need a 20Hz @State double thrashing the whole view.
-    @State private var currentCardStartedAt: Date = Date()
-    /// When the user pauses auto-advance (e.g. by tapping a feedback
-    /// chip), we record how far the progress had got so the bar
-    /// freezes at that fill instead of continuing to tick visually.
-    /// nil = not paused; non-nil = bar frozen at this elapsed time.
-    @State private var pausedAtElapsed: TimeInterval? = nil
-    /// Latched true once the user interacts with the moment's
-    /// feedback chips. Pauses auto-advance so they can sit on that
-    /// card and read the confirmation; resets on manual page change.
-    @State private var storyPaused: Bool = false
-    /// Namespace for the album → expanded-card matchedGeometryEffect
-    /// transition. Declared once on the view so both the thumbnail
-    /// and the overlay can attach to the same identifier.
-    @Namespace private var albumNamespace
-    /// Which page (if any) the user has expanded out of the album
-    /// grid. nil means the album is showing its thumbnail grid; a
-    /// non-nil value shows that page full-size as an overlay.
-    @State private var expandedCard: StoryPageKind? = nil
-    /// Low-frequency auto-advance ticker. Stored as `static let` so
-    /// there is exactly ONE publisher for the lifetime of the type —
-    /// a stored `let` on the struct (or a computed property) would be
-    /// re-created on every body re-evaluation, which used to leak a
-    /// new autoconnected timer per redraw and caused progressively
-    /// worsening lag. Frequency is intentionally coarse (0.25s):
-    /// the smooth bar fill is driven by a TimelineView scoped to the
-    /// bar, so this ticker only has to decide *whether* to advance.
-    private static let storyTicker = Timer.publish(
-        every: 0.25,
-        on: .main,
-        in: .common
-    ).autoconnect()
-    private static let storyAdvanceDuration: Double = 6.0
+    /// Whether the full-screen Wrapped-style story is currently
+    /// presented. The Mirror tab itself just shows the hero + a
+    /// prominent entry card; tapping the entry card flips this true,
+    /// which presents `FoodMirrorStoryView` in a `.fullScreenCover`.
+    @State private var showingStory = false
 
     var body: some View {
         ZStack {
@@ -105,12 +70,6 @@ struct FoodMirrorView: View {
         }
         .onChange(of: viewModel.state) { _, _ in
             checkForFirstReady()
-            // Treat each state transition as a fresh "card start" so
-            // the first loaded card always gets a full advance window
-            // — otherwise the timer would be measuring against view
-            // construction time and could skip the first card.
-            currentCardStartedAt = Date()
-            pausedAtElapsed = nil
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .foodLogDidChange)
@@ -123,40 +82,43 @@ struct FoodMirrorView: View {
         .onReceive(Self.freshnessTicker) { now in
             freshnessNow = now
         }
-        .onReceive(Self.storyTicker) { _ in
-            advanceStoryTick()
-        }
         .onDisappear {
             viewModel.cancelPendingRefresh()
         }
-    }
-
-    /// Checks the elapsed time on the current story card and advances
-    /// when it crosses the duration threshold. No-op when paused, in
-    /// Reduce Motion, while a card is expanded out of the album, or
-    /// when there's no story content. The smooth bar fill is owned by
-    /// the TimelineView inside `storyProgressBars` — this function
-    /// only decides *whether* to flip to the next card.
-    private func advanceStoryTick() {
-        guard !reduceMotion, !storyPaused else { return }
-        guard expandedCard == nil else { return }
-        guard case .loaded(let summary) = viewModel.state,
-              summary.hasAnyContent else { return }
-        let pageCount = storyPageKinds(for: summary).count
-        guard pageCount > 0, storyIndex < pageCount - 1 else { return }
-        let elapsed = Date().timeIntervalSince(currentCardStartedAt)
-        if elapsed >= Self.storyAdvanceDuration {
-            advanceStoryCard(by: 1, pageCount: pageCount, animated: true)
+        .fullScreenCover(isPresented: $showingStory) {
+            storyCover
         }
     }
 
-    /// Latch auto-advance and freeze the progress bar at the current
-    /// elapsed position, so a feedback tap doesn't make the bar keep
-    /// ticking visually while the carousel sits still.
-    private func pauseAutoAdvance() {
-        let elapsed = Date().timeIntervalSince(currentCardStartedAt)
-        pausedAtElapsed = min(max(elapsed, 0), Self.storyAdvanceDuration)
-        storyPaused = true
+    /// Body of the full-screen story cover. Computed so we can read
+    /// the current loaded summary out of the view model at the moment
+    /// of presentation; if the state has slipped back to non-loaded
+    /// (e.g. a background refresh failed) we fall back to a graceful
+    /// close so the cover is never stuck on stale or missing content.
+    @ViewBuilder
+    private var storyCover: some View {
+        if case .loaded(let summary) = viewModel.state,
+           summary.hasAnyContent {
+            let pages = storyPageKinds(for: summary)
+            FoodMirrorStoryView(
+                pages: pages,
+                renderPage: { kind in
+                    AnyView(storyPageView(kind, summary: summary))
+                },
+                renderAlbumThumbnail: { kind in
+                    AnyView(albumThumbnail(kind, summary: summary))
+                },
+                albumAccessibilityLabel: { kind in
+                    albumCardMeta(kind, summary: summary).eyebrow
+                },
+                onClose: { showingStory = false }
+            )
+        } else {
+            // Defensive: shouldn't normally render because the entry
+            // card only shows in .loaded + hasAnyContent, but if the
+            // state changes while the cover is up, close gracefully.
+            Color.clear.onAppear { showingStory = false }
+        }
     }
 
     /// Rolls the freshness caption forward without a network refresh.
@@ -505,19 +467,22 @@ struct FoodMirrorView: View {
 
     @ViewBuilder
     private func loadedContent(_ summary: FoodMirrorSummary) -> some View {
-        // Wrapped-style story experience: the same cards that used to
-        // stack as a scroll are now paged horizontally with auto-
-        // advancing progress bars at the top. The hero header above
-        // stays put; the tab bar below stays visible — the story is a
-        // contained "stage," not a full-screen takeover.
+        // The Mirror tab itself is the *entry point* into the Wrapped-
+        // style story. The hero header above stays put; below it we
+        // show an at-a-glance stats strip and a single rich "entry
+        // card" that invites the user to open the full-screen story.
         //
         // The learning-state fallback (when we're in `.loaded` but the
         // summary has nothing content-bearing to say) keeps the
-        // existing card aesthetic — story mode only kicks in when
-        // there's enough to actually narrate.
+        // existing inline card aesthetic — the story only kicks in
+        // when there's enough to actually narrate.
         if summary.hasAnyContent {
-            storyContainer(for: summary)
-                .transition(staggeredTransition(for: 0))
+            VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                quickStatsStrip(for: summary)
+                    .transition(staggeredTransition(for: 0))
+                storyEntryCard(for: summary)
+                    .transition(staggeredTransition(for: 1))
+            }
         } else {
             VStack(alignment: .leading, spacing: AppSpacing.lg) {
                 quickStatsStrip(for: summary)
@@ -528,7 +493,110 @@ struct FoodMirrorView: View {
         }
     }
 
-    // MARK: - Story container (Wrapped-style paged cards)
+    // MARK: - Story entry card
+
+    /// The invitation that lives on the Mirror tab and opens the
+    /// full-screen story when tapped. Designed as a hero-style card
+    /// (brand gradient surface, sparkle badge, headline, a peek at
+    /// the moment title, and a "Tap to view" chevron) so it reads as
+    /// a single deliberate next-step affordance rather than a passive
+    /// preview tile.
+    private func storyEntryCard(for summary: FoodMirrorSummary) -> some View {
+        let pageCount = storyPageKinds(for: summary)
+            .filter { $0 != .album }
+            .count
+        let momentTitle = viewModel.currentMoment.flatMap { moment in
+            moment.kind == .learning ? nil : moment.title
+        }
+        let peekTitle = momentTitle
+            ?? summary.todaysGentleNudge
+            ?? summary.thisWeekChanged
+            ?? summary.weeklySummary
+            ?? "A few things FoodieAI noticed about how you eat."
+
+        return Button {
+            Haptics.tap()
+            showingStory = true
+        } label: {
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                HStack(alignment: .center, spacing: AppSpacing.sm) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.brandSoft)
+                            .frame(width: 44, height: 44)
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(Color.brandDeep)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("YOUR STORY · TAP TO OPEN")
+                            .eyebrow()
+                            .foregroundStyle(Color.brandDeep)
+                        if pageCount > 0 {
+                            Text(pageCount == 1
+                                 ? "1 moment ready"
+                                 : "\(pageCount) moments ready")
+                                .appFont(.caption)
+                                .foregroundStyle(Color.inkMute)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14, weight: .heavy))
+                        .foregroundStyle(Color.brandDeep)
+                }
+
+                Text("See what FoodieAI noticed.")
+                    .appFont(.title1)
+                    .foregroundStyle(Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(peekTitle)
+                    .appFont(.bodyV2)
+                    .foregroundStyle(Color.textBody)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 6) {
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.brandDeep)
+                    Text("Tap to view")
+                        .appFont(.captionStrong)
+                        .foregroundStyle(Color.brandDeep)
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, AppSpacing.xs)
+            }
+            .padding(AppSpacing.cardPad)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.xl)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.bgSurface,
+                                Color.brandSoft.opacity(0.55)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.xl)
+                    .strokeBorder(Color.brand.opacity(0.22), lineWidth: 1)
+            )
+            .appShadow(.shadowCard)
+            .contentShape(RoundedRectangle(cornerRadius: AppRadius.xl))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("Open your Mirror story"))
+        .accessibilityHint(Text("Opens the full-screen story experience."))
+    }
+
+    // MARK: - Story page list
 
     /// Enumerates the story pages we can build from a loaded summary.
     /// Used both to render the carousel and to know the page count
@@ -575,200 +643,6 @@ struct FoodMirrorView: View {
         // doesn't need a recap grid.
         if pages.count > 1 { pages.append(.album) }
         return pages
-    }
-
-    /// Fixed-height contained "stage" that hosts the story pages.
-    /// Sits inside the regular page padding so the hero header above
-    /// and the tab bar below remain visible — this is NOT full-screen.
-    private func storyContainer(for summary: FoodMirrorSummary) -> some View {
-        let pages = storyPageKinds(for: summary)
-        let pageCount = pages.count
-        let clampedIndex = min(max(storyIndex, 0), max(pageCount - 1, 0))
-
-        return VStack(spacing: AppSpacing.sm) {
-            storyProgressBars(
-                count: pageCount,
-                current: clampedIndex
-            )
-            .padding(.horizontal, AppSpacing.md)
-            .padding(.top, AppSpacing.md)
-
-            GeometryReader { geo in
-                TabView(selection: $storyIndex) {
-                    ForEach(Array(pages.enumerated()), id: \.element.id) {
-                        index, kind in
-                        storyPageView(kind, summary: summary)
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.bottom, AppSpacing.lg)
-                            .tag(index)
-                    }
-                }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                // SpatialTapGesture attached to the TabView itself
-                // (the parent of every card's content). With the
-                // default `.gesture` priority, child Buttons — like
-                // the moment's feedback chips — consume their own
-                // taps first; only taps on non-interactive parts of
-                // a card fall through to this gesture.
-                .gesture(
-                    SpatialTapGesture()
-                        .onEnded { event in
-                            if event.location.x < geo.size.width * 0.4 {
-                                advanceStoryCard(by: -1,
-                                                 pageCount: pageCount,
-                                                 animated: true)
-                            } else {
-                                advanceStoryCard(by: 1,
-                                                 pageCount: pageCount,
-                                                 animated: true)
-                            }
-                        }
-                )
-            }
-
-            if pageCount > 0,
-               clampedIndex == pageCount - 1,
-               pages[clampedIndex] != .album {
-                storyEndCaption
-                    .padding(.horizontal, AppSpacing.lg)
-                    .padding(.bottom, AppSpacing.sm)
-                    .transition(.opacity)
-            }
-        }
-        .frame(height: 500)
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.xl)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.bgSurface,
-                            Color.brandSoft.opacity(0.35)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.xl)
-                .strokeBorder(Color.brand.opacity(0.18), lineWidth: 1)
-        )
-        .overlay(expandedCardOverlay(summary: summary))
-        .appShadow(.shadowCard)
-        .onChange(of: storyIndex) { _, _ in
-            // Restart the per-card clock so the new card gets a
-            // full advance window and the bar starts empty. The
-            // TimelineView inside storyProgressBars reads this and
-            // resets its periodic schedule automatically.
-            currentCardStartedAt = Date()
-            pausedAtElapsed = nil
-            storyPaused = false
-            // Any page change (including swiping back off the
-            // album) collapses an expanded card so the overlay
-            // never strands itself over the wrong page.
-            if expandedCard != nil { expandedCard = nil }
-        }
-        .onChange(of: pageCount) { _, newCount in
-            if storyIndex >= newCount {
-                storyIndex = max(newCount - 1, 0)
-            }
-        }
-    }
-
-    /// Subtle "you're all caught up" affordance shown on the last page
-    /// so the user understands auto-advance has stopped on purpose.
-    private var storyEndCaption: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.brandDeep.opacity(0.75))
-            Text("You're all caught up.")
-                .appFont(.caption)
-                .foregroundStyle(Color.inkMute)
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    // MARK: - Story: progress bars
-
-    /// Instagram-style segmented progress row. The high-frequency
-    /// fill animation is owned by a TimelineView scoped to just this
-    /// subtree, so the surrounding view (hero, blobs, story content)
-    /// never re-evaluates body for the bar tick — only the bar does.
-    /// Progress is derived from elapsed time, not from an @State
-    /// counter, so there's nothing to drift or accumulate.
-    private func storyProgressBars(count: Int,
-                                   current: Int) -> some View {
-        TimelineView(.periodic(from: currentCardStartedAt, by: 0.05)) { context in
-            let progress: Double = {
-                if reduceMotion { return 0 }
-                if let frozen = pausedAtElapsed {
-                    return min(frozen / Self.storyAdvanceDuration, 1.0)
-                }
-                let elapsed = context.date.timeIntervalSince(currentCardStartedAt)
-                return min(max(elapsed, 0) / Self.storyAdvanceDuration, 1.0)
-            }()
-            HStack(spacing: 4) {
-                ForEach(0..<max(count, 1), id: \.self) { i in
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(Color.brand.opacity(0.18))
-                            Capsule()
-                                .fill(Color.brandDeep)
-                                .frame(
-                                    width: storyBarFill(
-                                        for: i,
-                                        current: current,
-                                        progress: progress,
-                                        total: geo.size.width
-                                    )
-                                )
-                        }
-                    }
-                    .frame(height: 3)
-                    .accessibilityHidden(true)
-                }
-            }
-        }
-    }
-
-    private func storyBarFill(for index: Int,
-                              current: Int,
-                              progress: Double,
-                              total: CGFloat) -> CGFloat {
-        if index < current { return total }
-        if index > current { return 0 }
-        if reduceMotion {
-            // Without auto-advance, just show the current segment as
-            // a thin chevron-style marker so users still see which
-            // page they're on.
-            return max(8, total * 0.15)
-        }
-        return total * CGFloat(max(0.0, min(progress, 1.0)))
-    }
-
-    // MARK: - Story: navigation
-
-    /// Steps the carousel by +1 or -1 with bounds. Stops at the last
-    /// card (no infinite loop) and clamps at zero on back-tap from
-    /// the first card. Resets per-page progress so the bar restarts
-    /// for the new page; clears the paused-by-feedback latch.
-    private func advanceStoryCard(by delta: Int,
-                                  pageCount: Int,
-                                  animated: Bool) {
-        guard pageCount > 0 else { return }
-        let target = storyIndex + delta
-        let clamped = min(max(target, 0), pageCount - 1)
-        if clamped == storyIndex { return }
-        Haptics.tap()
-        if animated && !reduceMotion {
-            withAnimation(.motionBase) { storyIndex = clamped }
-        } else {
-            storyIndex = clamped
-        }
     }
 
     // MARK: - Story: per-page rendering
@@ -846,7 +720,11 @@ struct FoodMirrorView: View {
                 )
             }
         case .album:
-            storyAlbumPage(summary)
+            // The album page is rendered by `FoodMirrorStoryView`
+            // itself (full-screen grid), not by the per-page
+            // renderer — this branch only exists so the switch is
+            // exhaustive and is never hit in practice.
+            EmptyView()
         }
     }
 
@@ -922,11 +800,6 @@ struct FoodMirrorView: View {
                         moment: moment,
                         recordedFeedback: viewModel.lastFeedbackForCurrentMoment,
                         onTap: { feedback in
-                            // Latch the carousel so it doesn't slide
-                            // out from under the user mid-read, and
-                            // freeze the progress bar at its current
-                            // fill instead of letting it tick on.
-                            pauseAutoAdvance()
                             viewModel.recordFeedback(feedback)
                         }
                     )
@@ -1109,84 +982,6 @@ struct FoodMirrorView: View {
         }
     }
 
-    /// Terminal recap page. A header + 2-column grid of compact
-    /// thumbnails, one per content card seen in the story. Tapping
-    /// any thumbnail expands it into a full-size overlay via
-    /// `matchedGeometryEffect`; tapping the dim background or the
-    /// expanded card collapses it back to the grid.
-    private func storyAlbumPage(_ summary: FoodMirrorSummary) -> some View {
-        let contentPages = storyPageKinds(for: summary).filter { $0 != .album }
-
-        return VStack(alignment: .leading, spacing: AppSpacing.md) {
-            HStack(alignment: .center, spacing: AppSpacing.sm) {
-                ZStack {
-                    Circle()
-                        .fill(Color.brandSoft)
-                        .frame(width: 44, height: 44)
-                    Image(systemName: "square.grid.2x2.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(Color.brandDeep)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("YOUR MOMENTS")
-                        .eyebrow()
-                        .foregroundStyle(Color.brandDeep)
-                    Text("Tap any card to revisit it.")
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                }
-                Spacer(minLength: 0)
-            }
-
-            ScrollView(showsIndicators: false) {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: AppSpacing.sm),
-                        GridItem(.flexible(), spacing: AppSpacing.sm)
-                    ],
-                    spacing: AppSpacing.sm
-                ) {
-                    ForEach(contentPages) { kind in
-                        albumThumbnail(kind, summary: summary)
-                            .matchedGeometryEffect(
-                                id: kind.id,
-                                in: albumNamespace
-                            )
-                            .contentShape(
-                                RoundedRectangle(cornerRadius: AppRadius.lg)
-                            )
-                            .onTapGesture {
-                                Haptics.tap()
-                                pauseAutoAdvance()
-                                if reduceMotion {
-                                    expandedCard = kind
-                                } else {
-                                    withAnimation(
-                                        .spring(response: 0.4,
-                                                dampingFraction: 0.82)
-                                    ) {
-                                        expandedCard = kind
-                                    }
-                                }
-                            }
-                            .accessibilityAddTraits(.isButton)
-                            .accessibilityLabel(
-                                Text(albumCardMeta(kind, summary: summary).eyebrow)
-                            )
-                            .accessibilityHint(
-                                Text("Opens this card.")
-                            )
-                    }
-                }
-                .padding(.top, AppSpacing.xs)
-            }
-        }
-        .padding(AppSpacing.cardPad)
-        .frame(maxWidth: .infinity,
-               maxHeight: .infinity,
-               alignment: .topLeading)
-    }
-
     /// Compact tile for one content page in the album grid. Shows
     /// the page's badge, eyebrow, and a short title clipped to
     /// three lines so the grid stays uniform regardless of which
@@ -1227,69 +1022,6 @@ struct FoodMirrorView: View {
                 .strokeBorder(Color.brand.opacity(0.15), lineWidth: 1)
         )
         .appShadow(.shadowCard)
-    }
-
-    /// Full-size overlay shown while `expandedCard` is non-nil.
-    /// Attached to the story container so it stays bounded inside
-    /// the 500pt stage (no full-screen escape). The matched
-    /// geometry id is the page kind's rawValue so the expansion
-    /// reads as the thumbnail growing into the card.
-    @ViewBuilder
-    private func expandedCardOverlay(summary: FoodMirrorSummary) -> some View {
-        if let kind = expandedCard, kind != .album {
-            ZStack {
-                Color.black.opacity(0.18)
-                    .clipShape(
-                        RoundedRectangle(cornerRadius: AppRadius.xl)
-                    )
-                    .onTapGesture {
-                        collapseExpandedCard()
-                    }
-                    .transition(.opacity)
-
-                storyPageView(kind, summary: summary)
-                    .padding(AppSpacing.md)
-                    .frame(maxWidth: .infinity)
-                    .frame(maxHeight: 420)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppRadius.xl)
-                            .fill(Color.bgSurface)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppRadius.xl)
-                            .strokeBorder(Color.brand.opacity(0.22),
-                                          lineWidth: 1)
-                    )
-                    .appShadow(.shadowFloating)
-                    .matchedGeometryEffect(
-                        id: kind.id,
-                        in: albumNamespace
-                    )
-                    .padding(.horizontal, AppSpacing.lg)
-                    .padding(.vertical, AppSpacing.xl)
-                    .onTapGesture {
-                        collapseExpandedCard()
-                    }
-                    .accessibilityAddTraits(.isModal)
-            }
-            .transition(.opacity)
-        }
-    }
-
-    /// Collapse helper used by both the dim background and the
-    /// expanded card itself. Centralises the animation choice so
-    /// the spring matches what played on expand.
-    private func collapseExpandedCard() {
-        Haptics.tap()
-        if reduceMotion {
-            expandedCard = nil
-        } else {
-            withAnimation(
-                .spring(response: 0.4, dampingFraction: 0.82)
-            ) {
-                expandedCard = nil
-            }
-        }
     }
 
     /// Calm "next-step" chip rendered between evidence and feedback.
@@ -1467,6 +1199,9 @@ struct StoryShell<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            // Pinned header — badge + eyebrow stay at the top of
+            // the card, outside the scrollable region, so they're
+            // always the first thing the user sees on a tall page.
             HStack(alignment: .center, spacing: AppSpacing.sm) {
                 ZStack {
                     Circle()
@@ -1481,9 +1216,24 @@ struct StoryShell<Content: View>: View {
                     .foregroundStyle(Color.brandDeep)
                 Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
-            content()
-            Spacer(minLength: 0)
+
+            // Scrollable content. The inner Spacers vertically
+            // centre short content within the available space, but
+            // collapse to zero when the content is tall enough to
+            // scroll — so the moment card (title + body + evidence
+            // + action chip + feedback chips) can no longer spill
+            // past the 500pt container into the hero above.
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Spacer(minLength: 0)
+                    content()
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity,
+                       minHeight: 0,
+                       alignment: .leading)
+            }
+            .scrollBounceBehavior(.basedOnSize)
         }
         .padding(AppSpacing.cardPad)
         .frame(maxWidth: .infinity,
@@ -1776,6 +1526,542 @@ private struct MirrorHeroOrb: View {
             guard !reduceMotion else { return }
             withAnimation(.appBreathing) { pulse = true }
         }
+    }
+}
+
+// MARK: - Full-screen story view
+
+/// Full-screen Wrapped-style story experience launched from the
+/// Mirror tab's entry card. Pure interaction layer: it doesn't know
+/// about the view model — page content is rendered by closures the
+/// caller supplies. Owns its own navigation state (current index,
+/// expanded album card, drag-to-dismiss offset, staggered-entrance
+/// flag) so the parent never has to manage carousel internals.
+///
+/// Interaction model is explicit and deliberate: tap Next to advance
+/// (no auto-advance, no timers), tap X to close at any time. The last
+/// "page" is the album grid; tapping a thumbnail expands that card
+/// full-screen with a matchedGeometry transition; dragging the
+/// expanded card down interactively dismisses it back to the grid.
+fileprivate struct FoodMirrorStoryView: View {
+    /// Ordered list of pages to show, including a trailing `.album`
+    /// page when there's more than one content card to revisit.
+    let pages: [FoodMirrorView.StoryPageKind]
+    /// Renders a single non-album content page. The caller is
+    /// responsible for matching kind → page renderer (so the cover
+    /// stays decoupled from the view model that owns the moment,
+    /// summary etc.). Called with `AnyView` so the cover can hold a
+    /// uniform child type regardless of which page is showing.
+    let renderPage: (FoodMirrorView.StoryPageKind) -> AnyView
+    /// Renders the compact album thumbnail for a content page. Same
+    /// rationale as `renderPage` — the cover doesn't know the
+    /// page-specific styling.
+    let renderAlbumThumbnail: (FoodMirrorView.StoryPageKind) -> AnyView
+    /// VoiceOver label for an album thumbnail (typically the page's
+    /// uppercase eyebrow). Empty string means no extra label.
+    let albumAccessibilityLabel: (FoodMirrorView.StoryPageKind) -> String
+    /// Fired when the user taps the X close button or the album's
+    /// "Done" affordance. The parent uses this to flip the
+    /// presentation flag and dismiss the full-screen cover.
+    let onClose: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Current page index within `pages`. Manual advance only — no
+    /// timer ever mutates this.
+    @State private var index: Int = 0
+    /// Flag flipped by `onChange(of: index)` so the inserted card can
+    /// run its scale+opacity entrance animation. Reset to `false`
+    /// just before each card change and back to `true` on the next
+    /// run loop, which produces a clean spring-in on every advance.
+    @State private var contentAppeared: Bool = true
+    /// Which album card (if any) is currently expanded to full-
+    /// screen. nil means we're showing the grid (or a non-album
+    /// content page).
+    @State private var expandedCard: FoodMirrorView.StoryPageKind? = nil
+    /// Live drag distance for the interactive dismiss of the
+    /// expanded album card. Only tracks downward translation
+    /// (`max(0, …)`); used to offset, scale, and fade the card.
+    @State private var dragOffset: CGFloat = 0
+
+    var body: some View {
+        ZStack {
+            backgroundLayer
+                .ignoresSafeArea()
+
+            VStack(spacing: AppSpacing.md) {
+                topBar
+                cardArea
+                bottomBar
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.top, AppSpacing.md)
+            .padding(.bottom, AppSpacing.lg)
+
+            if let kind = expandedCard, kind != .album {
+                expandedAlbumCard(kind)
+                    // Symmetric scale + opacity transition for both
+                    // open and close. The earlier "fly back to the
+                    // exact thumbnail tile" version layered a
+                    // `PreferenceKey` + `isClosing` flag + iOS-17
+                    // `withAnimation` completion callback on top of
+                    // each other, and the resulting state machine
+                    // raced against rapid open/close interactions —
+                    // a stale completion would tear down a freshly
+                    // opened card, or the inner-frame measurement
+                    // would lag a frame and produce a half-rendered
+                    // card chrome. The simpler transition can't get
+                    // stuck: SwiftUI always knows the start and end
+                    // states, so the close is rock-solid no matter
+                    // how fast the user open/close cycles.
+                    .transition(
+                        reduceMotion
+                            ? .opacity
+                            : .scale(scale: 0.85)
+                                .combined(with: .opacity)
+                    )
+            }
+        }
+        .onChange(of: index) { _, _ in
+            // Reset the entrance flag so the new card runs the
+            // spring-in animation on appear. The async hop ensures
+            // SwiftUI registers the false → true transition as an
+            // animatable change instead of collapsing them into a
+            // single frame.
+            contentAppeared = false
+            DispatchQueue.main.async {
+                withAnimation(
+                    reduceMotion
+                        ? .none
+                        : .spring(response: 0.4, dampingFraction: 0.85)
+                ) {
+                    contentAppeared = true
+                }
+            }
+        }
+    }
+
+    // MARK: - Background
+
+    /// Soft brand-tinted gradient that fills the whole screen behind
+    /// the story content. Matches the Mirror tab's visual language
+    /// (brandSoft → bgSurface) so the transition into the cover
+    /// feels continuous with the tab it came from.
+    private var backgroundLayer: some View {
+        LinearGradient(
+            colors: [
+                Color.brandSoft.opacity(0.6),
+                Color.bgSurface
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    // MARK: - Top bar
+
+    /// Progress segments + close button. Segments are *binary* — a
+    /// page is either seen (or current) or upcoming. No timed fill,
+    /// no animated tick; the bar updates only when the user advances.
+    private var topBar: some View {
+        HStack(spacing: AppSpacing.sm) {
+            HStack(spacing: 4) {
+                ForEach(0..<max(pages.count, 1), id: \.self) { i in
+                    Capsule()
+                        .fill(
+                            i < index
+                                ? Color.brandDeep
+                                : i == index
+                                    ? Color.brand
+                                    : Color.brand.opacity(0.2)
+                        )
+                        .frame(height: 4)
+                        .accessibilityHidden(true)
+                }
+            }
+            Button {
+                Haptics.tap()
+                onClose()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.inkMute)
+                    .frame(width: 32, height: 32)
+                    .background(
+                        Circle().fill(Color.bgSurface.opacity(0.85))
+                    )
+                    .overlay(
+                        Circle()
+                            .strokeBorder(Color.borderHairline, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("Close story"))
+        }
+    }
+
+    // MARK: - Card area
+
+    /// The current page rendered inside a brand-tinted card surface.
+    /// On index change, the new card replaces the old with an
+    /// asymmetric slide (trailing → leading) and runs a subtle
+    /// scale+opacity entrance for the "premium" feel — Duolingo-style
+    /// without per-element stagger (intentional V1 simplification,
+    /// see the decisions log in the task description).
+    @ViewBuilder
+    private var cardArea: some View {
+        let kind = currentKind
+        Group {
+            if let kind, kind == .album {
+                albumGrid
+                    .id("album")
+            } else if let kind {
+                cardSurface {
+                    renderPage(kind)
+                }
+                .id("card-\(kind.rawValue)-\(index)")
+                .modifier(
+                    StoryCardEntrance(
+                        appeared: contentAppeared,
+                        reduceMotion: reduceMotion
+                    )
+                )
+            } else {
+                // Defensive: empty pages list shouldn't be possible
+                // (the entry card hides when there's nothing to
+                // show), but render a neutral surface rather than
+                // an empty cover if it ever happens.
+                cardSurface { AnyView(EmptyView()) }
+            }
+        }
+        .transition(cardTransition)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Visual frame that wraps each content page. Same rounded
+    /// surface + hairline + soft shadow as the Mirror tab cards, so
+    /// a tap-through into the story doesn't feel like leaving the
+    /// app's design system.
+    private func cardSurface<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.xl)
+                    .fill(Color.bgSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.xl)
+                    .strokeBorder(Color.brand.opacity(0.18), lineWidth: 1)
+            )
+            .appShadow(.shadowCard)
+    }
+
+    private var cardTransition: AnyTransition {
+        if reduceMotion { return .opacity }
+        return .asymmetric(
+            insertion: .move(edge: .trailing).combined(with: .opacity),
+            removal: .move(edge: .leading).combined(with: .opacity)
+        )
+    }
+
+    // MARK: - Album grid (full-screen)
+
+    /// Full-screen recap grid. Each thumbnail is wired to a
+    /// matchedGeometry pair with `expandedAlbumCard` so tapping a
+    /// tile springs it into a full-size card. `isSource` flips off
+    /// the thumbnail's side while it's expanded so SwiftUI only sees
+    /// a single source rect per id at a time (avoids the
+    /// "duplicate matchedGeometryEffect source" warning that breaks
+    /// the transition).
+    private var albumGrid: some View {
+        let contentPages = pages.filter { $0 != .album }
+        return VStack(alignment: .leading, spacing: AppSpacing.md) {
+            HStack(alignment: .center, spacing: AppSpacing.sm) {
+                ZStack {
+                    Circle()
+                        .fill(Color.brandSoft)
+                        .frame(width: 44, height: 44)
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color.brandDeep)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("YOUR MOMENTS")
+                        .eyebrow()
+                        .foregroundStyle(Color.brandDeep)
+                    Text("Tap any card to revisit it.")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                }
+                Spacer(minLength: 0)
+            }
+
+            ScrollView(showsIndicators: false) {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: AppSpacing.sm),
+                        GridItem(.flexible(), spacing: AppSpacing.sm)
+                    ],
+                    spacing: AppSpacing.sm
+                ) {
+                    ForEach(contentPages) { kind in
+                        renderAlbumThumbnail(kind)
+                            .contentShape(
+                                RoundedRectangle(cornerRadius: AppRadius.lg)
+                            )
+                            .onTapGesture {
+                                Haptics.tap()
+                                dragOffset = 0
+                                if reduceMotion {
+                                    expandedCard = kind
+                                } else {
+                                    withAnimation(
+                                        .spring(response: 0.4,
+                                                dampingFraction: 0.85)
+                                    ) {
+                                        expandedCard = kind
+                                    }
+                                }
+                            }
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityLabel(
+                                Text(albumAccessibilityLabel(kind))
+                            )
+                            .accessibilityHint(
+                                Text("Opens this card.")
+                            )
+                    }
+                }
+                .padding(.top, AppSpacing.xs)
+            }
+        }
+        .padding(AppSpacing.cardPad)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.xl)
+                .fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl)
+                .strokeBorder(Color.brand.opacity(0.18), lineWidth: 1)
+        )
+        .appShadow(.shadowCard)
+    }
+
+    // MARK: - Expanded album card (interactive dismiss)
+
+    /// Full-screen view of a single album card with interactive
+    /// drag-down dismiss.
+    ///
+    /// While the user drags down, the card follows the finger
+    /// (`dragOffset` driven directly by the gesture), scales down
+    /// slightly, and the scrim behind it brightens. Release past the
+    /// threshold → `collapseExpanded` sets `expandedCard = nil`
+    /// inside a spring; the overlay's `.transition(.scale + .opacity)`
+    /// runs the removal — the card shrinks down from its
+    /// (drag-adjusted) position and fades out. Release short → the
+    /// drag offset springs back to zero.
+    ///
+    /// An earlier version tried to fly the card back to the exact
+    /// thumbnail tile using a `PreferenceKey` for the grid frame, an
+    /// `isClosing` flag, and an iOS-17 `withAnimation` completion
+    /// callback. That state machine raced against rapid open/close
+    /// interactions (stale completions tearing down freshly opened
+    /// cards, half-rendered chrome on re-entry) and was deleted in
+    /// favour of the simpler, race-free transition you see here.
+    private func expandedAlbumCard(
+        _ kind: FoodMirrorView.StoryPageKind
+    ) -> some View {
+        // 100pt threshold — easy to commit to once the user has
+        // started dragging downward. Short releases snap back to
+        // expanded centre.
+        let dismissThreshold: CGFloat = 100
+        let dismissProgress = min(abs(dragOffset) / 300.0, 1.0)
+
+        let offsetY: CGFloat = dragOffset
+        let scale: CGFloat = 1 - dismissProgress * 0.15
+        let opacity: Double = 1 - dismissProgress * 0.5
+        let scrimOpacity: Double = 0.25 * (1 - dismissProgress)
+
+        return ZStack {
+            Color.black.opacity(scrimOpacity)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { collapseExpanded() }
+
+            // Note: no `appShadow` here. The shadow was the single
+            // biggest cost on the expand spring — rasterising it
+            // every frame against changing content. The card
+            // already has a hairline border + the dim scrim behind
+            // it to set it off from the background.
+            renderPage(kind)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: AppRadius.xl)
+                        .fill(Color.bgSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppRadius.xl)
+                        .strokeBorder(Color.brand.opacity(0.22),
+                                      lineWidth: 1)
+                )
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.xl2)
+                .scaleEffect(scale, anchor: .center)
+                .offset(y: offsetY)
+                .opacity(opacity)
+                // `.highPriorityGesture` (not `.gesture`) so the
+                // dismiss drag wins over the StoryShell's inner
+                // `ScrollView`, which would otherwise consume every
+                // vertical pan and leave the user unable to dismiss.
+                // Trade-off: the card's content isn't vertically
+                // scrollable while expanded. Acceptable here because
+                // full-screen gives much more room than the old
+                // 500pt container, so the cards already fit. The
+                // 12pt `minimumDistance` keeps short flicks and
+                // mis-taps from triggering an accidental drag — taps
+                // on inner Buttons (e.g. the moment feedback chips)
+                // still go through because tap and drag are routed
+                // separately.
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 12)
+                        .onChanged { value in
+                            // Only follow downward drags; ignore
+                            // tiny upward jitter so the user doesn't
+                            // see the card hop above its expanded
+                            // position.
+                            dragOffset = max(0, value.translation.height)
+                        }
+                        .onEnded { value in
+                            if value.translation.height > dismissThreshold {
+                                collapseExpanded()
+                            } else {
+                                withAnimation(
+                                    reduceMotion
+                                        ? .none
+                                        : .spring(response: 0.35,
+                                                  dampingFraction: 0.8)
+                                ) {
+                                    dragOffset = 0
+                                }
+                            }
+                        }
+                )
+                .accessibilityAddTraits(.isModal)
+        }
+    }
+
+    /// Dismisses the expanded card. The overlay's `.transition`
+    /// (scale + opacity) handles the visual — the card shrinks from
+    /// its current drag-adjusted state to 0.85 scale and fades out.
+    /// No state machine, no completion callbacks, no preference-key
+    /// dance. SwiftUI knows the start and end states cold, so this
+    /// cannot get stuck no matter how rapidly the user open/close
+    /// cycles.
+    private func collapseExpanded() {
+        Haptics.tap()
+        if reduceMotion {
+            expandedCard = nil
+            dragOffset = 0
+        } else {
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                expandedCard = nil
+                dragOffset = 0
+            }
+        }
+    }
+
+    // MARK: - Bottom bar
+
+    /// "Next" / "See your moments" / "Done" — single primary CTA
+    /// keyed off the current page. Hidden when an album card is
+    /// expanded (the drag-to-dismiss is the only action that makes
+    /// sense in that overlay) so the user isn't tempted to advance
+    /// past their expanded card by accident.
+    @ViewBuilder
+    private var bottomBar: some View {
+        if expandedCard == nil {
+            Button {
+                advance()
+            } label: {
+                Text(nextButtonLabel)
+                    .appFont(.pillTitle)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .background(
+                        Capsule().fill(Color.brand)
+                    )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(nextButtonLabel))
+        } else {
+            // Reserve the same height so the card above doesn't jump
+            // when the button hides; keeps the layout perfectly still
+            // through the expand/collapse spring.
+            Color.clear.frame(height: 56)
+        }
+    }
+
+    private var nextButtonLabel: String {
+        guard let kind = currentKind else { return "Done" }
+        if kind == .album { return "Done" }
+        if index == pages.count - 2,
+           pages.last == .album {
+            return "See your moments"
+        }
+        return "Next"
+    }
+
+    private var currentKind: FoodMirrorView.StoryPageKind? {
+        guard index >= 0, index < pages.count else { return nil }
+        return pages[index]
+    }
+
+    private func advance() {
+        Haptics.tap()
+        guard let kind = currentKind else {
+            onClose()
+            return
+        }
+        if kind == .album {
+            onClose()
+            return
+        }
+        let next = min(index + 1, pages.count - 1)
+        if next == index {
+            // Already at the end with no album to roll into (single-
+            // card story): treat Next as Done.
+            onClose()
+            return
+        }
+        if reduceMotion {
+            index = next
+        } else {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
+                index = next
+            }
+        }
+    }
+}
+
+/// Subtle scale + opacity entrance applied to each card as it
+/// becomes the current page. The whole-card spring reads as "the
+/// next idea just landed" without requiring the per-element stagger
+/// that would have to thread through every page renderer.
+private struct StoryCardEntrance: ViewModifier {
+    let appeared: Bool
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(
+                (appeared || reduceMotion) ? 1.0 : 0.96
+            )
+            .opacity(
+                (appeared || reduceMotion) ? 1.0 : 0.0
+            )
     }
 }
 
