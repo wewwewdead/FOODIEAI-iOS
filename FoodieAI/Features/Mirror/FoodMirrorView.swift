@@ -24,6 +24,26 @@ struct FoodMirrorView: View {
     /// SwiftUI's `now` parameter for the caption computation.
     @State private var freshnessNow: Date = Date()
 
+    // MARK: - Story mode state
+
+    /// Wrapped-style story carousel state. Lives in this view because
+    /// the pages are derived from the loaded summary + currentMoment,
+    /// both of which already sit on this view's view model.
+    @State private var storyIndex: Int = 0
+    /// 0...1 fill of the current page's progress bar. Driven by the
+    /// auto-advance ticker and reset whenever the page changes.
+    @State private var storyProgress: Double = 0
+    /// Latched true once the user interacts with the moment's
+    /// feedback chips. Pauses auto-advance so they can sit on that
+    /// card and read the confirmation; resets on manual page change.
+    @State private var storyPaused: Bool = false
+    /// Drives the per-tick auto-advance loop. Subscribed via
+    /// `.onReceive` in body so SwiftUI tears it down with the view.
+    private var storyTicker: Publishers.Autoconnect<Timer.TimerPublisher> {
+        Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
+    }
+    private static let storyAdvanceDuration: Double = 6.0
+
     var body: some View {
         ZStack {
             Color.bgCanvas.ignoresSafeArea()
@@ -74,8 +94,35 @@ struct FoodMirrorView: View {
         .onReceive(freshnessTicker) { now in
             freshnessNow = now
         }
+        .onReceive(storyTicker) { _ in
+            advanceStoryTick()
+        }
         .onDisappear {
             viewModel.cancelPendingRefresh()
+        }
+    }
+
+    /// Drives the auto-advance progress bar for the current story
+    /// card. No-op unless we're in story mode (computed via the
+    /// derived page count) and motion is allowed. Pauses while
+    /// `storyPaused` is set by feedback-chip taps.
+    private func advanceStoryTick() {
+        guard !reduceMotion, !storyPaused else { return }
+        guard case .loaded(let summary) = viewModel.state,
+              summary.hasAnyContent else { return }
+        let pageCount = storyPageKinds(for: summary).count
+        guard pageCount > 0 else { return }
+        // Stop ticking at the last card — no loop.
+        guard storyIndex < pageCount - 1 else {
+            storyProgress = 1.0
+            return
+        }
+        let increment = 0.05 / Self.storyAdvanceDuration
+        let next = storyProgress + increment
+        if next >= 1.0 {
+            advanceStoryCard(by: 1, pageCount: pageCount, animated: true)
+        } else {
+            storyProgress = next
         }
     }
 
@@ -421,74 +468,374 @@ struct FoodMirrorView: View {
 
     @ViewBuilder
     private func loadedContent(_ summary: FoodMirrorSummary) -> some View {
-        // Story-shaped layout: a small group of "headline" cards (today's
-        // nudge + what changed this week) is what the user reads first;
-        // the longer-tail patterns sit under a quieter "Patterns"
-        // section header below. The identity sentence already lives in
-        // the hero subtitle, so no separate card here — keeps the story
-        // tight: moment → identity → nudge → change → patterns.
+        // Wrapped-style story experience: the same cards that used to
+        // stack as a scroll are now paged horizontally with auto-
+        // advancing progress bars at the top. The hero header above
+        // stays put; the tab bar below stays visible — the story is a
+        // contained "stage," not a full-screen takeover.
         //
-        // The FoodOS Moment card sits above everything: it's the one
-        // useful thing the engine chose for *right now*, so it earns
-        // the top slot. We deliberately only render it in `.loaded`
-        // — the empty state already has its own "still learning"
-        // surface and a moment card would compete with that.
-        let headline = headlineCards(for: summary)
-        let patterns = patternCards(for: summary)
-
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Quick "at-a-glance" stat strip — what the user wants to
-            // see first when they open the tab. Compact enough to read
-            // in one second, then the headline content takes over.
-            quickStatsStrip(for: summary)
+        // The learning-state fallback (when we're in `.loaded` but the
+        // summary has nothing content-bearing to say) keeps the
+        // existing card aesthetic — story mode only kicks in when
+        // there's enough to actually narrate.
+        if summary.hasAnyContent {
+            storyContainer(for: summary)
                 .transition(staggeredTransition(for: 0))
-
-            if let moment = viewModel.currentMoment,
-               moment.kind != .learning {
-                foodOSMomentCard(moment)
-                    .transition(staggeredTransition(for: 1))
-            }
-            ForEach(Array(headline.enumerated()), id: \.offset) { index, card in
-                card.transition(staggeredTransition(for: index + 2))
-            }
-
-            if !patterns.isEmpty {
-                patternsSectionHeader(count: patterns.count)
-                    .padding(.top, AppSpacing.md)
-                    .transition(staggeredTransition(for: headline.count + 2))
-
-                ForEach(Array(patterns.enumerated()), id: \.offset) { index, card in
-                    card.transition(staggeredTransition(for: headline.count + 3 + index))
-                }
-            }
-
-            if !summary.hasAnyContent {
+        } else {
+            VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                quickStatsStrip(for: summary)
+                    .transition(staggeredTransition(for: 0))
                 learningStateCard(summary.learningProgress)
+                    .transition(staggeredTransition(for: 1))
             }
         }
     }
 
-    /// FoodOS Moment card — the one useful thing the local engine
-    /// chose for this refresh. Uses the same `MirrorContentCard`
-    /// scaffold as the other Mirror cards so it sits in the
-    /// existing visual language, just with a distinctive eyebrow
-    /// ("FOODOS MOMENT") and a sparkle badge.
-    ///
-    /// Body and evidence are both optional — the engine guarantees
-    /// at least a title, and the safety pass guarantees the copy
-    /// is non-bossy / non-medical / non-shaming.
-    private func foodOSMomentCard(_ moment: FoodOSMoment) -> some View {
-        PremiumMirrorCard(
-            badge: .init(symbol: momentBadgeSymbol(for: moment),
-                         tint: .brandDeep,
-                         bg: .brandSoft),
-            eyebrow: "FOR YOU · FOODOS MOMENT"
+    // MARK: - Story container (Wrapped-style paged cards)
+
+    /// Enumerates the story pages we can build from a loaded summary.
+    /// Used both to render the carousel and to know the page count
+    /// for the progress-bar row, so they can never disagree.
+    fileprivate enum StoryPageKind: String, Identifiable, CaseIterable {
+        case quickStats
+        case moment
+        case todaysNudge
+        case thisWeekChanged
+        case weeklySummary
+        case mostCommonFoods
+        case moodInsight
+        case timingInsight
+        case suggestedExperiment
+        var id: String { rawValue }
+    }
+
+    /// Order of pages mirrors the old scroll order so users who used
+    /// the previous Mirror still see the same content first.
+    private func storyPageKinds(for summary: FoodMirrorSummary) -> [StoryPageKind] {
+        var pages: [StoryPageKind] = []
+        let hasQuickStats =
+            summary.sevenDayLogCount > 0 ||
+            summary.thirtyDayLogCount > 0 ||
+            summary.moodLogCount > 0
+        if hasQuickStats { pages.append(.quickStats) }
+        if let moment = viewModel.currentMoment,
+           moment.kind != .learning {
+            pages.append(.moment)
+        }
+        if summary.todaysGentleNudge   != nil { pages.append(.todaysNudge) }
+        if summary.thisWeekChanged     != nil { pages.append(.thisWeekChanged) }
+        if summary.weeklySummary       != nil { pages.append(.weeklySummary) }
+        if !summary.mostCommonFoods.isEmpty   { pages.append(.mostCommonFoods) }
+        if summary.moodInsight         != nil { pages.append(.moodInsight) }
+        if summary.timingInsight       != nil { pages.append(.timingInsight) }
+        if summary.suggestedExperiment != nil { pages.append(.suggestedExperiment) }
+        return pages
+    }
+
+    /// Fixed-height contained "stage" that hosts the story pages.
+    /// Sits inside the regular page padding so the hero header above
+    /// and the tab bar below remain visible — this is NOT full-screen.
+    private func storyContainer(for summary: FoodMirrorSummary) -> some View {
+        let pages = storyPageKinds(for: summary)
+        let pageCount = pages.count
+        let clampedIndex = min(max(storyIndex, 0), max(pageCount - 1, 0))
+
+        return VStack(spacing: AppSpacing.sm) {
+            storyProgressBars(
+                count: pageCount,
+                current: clampedIndex,
+                progress: storyProgress
+            )
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.top, AppSpacing.md)
+
+            GeometryReader { geo in
+                TabView(selection: $storyIndex) {
+                    ForEach(Array(pages.enumerated()), id: \.element.id) {
+                        index, kind in
+                        storyPageView(kind, summary: summary)
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.bottom, AppSpacing.lg)
+                            .tag(index)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                // SpatialTapGesture attached to the TabView itself
+                // (the parent of every card's content). With the
+                // default `.gesture` priority, child Buttons — like
+                // the moment's feedback chips — consume their own
+                // taps first; only taps on non-interactive parts of
+                // a card fall through to this gesture.
+                .gesture(
+                    SpatialTapGesture()
+                        .onEnded { event in
+                            if event.location.x < geo.size.width * 0.4 {
+                                advanceStoryCard(by: -1,
+                                                 pageCount: pageCount,
+                                                 animated: true)
+                            } else {
+                                advanceStoryCard(by: 1,
+                                                 pageCount: pageCount,
+                                                 animated: true)
+                            }
+                        }
+                )
+            }
+
+            if pageCount > 0 && clampedIndex == pageCount - 1 {
+                storyEndCaption
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.bottom, AppSpacing.sm)
+                    .transition(.opacity)
+            }
+        }
+        .frame(height: 500)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.xl)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.bgSurface,
+                            Color.brandSoft.opacity(0.35)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl)
+                .strokeBorder(Color.brand.opacity(0.18), lineWidth: 1)
+        )
+        .appShadow(.shadowCard)
+        .onChange(of: storyIndex) { _, _ in
+            storyProgress = 0
+            storyPaused = false
+        }
+        .onChange(of: pageCount) { _, newCount in
+            if storyIndex >= newCount {
+                storyIndex = max(newCount - 1, 0)
+            }
+        }
+    }
+
+    /// Subtle "you're all caught up" affordance shown on the last page
+    /// so the user understands auto-advance has stopped on purpose.
+    private var storyEndCaption: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.brandDeep.opacity(0.75))
+            Text("You're all caught up.")
+                .appFont(.caption)
+                .foregroundStyle(Color.inkMute)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Story: progress bars
+
+    /// Instagram-style segmented progress row. Each segment grows
+    /// horizontally inside its own GeometryReader so the row lays
+    /// out evenly regardless of page count.
+    private func storyProgressBars(count: Int,
+                                   current: Int,
+                                   progress: Double) -> some View {
+        HStack(spacing: 4) {
+            ForEach(0..<max(count, 1), id: \.self) { i in
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.brand.opacity(0.18))
+                        Capsule()
+                            .fill(Color.brandDeep)
+                            .frame(
+                                width: storyBarFill(
+                                    for: i,
+                                    current: current,
+                                    progress: progress,
+                                    total: geo.size.width
+                                )
+                            )
+                            .animation(
+                                reduceMotion ? .appReduced : .linear(duration: 0.05),
+                                value: progress
+                            )
+                    }
+                }
+                .frame(height: 3)
+                .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private func storyBarFill(for index: Int,
+                              current: Int,
+                              progress: Double,
+                              total: CGFloat) -> CGFloat {
+        if index < current { return total }
+        if index > current { return 0 }
+        if reduceMotion {
+            // Without auto-advance, just show the current segment as
+            // a thin chevron-style marker so users still see which
+            // page they're on.
+            return max(8, total * 0.15)
+        }
+        return total * CGFloat(max(0.0, min(progress, 1.0)))
+    }
+
+    // MARK: - Story: navigation
+
+    /// Steps the carousel by +1 or -1 with bounds. Stops at the last
+    /// card (no infinite loop) and clamps at zero on back-tap from
+    /// the first card. Resets per-page progress so the bar restarts
+    /// for the new page; clears the paused-by-feedback latch.
+    private func advanceStoryCard(by delta: Int,
+                                  pageCount: Int,
+                                  animated: Bool) {
+        guard pageCount > 0 else { return }
+        let target = storyIndex + delta
+        let clamped = min(max(target, 0), pageCount - 1)
+        if clamped == storyIndex { return }
+        Haptics.tap()
+        if animated && !reduceMotion {
+            withAnimation(.motionBase) { storyIndex = clamped }
+        } else {
+            storyIndex = clamped
+        }
+    }
+
+    // MARK: - Story: per-page rendering
+
+    @ViewBuilder
+    private func storyPageView(_ kind: StoryPageKind,
+                               summary: FoodMirrorSummary) -> some View {
+        switch kind {
+        case .quickStats:
+            storyQuickStatsPage(summary)
+        case .moment:
+            if let moment = viewModel.currentMoment {
+                storyMomentPage(moment)
+            }
+        case .todaysNudge:
+            if let nudge = summary.todaysGentleNudge {
+                storyHeadlinePage(
+                    badge: .init(symbol: "leaf.fill",
+                                 tint: .brandDeep, bg: .brandSoft),
+                    eyebrow: "TODAY'S NUDGE",
+                    title: nudge,
+                    evidence: evidenceLine(for: summary)
+                )
+            }
+        case .thisWeekChanged:
+            if let changed = summary.thisWeekChanged {
+                storyHeadlinePage(
+                    badge: .init(symbol: "chart.line.uptrend.xyaxis",
+                                 tint: .catBenefitsInk, bg: .catBenefits),
+                    eyebrow: "THIS WEEK CHANGED",
+                    title: changed,
+                    evidence: nil
+                )
+            }
+        case .weeklySummary:
+            if let weekly = summary.weeklySummary {
+                storyHeadlinePage(
+                    badge: .init(symbol: "calendar",
+                                 tint: .accentCool, bg: .catBenefits),
+                    eyebrow: "THIS WEEK",
+                    title: weekly,
+                    evidence: nil
+                )
+            }
+        case .mostCommonFoods:
+            storyMostCommonFoodsPage(summary.mostCommonFoods)
+        case .moodInsight:
+            if let mood = summary.moodInsight {
+                storyHeadlinePage(
+                    badge: .init(symbol: "heart.fill",
+                                 tint: .accentWarm, bg: .catDrawbacks),
+                    eyebrow: "MOOD & FOOD",
+                    title: mood,
+                    evidence: nil
+                )
+            }
+        case .timingInsight:
+            if let timing = summary.timingInsight {
+                storyHeadlinePage(
+                    badge: .init(symbol: "clock.fill",
+                                 tint: .accentCool, bg: .catBenefits),
+                    eyebrow: "MEAL TIMING",
+                    title: timing,
+                    evidence: nil
+                )
+            }
+        case .suggestedExperiment:
+            if let experiment = summary.suggestedExperiment {
+                storyHeadlinePage(
+                    badge: .init(symbol: "wand.and.stars",
+                                 tint: .catBenefitsInk, bg: .catBenefits),
+                    eyebrow: "A SMALL EXPERIMENT",
+                    title: experiment,
+                    evidence: "Patterns shift slowly — small experiments work best."
+                )
+            }
+        }
+    }
+
+    /// Opening "your week at a glance" page. Three big stat tiles in
+    /// a column with bolder type than the inline strip; reads as the
+    /// title page of the story.
+    private func storyQuickStatsPage(_ summary: FoodMirrorSummary) -> some View {
+        let tiles: [QuickStatTile] = [
+            .init(symbol: "calendar",
+                  value: summary.sevenDayLogCount,
+                  label: "meals this week"),
+            .init(symbol: "fork.knife",
+                  value: summary.thirtyDayLogCount,
+                  label: "meals in 30 days"),
+            .init(symbol: "heart.fill",
+                  value: summary.moodLogCount,
+                  label: summary.moodLogCount == 1 ? "mood note" : "mood notes")
+        ].filter { $0.value > 0 }
+
+        return StoryShell(
+            badge: .init(symbol: "sparkles",
+                         tint: .brandDeep, bg: .brandSoft),
+            eyebrow: "YOUR WEEK AT A GLANCE"
         ) {
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Text(moment.title)
-                    .appFont(.title1)
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                Text("Here's where you are right now.")
+                    .appFont(.title2)
                     .foregroundStyle(Color.ink)
                     .fixedSize(horizontal: false, vertical: true)
+                VStack(spacing: AppSpacing.sm) {
+                    ForEach(tiles) { tile in
+                        StoryStatRow(tile: tile)
+                    }
+                }
+                .padding(.top, AppSpacing.xs)
+            }
+        }
+    }
+
+    /// FoodOS moment as a story page. Uses the same body+evidence
+    /// layout as the inline moment card but with bolder spacing.
+    /// Crucially, the feedback chips remain Buttons so they consume
+    /// their own taps and the carousel doesn't advance under them.
+    private func storyMomentPage(_ moment: FoodOSMoment) -> some View {
+        StoryShell(
+            badge: .init(symbol: momentBadgeSymbol(for: moment),
+                         tint: .brandDeep, bg: .brandSoft),
+            eyebrow: "FOR YOU · FOODOS MOMENT"
+        ) {
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                Text(moment.title)
+                    .appFont(.display2)
+                    .foregroundStyle(Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .minimumScaleFactor(0.7)
                 if let body = moment.body {
                     Text(body)
                         .appFont(.bodyV2)
@@ -499,13 +846,7 @@ struct FoodMirrorView: View {
                     Text(evidence)
                         .appFont(.caption)
                         .foregroundStyle(Color.inkMute)
-                        .padding(.top, AppSpacing.xs)
                 }
-                // The action prompt completes the CLAIM → EVIDENCE →
-                // ACTION arc. Rendered as a calm chip rather than a
-                // CTA button — the tap target is the feedback chip
-                // ("I'll try this") just below, so the action line is
-                // copy, not a button.
                 if FoodOSStoryBuilder.shouldRenderActionLabel(moment),
                    let action = moment.actionLabel {
                     foodOSMomentActionChip(action)
@@ -514,9 +855,85 @@ struct FoodMirrorView: View {
                     FoodOSMomentFeedbackView(
                         moment: moment,
                         recordedFeedback: viewModel.lastFeedbackForCurrentMoment,
-                        onTap: { viewModel.recordFeedback($0) }
+                        onTap: { feedback in
+                            // Latch the carousel so it doesn't slide
+                            // out from under the user mid-read.
+                            storyPaused = true
+                            viewModel.recordFeedback(feedback)
+                        }
                     )
                 }
+            }
+        }
+    }
+
+    /// Generic large-type "one idea per card" page.
+    private func storyHeadlinePage(badge: MirrorBadge,
+                                   eyebrow: String,
+                                   title: String,
+                                   evidence: String?) -> some View {
+        StoryShell(badge: badge, eyebrow: eyebrow) {
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                Text(title)
+                    .appFont(.display2)
+                    .foregroundStyle(Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .minimumScaleFactor(0.7)
+                if let evidence {
+                    Text(evidence)
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// Most-common-foods rendered as a story page. Reuses the bar
+    /// visualisation from the inline card but in a more spacious
+    /// vertical rhythm to suit a single-idea page.
+    private func storyMostCommonFoodsPage(_ foods: [FoodMirrorSummary.FoodCount]) -> some View {
+        let maxCount = max(foods.map { $0.count }.max() ?? 1, 1)
+        return StoryShell(
+            badge: .init(symbol: "fork.knife",
+                         tint: .brandDeep, bg: .brandSoft),
+            eyebrow: "MOST COMMON FOODS"
+        ) {
+            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                Text("The meals you keep coming back to.")
+                    .appFont(.title2)
+                    .foregroundStyle(Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                    ForEach(Array(foods.enumerated()), id: \.offset) {
+                        index, entry in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(alignment: .center, spacing: AppSpacing.sm) {
+                                Text("\(index + 1)")
+                                    .appFont(.captionStrong)
+                                    .foregroundStyle(Color.brandDeep)
+                                    .frame(width: 22, height: 22)
+                                    .background(Circle().fill(Color.brandSoft))
+                                Text(entry.name)
+                                    .appFont(.bodyEmphasis)
+                                    .foregroundStyle(Color.ink)
+                                    .lineLimit(1)
+                                Spacer(minLength: AppSpacing.sm)
+                                Text("\(entry.count)×")
+                                    .appFont(.chipNumber)
+                                    .foregroundStyle(Color.brandDeep)
+                                    .monospacedDigit()
+                            }
+                            MostCommonFoodBar(
+                                fraction: Double(entry.count) / Double(maxCount),
+                                reduceMotion: reduceMotion
+                            )
+                            .frame(height: 6)
+                            .padding(.leading, 30)
+                        }
+                    }
+                }
+                .padding(.top, AppSpacing.xs)
             }
         }
     }
@@ -570,221 +987,11 @@ struct FoodMirrorView: View {
         }
     }
 
-    /// Top-of-story cards: the single most useful thing today, plus
-    /// the most recent week-over-week shift. Each is optional; both
-    /// can be absent on quiet weeks.
-    private func headlineCards(for summary: FoodMirrorSummary) -> [AnyView] {
-        var cards: [AnyView] = []
-        if let nudge = summary.todaysGentleNudge {
-            cards.append(AnyView(
-                sectionCard(
-                    badge: .init(symbol: "leaf.fill",
-                                 tint: .brandDeep, bg: .brandSoft),
-                    eyebrow: "TODAY'S NUDGE",
-                    title: nudge,
-                    body: nil,
-                    evidence: evidenceLine(for: summary)
-                )
-            ))
-        }
-        if let changed = summary.thisWeekChanged {
-            cards.append(AnyView(
-                sectionCard(
-                    badge: .init(symbol: "chart.line.uptrend.xyaxis",
-                                 tint: .catBenefitsInk, bg: .catBenefits),
-                    eyebrow: "THIS WEEK CHANGED",
-                    title: changed,
-                    body: nil,
-                    evidence: nil
-                )
-            ))
-        }
-        return cards
-    }
-
-    /// Lower-weight pattern cards. Grouped under a quiet section
-    /// header so the eye reads them as supporting evidence rather
-    /// than competing headlines.
-    private func patternCards(for summary: FoodMirrorSummary) -> [AnyView] {
-        var cards: [AnyView] = []
-        if let weekly = summary.weeklySummary {
-            cards.append(AnyView(
-                sectionCard(
-                    badge: .init(symbol: "calendar",
-                                 tint: .accentCool, bg: .catBenefits),
-                    eyebrow: "THIS WEEK",
-                    title: weekly,
-                    body: nil,
-                    evidence: nil
-                )
-            ))
-        }
-        if !summary.mostCommonFoods.isEmpty {
-            cards.append(AnyView(mostCommonFoodsCard(summary.mostCommonFoods)))
-        }
-        if let mood = summary.moodInsight {
-            cards.append(AnyView(
-                sectionCard(
-                    badge: .init(symbol: "heart.fill",
-                                 tint: .accentWarm, bg: .catDrawbacks),
-                    eyebrow: "MOOD & FOOD",
-                    title: mood,
-                    body: nil,
-                    evidence: nil
-                )
-            ))
-        }
-        if let timing = summary.timingInsight {
-            cards.append(AnyView(
-                sectionCard(
-                    badge: .init(symbol: "clock.fill",
-                                 tint: .accentCool, bg: .catBenefits),
-                    eyebrow: "MEAL TIMING",
-                    title: timing,
-                    body: nil,
-                    evidence: nil
-                )
-            ))
-        }
-        if let experiment = summary.suggestedExperiment {
-            cards.append(AnyView(experimentCard(experiment)))
-        }
-        return cards
-    }
-
-    /// Quiet section header that introduces the lower-weight pattern
-    /// cards. Reads as a kicker, not a competing title. A small
-    /// count chip ("4 patterns") sits to the right so the user knows
-    /// how much is below at a glance.
-    private func patternsSectionHeader(count: Int) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xs) {
-            HStack(alignment: .center, spacing: AppSpacing.sm) {
-                Text("PATTERNS")
-                    .eyebrow()
-                    .foregroundStyle(Color.brandDeep)
-                Spacer(minLength: 0)
-                Text(count == 1 ? "1 pattern" : "\(count) patterns")
-                    .appFont(.captionStrong)
-                    .foregroundStyle(Color.brandDeep)
-                    .padding(.horizontal, AppSpacing.sm)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.brandSoft))
-                    .overlay(
-                        Capsule().strokeBorder(
-                            Color.brand.opacity(0.3), lineWidth: 1
-                        )
-                    )
-            }
-            Text("Things your meals keep showing.")
-                .appFont(.bodyV2)
-                .foregroundStyle(Color.inkMute)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     /// Honest evidence line keyed off the 30-day log count, so a card
     /// never overclaims. Delegates to the shared presentation helper
     /// so the Mirror tab and Home preview phrase evidence identically.
     private func evidenceLine(for summary: FoodMirrorSummary) -> String? {
         FoodMirrorPresentation.evidenceLine(for: summary)
-    }
-
-    /// Builds a single section card with a small icon badge, eyebrow
-    /// label, and one or two strings of copy. Body is optional;
-    /// evidence is an extra soft caption beneath the body.
-    private func sectionCard(badge: MirrorBadge,
-                             eyebrow: String,
-                             title: String,
-                             body: String?,
-                             evidence: String?) -> some View {
-        MirrorContentCard(badge: badge, eyebrow: eyebrow) {
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Text(title)
-                    .appFont(.title1)
-                    .foregroundStyle(Color.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let body {
-                    Text(body)
-                        .appFont(.bodyV2)
-                        .foregroundStyle(Color.textBody)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let evidence {
-                    Text(evidence)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                        .padding(.top, AppSpacing.xs)
-                }
-            }
-        }
-    }
-
-    private func mostCommonFoodsCard(_ foods: [FoodMirrorSummary.FoodCount]) -> some View {
-        // Bars are normalized against the top entry so the most-eaten
-        // meal always reads as a full bar. Visual scan beats reading
-        // four counts in a row — premium-app affordance for a list
-        // that's secretly a chart.
-        let maxCount = max(foods.map { $0.count }.max() ?? 1, 1)
-        return MirrorContentCard(
-            badge: .init(symbol: "fork.knife",
-                         tint: .brandDeep, bg: .brandSoft),
-            eyebrow: "MOST COMMON FOODS"
-        ) {
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
-                Text("The meals you keep coming back to.")
-                    .appFont(.bodyV2)
-                    .foregroundStyle(Color.textBody)
-                    .padding(.bottom, AppSpacing.xs)
-                ForEach(Array(foods.enumerated()), id: \.offset) { index, entry in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(alignment: .center, spacing: AppSpacing.sm) {
-                            Text("\(index + 1)")
-                                .appFont(.captionStrong)
-                                .foregroundStyle(Color.brandDeep)
-                                .frame(width: 22, height: 22)
-                                .background(
-                                    Circle().fill(Color.brandSoft)
-                                )
-                            Text(entry.name)
-                                .appFont(.bodyEmphasis)
-                                .foregroundStyle(Color.ink)
-                                .lineLimit(1)
-                            Spacer(minLength: AppSpacing.sm)
-                            Text("\(entry.count)×")
-                                .appFont(.chipNumber)
-                                .foregroundStyle(Color.brandDeep)
-                                .monospacedDigit()
-                        }
-                        MostCommonFoodBar(
-                            fraction: Double(entry.count) / Double(maxCount),
-                            reduceMotion: reduceMotion
-                        )
-                        .frame(height: 6)
-                        .padding(.leading, 30) // align under the name
-                    }
-                }
-            }
-        }
-    }
-
-    private func experimentCard(_ text: String) -> some View {
-        MirrorContentCard(
-            badge: .init(symbol: "wand.and.stars",
-                         tint: .catBenefitsInk, bg: .catBenefits),
-            eyebrow: "A SMALL EXPERIMENT"
-        ) {
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Text(text)
-                    .appFont(.title1)
-                    .foregroundStyle(Color.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("Patterns shift slowly — small experiments work best.")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                    .padding(.top, AppSpacing.xs)
-            }
-        }
     }
 
     // MARK: - First-time-ready celebration
@@ -892,26 +1099,27 @@ struct MirrorContentCard<Content: View>: View {
     }
 }
 
-/// Premium variant of `MirrorContentCard` used for the FoodOS Moment.
-/// Same structural language (badge + eyebrow + caller content) but
-/// with a soft brandSoft → bgSurface gradient fill and a brand-tinted
-/// shadow so it reads as the headline card of the page — the one
-/// thing the engine chose for *right now*. Eyebrow leans brandDeep
-/// (vs. inkMute on the base card) to reinforce that priority.
-struct PremiumMirrorCard<Content: View>: View {
+/// Story-page shell used by every page in the Wrapped-style
+/// carousel. Mirrors the badge + eyebrow language of
+/// `MirrorContentCard` but is laid out as a full-bleed page —
+/// generous internal padding, larger badge, content vertically
+/// centred so a single headline reads as the page's whole idea.
+/// No outer card chrome of its own; the parent story container
+/// supplies the rounded "stage" background.
+struct StoryShell<Content: View>: View {
     let badge: MirrorBadge
     let eyebrow: String
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
             HStack(alignment: .center, spacing: AppSpacing.sm) {
                 ZStack {
                     Circle()
                         .fill(badge.bg)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 44, height: 44)
                     Image(systemName: badge.symbol)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(badge.tint)
                 }
                 Text(eyebrow)
@@ -919,30 +1127,57 @@ struct PremiumMirrorCard<Content: View>: View {
                     .foregroundStyle(Color.brandDeep)
                 Spacer(minLength: 0)
             }
+            Spacer(minLength: 0)
             content()
+            Spacer(minLength: 0)
         }
         .padding(AppSpacing.cardPad)
+        .frame(maxWidth: .infinity,
+               maxHeight: .infinity,
+               alignment: .topLeading)
+    }
+}
+
+/// Single row used by the opening "your week at a glance" story
+/// page. Larger than the inline `QuickStatView` tile because each
+/// stat now gets the full width of a story page.
+struct StoryStatRow: View {
+    let tile: QuickStatTile
+
+    var body: some View {
+        HStack(spacing: AppSpacing.md) {
+            ZStack {
+                Circle()
+                    .fill(Color.brandSoft)
+                    .frame(width: 36, height: 36)
+                Image(systemName: tile.symbol)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.brandDeep)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(tile.value)")
+                    .appFont(.title1)
+                    .foregroundStyle(Color.ink)
+                    .monospacedDigit()
+                Text(tile.label)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: AppRadius.xl)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.brandSoft.opacity(0.9),
-                            Color.bgSurface
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.bgSurface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.xl)
-                .strokeBorder(Color.brand.opacity(0.25), lineWidth: 1)
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(Color.brand.opacity(0.15), lineWidth: 1)
         )
-        .appShadow(.shadowCard)
-        .shadow(color: Color.brand.opacity(0.12),
-                radius: 18, x: 0, y: 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("\(tile.value) \(tile.label)"))
     }
 }
 
