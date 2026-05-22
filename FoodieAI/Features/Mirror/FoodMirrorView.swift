@@ -30,9 +30,16 @@ struct FoodMirrorView: View {
     /// the pages are derived from the loaded summary + currentMoment,
     /// both of which already sit on this view's view model.
     @State private var storyIndex: Int = 0
-    /// 0...1 fill of the current page's progress bar. Driven by the
-    /// auto-advance ticker and reset whenever the page changes.
-    @State private var storyProgress: Double = 0
+    /// Wall-clock instant the current story page was first shown.
+    /// Drives both the progress-bar fill (via a TimelineView scoped
+    /// to the bar) and the elapsed-time auto-advance check, so we
+    /// no longer need a 20Hz @State double thrashing the whole view.
+    @State private var currentCardStartedAt: Date = Date()
+    /// When the user pauses auto-advance (e.g. by tapping a feedback
+    /// chip), we record how far the progress had got so the bar
+    /// freezes at that fill instead of continuing to tick visually.
+    /// nil = not paused; non-nil = bar frozen at this elapsed time.
+    @State private var pausedAtElapsed: TimeInterval? = nil
     /// Latched true once the user interacts with the moment's
     /// feedback chips. Pauses auto-advance so they can sit on that
     /// card and read the confirmation; resets on manual page change.
@@ -45,11 +52,19 @@ struct FoodMirrorView: View {
     /// grid. nil means the album is showing its thumbnail grid; a
     /// non-nil value shows that page full-size as an overlay.
     @State private var expandedCard: StoryPageKind? = nil
-    /// Drives the per-tick auto-advance loop. Subscribed via
-    /// `.onReceive` in body so SwiftUI tears it down with the view.
-    private var storyTicker: Publishers.Autoconnect<Timer.TimerPublisher> {
-        Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
-    }
+    /// Low-frequency auto-advance ticker. Stored as `static let` so
+    /// there is exactly ONE publisher for the lifetime of the type —
+    /// a stored `let` on the struct (or a computed property) would be
+    /// re-created on every body re-evaluation, which used to leak a
+    /// new autoconnected timer per redraw and caused progressively
+    /// worsening lag. Frequency is intentionally coarse (0.25s):
+    /// the smooth bar fill is driven by a TimelineView scoped to the
+    /// bar, so this ticker only has to decide *whether* to advance.
+    private static let storyTicker = Timer.publish(
+        every: 0.25,
+        on: .main,
+        in: .common
+    ).autoconnect()
     private static let storyAdvanceDuration: Double = 6.0
 
     var body: some View {
@@ -90,6 +105,12 @@ struct FoodMirrorView: View {
         }
         .onChange(of: viewModel.state) { _, _ in
             checkForFirstReady()
+            // Treat each state transition as a fresh "card start" so
+            // the first loaded card always gets a full advance window
+            // — otherwise the timer would be measuring against view
+            // construction time and could skip the first card.
+            currentCardStartedAt = Date()
+            pausedAtElapsed = nil
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .foodLogDidChange)
@@ -99,10 +120,10 @@ struct FoodMirrorView: View {
             // Supabase fetches racing each other to commit.
             viewModel.scheduleDebouncedRefresh()
         }
-        .onReceive(freshnessTicker) { now in
+        .onReceive(Self.freshnessTicker) { now in
             freshnessNow = now
         }
-        .onReceive(storyTicker) { _ in
+        .onReceive(Self.storyTicker) { _ in
             advanceStoryTick()
         }
         .onDisappear {
@@ -110,36 +131,44 @@ struct FoodMirrorView: View {
         }
     }
 
-    /// Drives the auto-advance progress bar for the current story
-    /// card. No-op unless we're in story mode (computed via the
-    /// derived page count) and motion is allowed. Pauses while
-    /// `storyPaused` is set by feedback-chip taps.
+    /// Checks the elapsed time on the current story card and advances
+    /// when it crosses the duration threshold. No-op when paused, in
+    /// Reduce Motion, while a card is expanded out of the album, or
+    /// when there's no story content. The smooth bar fill is owned by
+    /// the TimelineView inside `storyProgressBars` — this function
+    /// only decides *whether* to flip to the next card.
     private func advanceStoryTick() {
         guard !reduceMotion, !storyPaused else { return }
+        guard expandedCard == nil else { return }
         guard case .loaded(let summary) = viewModel.state,
               summary.hasAnyContent else { return }
         let pageCount = storyPageKinds(for: summary).count
-        guard pageCount > 0 else { return }
-        // Stop ticking at the last card — no loop.
-        guard storyIndex < pageCount - 1 else {
-            storyProgress = 1.0
-            return
-        }
-        let increment = 0.05 / Self.storyAdvanceDuration
-        let next = storyProgress + increment
-        if next >= 1.0 {
+        guard pageCount > 0, storyIndex < pageCount - 1 else { return }
+        let elapsed = Date().timeIntervalSince(currentCardStartedAt)
+        if elapsed >= Self.storyAdvanceDuration {
             advanceStoryCard(by: 1, pageCount: pageCount, animated: true)
-        } else {
-            storyProgress = next
         }
+    }
+
+    /// Latch auto-advance and freeze the progress bar at the current
+    /// elapsed position, so a feedback tap doesn't make the bar keep
+    /// ticking visually while the carousel sits still.
+    private func pauseAutoAdvance() {
+        let elapsed = Date().timeIntervalSince(currentCardStartedAt)
+        pausedAtElapsed = min(max(elapsed, 0), Self.storyAdvanceDuration)
+        storyPaused = true
     }
 
     /// Rolls the freshness caption forward without a network refresh.
     /// One tick per minute is plenty — the captions only switch on
     /// minute-resolution boundaries ("just now" → "1 min ago" etc.).
-    private var freshnessTicker: Publishers.Autoconnect<Timer.TimerPublisher> {
-        Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-    }
+    /// Stored as `static let` to avoid the same publisher-recreation
+    /// trap that the story ticker used to fall into.
+    private static let freshnessTicker = Timer.publish(
+        every: 60,
+        on: .main,
+        in: .common
+    ).autoconnect()
 
     // MARK: - Hero
 
@@ -559,8 +588,7 @@ struct FoodMirrorView: View {
         return VStack(spacing: AppSpacing.sm) {
             storyProgressBars(
                 count: pageCount,
-                current: clampedIndex,
-                progress: storyProgress
+                current: clampedIndex
             )
             .padding(.horizontal, AppSpacing.md)
             .padding(.top, AppSpacing.md)
@@ -629,7 +657,12 @@ struct FoodMirrorView: View {
         .overlay(expandedCardOverlay(summary: summary))
         .appShadow(.shadowCard)
         .onChange(of: storyIndex) { _, _ in
-            storyProgress = 0
+            // Restart the per-card clock so the new card gets a
+            // full advance window and the bar starts empty. The
+            // TimelineView inside storyProgressBars reads this and
+            // resets its periodic schedule automatically.
+            currentCardStartedAt = Date()
+            pausedAtElapsed = nil
             storyPaused = false
             // Any page change (including swiping back off the
             // album) collapses an expanded card so the overlay
@@ -660,36 +693,44 @@ struct FoodMirrorView: View {
 
     // MARK: - Story: progress bars
 
-    /// Instagram-style segmented progress row. Each segment grows
-    /// horizontally inside its own GeometryReader so the row lays
-    /// out evenly regardless of page count.
+    /// Instagram-style segmented progress row. The high-frequency
+    /// fill animation is owned by a TimelineView scoped to just this
+    /// subtree, so the surrounding view (hero, blobs, story content)
+    /// never re-evaluates body for the bar tick — only the bar does.
+    /// Progress is derived from elapsed time, not from an @State
+    /// counter, so there's nothing to drift or accumulate.
     private func storyProgressBars(count: Int,
-                                   current: Int,
-                                   progress: Double) -> some View {
-        HStack(spacing: 4) {
-            ForEach(0..<max(count, 1), id: \.self) { i in
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(Color.brand.opacity(0.18))
-                        Capsule()
-                            .fill(Color.brandDeep)
-                            .frame(
-                                width: storyBarFill(
-                                    for: i,
-                                    current: current,
-                                    progress: progress,
-                                    total: geo.size.width
-                                )
-                            )
-                            .animation(
-                                reduceMotion ? .appReduced : .linear(duration: 0.05),
-                                value: progress
-                            )
-                    }
+                                   current: Int) -> some View {
+        TimelineView(.periodic(from: currentCardStartedAt, by: 0.05)) { context in
+            let progress: Double = {
+                if reduceMotion { return 0 }
+                if let frozen = pausedAtElapsed {
+                    return min(frozen / Self.storyAdvanceDuration, 1.0)
                 }
-                .frame(height: 3)
-                .accessibilityHidden(true)
+                let elapsed = context.date.timeIntervalSince(currentCardStartedAt)
+                return min(max(elapsed, 0) / Self.storyAdvanceDuration, 1.0)
+            }()
+            HStack(spacing: 4) {
+                ForEach(0..<max(count, 1), id: \.self) { i in
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.brand.opacity(0.18))
+                            Capsule()
+                                .fill(Color.brandDeep)
+                                .frame(
+                                    width: storyBarFill(
+                                        for: i,
+                                        current: current,
+                                        progress: progress,
+                                        total: geo.size.width
+                                    )
+                                )
+                        }
+                    }
+                    .frame(height: 3)
+                    .accessibilityHidden(true)
+                }
             }
         }
     }
@@ -882,8 +923,10 @@ struct FoodMirrorView: View {
                         recordedFeedback: viewModel.lastFeedbackForCurrentMoment,
                         onTap: { feedback in
                             // Latch the carousel so it doesn't slide
-                            // out from under the user mid-read.
-                            storyPaused = true
+                            // out from under the user mid-read, and
+                            // freeze the progress bar at its current
+                            // fill instead of letting it tick on.
+                            pauseAutoAdvance()
                             viewModel.recordFeedback(feedback)
                         }
                     )
@@ -1114,7 +1157,7 @@ struct FoodMirrorView: View {
                             )
                             .onTapGesture {
                                 Haptics.tap()
-                                storyPaused = true
+                                pauseAutoAdvance()
                                 if reduceMotion {
                                     expandedCard = kind
                                 } else {
