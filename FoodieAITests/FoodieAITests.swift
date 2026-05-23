@@ -4919,6 +4919,90 @@ final class FoodOSValueRevelationTests: XCTestCase {
         )
     }
 
+    // MARK: - Reveal payload (Direction B two-bar UI)
+
+    /// A value revelation carries the raw before/after numbers, the
+    /// display unit, and a correctly-signed delta percent so the
+    /// two-bar card can render without re-parsing the title.
+    func test_valueRevelation_revealCarriesBeforeAfterAndDelta() {
+        let thisWeek: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 25, mood: .loved)
+        }
+        let lastWeek: [FoodLog] = (8...13).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 44, mood: .loved)
+        }
+        let revs = FoodOSMomentEngine.revelations(
+            thirtyDayLogs: thisWeek + lastWeek,
+            thisWeekLogs:  thisWeek,
+            lastWeekLogs:  lastWeek,
+            timeZone:      Self.timeZone,
+            now:           Self.now
+        )
+
+        let reveal = revs.value?.reveal
+        XCTAssertNotNil(reveal,
+                        "Value revelations must carry the reveal payload.")
+        XCTAssertEqual(reveal?.before, 44,
+                       "before = last week's avg protein (g).")
+        XCTAssertEqual(reveal?.after, 25,
+                       "after  = this week's avg protein (g).")
+        XCTAssertEqual(reveal?.unit, "g")
+        // (25 - 44) / 44 ≈ -0.4318 → rounds to -43.
+        XCTAssertEqual(reveal?.deltaPercent, -43,
+                       "Dropped values must report a negative delta.")
+    }
+
+    /// Mood revelations have no before/after to chart — their `reveal`
+    /// payload must remain nil so the card UI falls into the calm
+    /// (no-bars) variant.
+    func test_moodRevelation_revealIsNil() {
+        var thirtyDay: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Morning \($0)", daysAgo: $0,
+                         hour: 8, calories: 500, mood: .loved)
+        }
+        thirtyDay += (7...14).map {
+            Self.makeLog(name: "Afternoon \($0)", daysAgo: $0,
+                         hour: 14, calories: 500, mood: .tough)
+        }
+        let revs = FoodOSMomentEngine.revelations(
+            thirtyDayLogs: thirtyDay,
+            thisWeekLogs:  thirtyDay,
+            lastWeekLogs:  thirtyDay,
+            timeZone:      Self.timeZone,
+            now:           Self.now
+        )
+        XCTAssertNotNil(revs.mood, "Mood card should fire on divergent mood.")
+        XCTAssertNil(revs.mood?.reveal,
+                     "Mood cards carry no two-bar reveal.")
+    }
+
+    /// Climbing values must report a positive delta percent so the
+    /// pill's arrow points up.
+    func test_valueRevelation_climbingProducesPositiveDelta() {
+        let thisWeek: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 800, mood: .loved)
+        }
+        let lastWeek: [FoodLog] = (8...13).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 500, mood: .loved)
+        }
+        let revs = FoodOSMomentEngine.revelations(
+            thirtyDayLogs: thisWeek + lastWeek,
+            thisWeekLogs:  thisWeek,
+            lastWeekLogs:  lastWeek,
+            timeZone:      Self.timeZone,
+            now:           Self.now
+        )
+        XCTAssertNotNil(revs.value?.reveal)
+        XCTAssertGreaterThan(revs.value?.reveal?.deltaPercent ?? 0, 0)
+        XCTAssertEqual(revs.value?.reveal?.unit, "kcal")
+    }
+
     // MARK: helpers
 
     private func assertCandidateSafe(

@@ -30,6 +30,20 @@ struct FoodMirrorView: View {
     /// presented. The Mirror tab itself just shows the hero + a
     /// prominent entry card; tapping the entry card flips this true,
     /// which presents `FoodMirrorStoryView` in a `.fullScreenCover`.
+    ///
+    /// We deliberately use `.fullScreenCover` (not an in-hierarchy
+    /// `.overlay`) because the cover gives us three things for free
+    /// that the overlay didn't: it renders as an opaque presentation
+    /// surface (no home-screen / Mirror-tab bleed-through behind the
+    /// story content during transitions), it hides the tab bar
+    /// automatically, and it owns a clean dismissal animation. An
+    /// earlier attempt at an `.overlay` + `matchedGeometryEffect`
+    /// zoom-open looked broken on device (hard cut on open, semi-
+    /// transparent backdrop) — that version is intentionally
+    /// reverted. The "zoom open" feel now lives INSIDE the cover as
+    /// a scale+fade on the story content (see `presented` flag in
+    /// `FoodMirrorStoryView`), which renders reliably because the
+    /// container around it is stable.
     @State private var showingStory = false
 
     var body: some View {
@@ -102,8 +116,10 @@ struct FoodMirrorView: View {
             let pages = storyPageKinds(for: summary)
             FoodMirrorStoryView(
                 pages: pages,
-                renderPage: { kind in
-                    AnyView(storyPageView(kind, summary: summary))
+                renderPage: { kind, appeared in
+                    AnyView(storyPageView(kind,
+                                          summary: summary,
+                                          appeared: appeared))
                 },
                 renderAlbumThumbnail: { kind in
                     AnyView(albumThumbnail(kind, summary: summary))
@@ -663,16 +679,18 @@ struct FoodMirrorView: View {
 
     @ViewBuilder
     private func storyPageView(_ kind: StoryPageKind,
-                               summary: FoodMirrorSummary) -> some View {
+                               summary: FoodMirrorSummary,
+                               appeared: Bool) -> some View {
         switch kind {
         case .quickStats:
-            storyQuickStatsPage(summary)
+            storyQuickStatsPage(summary, appeared: appeared)
         case .moment:
             if let moment = viewModel.currentMoment {
                 storyMomentPage(
                     moment,
                     eyebrow: "FOR YOU · FOODOS MOMENT",
-                    recordedFeedback: viewModel.lastFeedbackForCurrentMoment
+                    recordedFeedback: viewModel.lastFeedbackForCurrentMoment,
+                    appeared: appeared
                 )
             }
         case .moodRevelation:
@@ -680,7 +698,8 @@ struct FoodMirrorView: View {
                 storyMomentPage(
                     moment,
                     eyebrow: "MOOD REVELATION",
-                    recordedFeedback: viewModel.lastFeedbackForMoodRevelation
+                    recordedFeedback: viewModel.lastFeedbackForMoodRevelation,
+                    appeared: appeared
                 )
             }
         case .valueRevelation:
@@ -688,7 +707,8 @@ struct FoodMirrorView: View {
                 storyMomentPage(
                     moment,
                     eyebrow: "WHAT CHANGED",
-                    recordedFeedback: viewModel.lastFeedbackForValueRevelation
+                    recordedFeedback: viewModel.lastFeedbackForValueRevelation,
+                    appeared: appeared
                 )
             }
         case .todaysNudge:
@@ -698,7 +718,8 @@ struct FoodMirrorView: View {
                                  tint: .brandDeep, bg: .brandSoft),
                     eyebrow: "TODAY'S NUDGE",
                     title: nudge,
-                    evidence: evidenceLine(for: summary)
+                    evidence: evidenceLine(for: summary),
+                    appeared: appeared
                 )
             }
         case .thisWeekChanged:
@@ -708,7 +729,8 @@ struct FoodMirrorView: View {
                                  tint: .catBenefitsInk, bg: .catBenefits),
                     eyebrow: "THIS WEEK CHANGED",
                     title: changed,
-                    evidence: nil
+                    evidence: nil,
+                    appeared: appeared
                 )
             }
         case .weeklySummary:
@@ -718,11 +740,13 @@ struct FoodMirrorView: View {
                                  tint: .accentCool, bg: .catBenefits),
                     eyebrow: "THIS WEEK",
                     title: weekly,
-                    evidence: nil
+                    evidence: nil,
+                    appeared: appeared
                 )
             }
         case .mostCommonFoods:
-            storyMostCommonFoodsPage(summary.mostCommonFoods)
+            storyMostCommonFoodsPage(summary.mostCommonFoods,
+                                     appeared: appeared)
         case .moodInsight:
             if let mood = summary.moodInsight {
                 storyHeadlinePage(
@@ -730,7 +754,8 @@ struct FoodMirrorView: View {
                                  tint: .accentWarm, bg: .catDrawbacks),
                     eyebrow: "MOOD & FOOD",
                     title: mood,
-                    evidence: nil
+                    evidence: nil,
+                    appeared: appeared
                 )
             }
         case .timingInsight:
@@ -740,7 +765,8 @@ struct FoodMirrorView: View {
                                  tint: .accentCool, bg: .catBenefits),
                     eyebrow: "MEAL TIMING",
                     title: timing,
-                    evidence: nil
+                    evidence: nil,
+                    appeared: appeared
                 )
             }
         case .suggestedExperiment:
@@ -750,7 +776,8 @@ struct FoodMirrorView: View {
                                  tint: .catBenefitsInk, bg: .catBenefits),
                     eyebrow: "A SMALL EXPERIMENT",
                     title: experiment,
-                    evidence: "Patterns shift slowly — small experiments work best."
+                    evidence: "Patterns shift slowly — small experiments work best.",
+                    appeared: appeared
                 )
             }
         case .album:
@@ -765,7 +792,14 @@ struct FoodMirrorView: View {
     /// Opening "your week at a glance" page. Three big stat tiles in
     /// a column with bolder type than the inline strip; reads as the
     /// title page of the story.
-    private func storyQuickStatsPage(_ summary: FoodMirrorSummary) -> some View {
+    ///
+    /// Each tile is a separate `elements` entry so they cascade in
+    /// one-by-one through `StoryShell`'s `FlyIn` — headline first,
+    /// then meals-this-week, then 30-day, then mood notes. Matches
+    /// the per-line Duolingo rhythm rather than slamming the whole
+    /// tile column in as a block.
+    private func storyQuickStatsPage(_ summary: FoodMirrorSummary,
+                                     appeared: Bool) -> some View {
         let tiles: [QuickStatTile] = [
             .init(symbol: "calendar",
                   value: summary.sevenDayLogCount,
@@ -778,24 +812,26 @@ struct FoodMirrorView: View {
                   label: summary.moodLogCount == 1 ? "mood note" : "mood notes")
         ].filter { $0.value > 0 }
 
-        return StoryShell(
-            badge: .init(symbol: "sparkles",
-                         tint: .brandDeep, bg: .brandSoft),
-            eyebrow: "YOUR WEEK AT A GLANCE"
-        ) {
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
+        var elements: [AnyView] = [
+            AnyView(
                 Text("Here's where you are right now.")
                     .appFont(.title2)
                     .foregroundStyle(Color.ink)
                     .fixedSize(horizontal: false, vertical: true)
-                VStack(spacing: AppSpacing.sm) {
-                    ForEach(tiles) { tile in
-                        StoryStatRow(tile: tile)
-                    }
-                }
-                .padding(.top, AppSpacing.xs)
-            }
+            )
+        ]
+        for tile in tiles {
+            elements.append(AnyView(StoryStatRow(tile: tile)))
         }
+
+        return StoryShell(
+            badge: .init(symbol: "sparkles",
+                         tint: .brandDeep, bg: .brandSoft),
+            eyebrow: "YOUR WEEK AT A GLANCE",
+            appeared: appeared,
+            reduceMotion: reduceMotion,
+            elements: elements
+        )
     }
 
     /// FoodOS moment as a story page. Uses the same body+evidence
@@ -810,43 +846,207 @@ struct FoodMirrorView: View {
     /// duplicate body.
     private func storyMomentPage(_ moment: FoodOSMoment,
                                  eyebrow: String,
-                                 recordedFeedback: FoodOSMomentFeedback?) -> some View {
-        StoryShell(
-            badge: .init(symbol: momentBadgeSymbol(for: moment),
-                         tint: .brandDeep, bg: .brandSoft),
-            eyebrow: eyebrow
-        ) {
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                                 recordedFeedback: FoodOSMomentFeedback?,
+                                 appeared: Bool) -> some View {
+        // Each visible piece of content becomes one element in the
+        // shell's cascade. The order matches the visual rhythm:
+        // title → reveal (if any) → body → evidence → action chip →
+        // feedback chips. Conditional pieces are appended only when
+        // present, so a moment with no body doesn't leave a hole in
+        // the sequence — the cascade closes ranks naturally.
+        var elements: [AnyView] = [
+            AnyView(
                 Text(moment.title)
                     .appFont(.display2)
                     .foregroundStyle(Color.ink)
                     .fixedSize(horizontal: false, vertical: true)
                     .minimumScaleFactor(0.7)
-                if let body = moment.body {
-                    Text(body)
-                        .appFont(.bodyV2)
-                        .foregroundStyle(Color.textBody)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let evidence = moment.evidenceLine {
-                    Text(evidence)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                }
-                if FoodOSStoryBuilder.shouldRenderActionLabel(moment),
-                   let action = moment.actionLabel {
-                    foodOSMomentActionChip(action)
-                }
-                if FoodOSMomentFeedbackPolicy.showsControls(for: moment) {
-                    FoodOSMomentFeedbackView(
-                        moment: moment,
-                        recordedFeedback: recordedFeedback,
-                        onTap: { feedback in
-                            viewModel.recordFeedback(feedback, for: moment)
-                        }
-                    )
-                }
-            }
+            )
+        ]
+        // Two-bar reveal stays a SINGLE element so the cascade reads
+        // as "title arrives, THEN the chart arrives" — not "title,
+        // before-bar, after-bar, delta-pill". The reveal's internal
+        // bar-grow + count-up still runs off `appeared`, so the
+        // signature animation fires once the block flies in.
+        if let reveal = moment.reveal {
+            elements.append(AnyView(
+                twoBarReveal(reveal, appeared: appeared)
+                    .padding(.vertical, AppSpacing.xs)
+            ))
+        }
+        if let body = moment.body {
+            elements.append(AnyView(
+                Text(body)
+                    .appFont(.bodyV2)
+                    .foregroundStyle(Color.textBody)
+                    .fixedSize(horizontal: false, vertical: true)
+            ))
+        }
+        if let evidence = moment.evidenceLine {
+            elements.append(AnyView(
+                Text(evidence)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+            ))
+        }
+        if FoodOSStoryBuilder.shouldRenderActionLabel(moment),
+           let action = moment.actionLabel {
+            elements.append(AnyView(foodOSMomentActionChip(action)))
+        }
+        if FoodOSMomentFeedbackPolicy.showsControls(for: moment) {
+            elements.append(AnyView(
+                FoodOSMomentFeedbackView(
+                    moment: moment,
+                    recordedFeedback: recordedFeedback,
+                    onTap: { feedback in
+                        viewModel.recordFeedback(feedback, for: moment)
+                    }
+                )
+            ))
+        }
+
+        return StoryShell(
+            badge: .init(symbol: momentBadgeSymbol(for: moment),
+                         tint: .brandDeep, bg: .brandSoft),
+            eyebrow: eyebrow,
+            appeared: appeared,
+            reduceMotion: reduceMotion,
+            elements: elements
+        )
+    }
+
+    // MARK: - Two-bar reveal (Direction B value cards)
+
+    /// Vertical before/after bars with the raw numbers above and
+    /// "LAST WEEK" / "THIS WEEK" labels below. Proportional heights:
+    /// the taller value owns `maxBarHeight`, the other scales relative
+    /// to it. The signed-delta pill sits to the right with an arrow
+    /// matching the direction.
+    ///
+    /// When `appeared` flips false → true the bars grow from a
+    /// hairline baseline to their full height and the numbers count
+    /// up from 0 to their target — the card's signature beat. Reduce
+    /// Motion makes both instant.
+    private func twoBarReveal(_ reveal: FoodOSMoment.Reveal,
+                              appeared: Bool) -> some View {
+        let maxVal = max(reveal.before, reveal.after, 1)
+        let maxBarHeight: CGFloat = 120
+        let beforeFull = maxBarHeight * CGFloat(reveal.before / maxVal)
+        let afterFull  = maxBarHeight * CGFloat(reveal.after  / maxVal)
+        let dropped    = reveal.deltaPercent < 0
+
+        return HStack(alignment: .bottom, spacing: AppSpacing.lg) {
+            twoBarColumn(
+                target:     reveal.before,
+                unit:       reveal.unit,
+                valueFont:  .captionStrong,
+                valueColor: Color.inkMute,
+                barColor:   Color.inkMute.opacity(0.28),
+                fullHeight: beforeFull,
+                appeared:   appeared,
+                label:      "LAST WEEK",
+                labelColor: Color.inkMute
+            )
+            twoBarColumn(
+                target:     reveal.after,
+                unit:       reveal.unit,
+                valueFont:  .title1,
+                valueColor: Color.brandDeep,
+                barColor:   Color.brand,
+                fullHeight: afterFull,
+                appeared:   appeared,
+                label:      "THIS WEEK",
+                labelColor: Color.brandDeep
+            )
+            deltaPill(percent: reveal.deltaPercent, dropped: dropped)
+                .padding(.bottom, 30)
+        }
+        .frame(height: maxBarHeight + 60)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(
+            "Last week \(formatBarValue(reveal.before, unit: reveal.unit)), "
+            + "this week \(formatBarValue(reveal.after, unit: reveal.unit)), "
+            + "\(dropped ? "down" : "up") "
+            + "\(abs(reveal.deltaPercent)) percent."
+        ))
+    }
+
+    /// One column of the two-bar reveal: counting number on top, a
+    /// growing rounded bar in the middle, label below. The HStack
+    /// containing both columns is `.bottom`-aligned, so animating the
+    /// bar's frame height visually rises from the baseline.
+    private func twoBarColumn(target: Double,
+                              unit: String,
+                              valueFont: AppFont.Style,
+                              valueColor: Color,
+                              barColor: Color,
+                              fullHeight: CGFloat,
+                              appeared: Bool,
+                              label: String,
+                              labelColor: Color) -> some View {
+        VStack(spacing: AppSpacing.xs) {
+            CountingNumber(
+                target:       target,
+                unit:         unit,
+                valueFont:    valueFont,
+                valueColor:   valueColor,
+                appeared:     appeared,
+                reduceMotion: reduceMotion
+            )
+            UnevenRoundedRectangle(
+                topLeadingRadius:     10,
+                bottomLeadingRadius:  0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius:    10,
+                style: .continuous
+            )
+            .fill(barColor)
+            .frame(
+                height: appeared || reduceMotion
+                    ? max(4, fullHeight)
+                    : 0
+            )
+            .animation(
+                reduceMotion ? .appReduced : .appMorph.delay(0.15),
+                value: appeared
+            )
+            Text(label)
+                .appFont(.labelEyebrow)
+                .foregroundStyle(labelColor)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Small chip showing the signed percent change. Arrow points down
+    /// when the value dropped, up when it climbed. Brand-soft fill keeps
+    /// it value-neutral — "dropped" is not framed as bad.
+    private func deltaPill(percent: Int, dropped: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: dropped ? "arrow.down" : "arrow.up")
+                .font(.system(size: 11, weight: .bold))
+            Text("\(abs(percent))%")
+                .appFont(.captionStrong)
+                .monospacedDigit()
+        }
+        .foregroundStyle(Color.brandDeep)
+        .padding(.horizontal, AppSpacing.sm)
+        .padding(.vertical, 4)
+        .background(
+            Capsule().fill(Color.brandSoft)
+        )
+        .overlay(
+            Capsule().strokeBorder(Color.brand.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    /// "44g" / "1860kcal" / "18 meals" / "7 foods". Counts read better
+    /// with a space before the noun; mass/energy units are typeset
+    /// flush to the number per nutrition-label convention.
+    private func formatBarValue(_ value: Double, unit: String) -> String {
+        let n = Int(value.rounded())
+        switch unit {
+        case "meals", "foods": return "\(n) \(unit)"
+        default:               return "\(n)\(unit)"
         }
     }
 
@@ -854,71 +1054,93 @@ struct FoodMirrorView: View {
     private func storyHeadlinePage(badge: MirrorBadge,
                                    eyebrow: String,
                                    title: String,
-                                   evidence: String?) -> some View {
-        StoryShell(badge: badge, eyebrow: eyebrow) {
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
+                                   evidence: String?,
+                                   appeared: Bool) -> some View {
+        var elements: [AnyView] = [
+            AnyView(
                 Text(title)
                     .appFont(.display2)
                     .foregroundStyle(Color.ink)
                     .fixedSize(horizontal: false, vertical: true)
                     .minimumScaleFactor(0.7)
-                if let evidence {
-                    Text(evidence)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            )
+        ]
+        if let evidence {
+            elements.append(AnyView(
+                Text(evidence)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+                    .fixedSize(horizontal: false, vertical: true)
+            ))
         }
+        return StoryShell(
+            badge: badge,
+            eyebrow: eyebrow,
+            appeared: appeared,
+            reduceMotion: reduceMotion,
+            elements: elements
+        )
     }
 
     /// Most-common-foods rendered as a story page. Reuses the bar
     /// visualisation from the inline card but in a more spacious
     /// vertical rhythm to suit a single-idea page.
-    private func storyMostCommonFoodsPage(_ foods: [FoodMirrorSummary.FoodCount]) -> some View {
+    ///
+    /// Each ranked food row is a separate element so the cascade
+    /// counts down the leaderboard: #1 flies in, then #2, then #3.
+    /// More satisfying than a single block reveal, and the per-row
+    /// bar inside still grows from the `MostCommonFoodBar`'s own
+    /// internal animation.
+    private func storyMostCommonFoodsPage(
+        _ foods: [FoodMirrorSummary.FoodCount],
+        appeared: Bool
+    ) -> some View {
         let maxCount = max(foods.map { $0.count }.max() ?? 1, 1)
-        return StoryShell(
-            badge: .init(symbol: "fork.knife",
-                         tint: .brandDeep, bg: .brandSoft),
-            eyebrow: "MOST COMMON FOODS"
-        ) {
-            VStack(alignment: .leading, spacing: AppSpacing.md) {
+        var elements: [AnyView] = [
+            AnyView(
                 Text("The meals you keep coming back to.")
                     .appFont(.title2)
                     .foregroundStyle(Color.ink)
                     .fixedSize(horizontal: false, vertical: true)
-                VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    ForEach(Array(foods.enumerated()), id: \.offset) {
-                        index, entry in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(alignment: .center, spacing: AppSpacing.sm) {
-                                Text("\(index + 1)")
-                                    .appFont(.captionStrong)
-                                    .foregroundStyle(Color.brandDeep)
-                                    .frame(width: 22, height: 22)
-                                    .background(Circle().fill(Color.brandSoft))
-                                Text(entry.name)
-                                    .appFont(.bodyEmphasis)
-                                    .foregroundStyle(Color.ink)
-                                    .lineLimit(1)
-                                Spacer(minLength: AppSpacing.sm)
-                                Text("\(entry.count)×")
-                                    .appFont(.chipNumber)
-                                    .foregroundStyle(Color.brandDeep)
-                                    .monospacedDigit()
-                            }
-                            MostCommonFoodBar(
-                                fraction: Double(entry.count) / Double(maxCount),
-                                reduceMotion: reduceMotion
-                            )
-                            .frame(height: 6)
-                            .padding(.leading, 30)
-                        }
+            )
+        ]
+        for (index, entry) in foods.enumerated() {
+            elements.append(AnyView(
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .center, spacing: AppSpacing.sm) {
+                        Text("\(index + 1)")
+                            .appFont(.captionStrong)
+                            .foregroundStyle(Color.brandDeep)
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.brandSoft))
+                        Text(entry.name)
+                            .appFont(.bodyEmphasis)
+                            .foregroundStyle(Color.ink)
+                            .lineLimit(1)
+                        Spacer(minLength: AppSpacing.sm)
+                        Text("\(entry.count)×")
+                            .appFont(.chipNumber)
+                            .foregroundStyle(Color.brandDeep)
+                            .monospacedDigit()
                     }
+                    MostCommonFoodBar(
+                        fraction: Double(entry.count) / Double(maxCount),
+                        reduceMotion: reduceMotion
+                    )
+                    .frame(height: 6)
+                    .padding(.leading, 30)
                 }
-                .padding(.top, AppSpacing.xs)
-            }
+            ))
         }
+
+        return StoryShell(
+            badge: .init(symbol: "fork.knife",
+                         tint: .brandDeep, bg: .brandSoft),
+            eyebrow: "MOST COMMON FOODS",
+            appeared: appeared,
+            reduceMotion: reduceMotion,
+            elements: elements
+        )
     }
 
     // MARK: - Album recap
@@ -1255,10 +1477,32 @@ struct MirrorContentCard<Content: View>: View {
 /// centred so a single headline reads as the page's whole idea.
 /// No outer card chrome of its own; the parent story container
 /// supplies the rounded "stage" background.
-struct StoryShell<Content: View>: View {
+/// Card scaffold every story page is rendered through. Owns the
+/// pinned header (badge + eyebrow) and a scrollable content column.
+///
+/// The Duolingo-style per-element fly-in lives here: callers pass
+/// `elements: [AnyView]` (an ordered list of children) and StoryShell
+/// applies `FlyIn` to each one with a sequential per-index delay, so
+/// the contents visibly arrive ONE AT A TIME after the card slide
+/// settles. Centralising the cascade here means every page type
+/// (moment, headline, quick stats, most-common-foods) gets the
+/// stagger automatically — no per-renderer wiring required.
+///
+/// The pinned header flies in as element 0; content elements follow
+/// as 1, 2, 3, … in array order. Reduce Motion short-circuits the
+/// stagger to instant via `FlyIn`'s internal guard.
+struct StoryShell: View {
     let badge: MirrorBadge
     let eyebrow: String
-    @ViewBuilder var content: () -> Content
+    /// Per-card phase flag (the parent's `contentAppeared`). False
+    /// while the card is sliding in, true after — drives the fly-in.
+    let appeared: Bool
+    let reduceMotion: Bool
+    /// Ordered content children. Each becomes one fly-in step. Group
+    /// tightly-coupled content (e.g. the two-bar reveal + its bars)
+    /// into a single AnyView to keep the cascade reading as one
+    /// beat per "idea" rather than per primitive view.
+    let elements: [AnyView]
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -1279,6 +1523,9 @@ struct StoryShell<Content: View>: View {
                     .foregroundStyle(Color.brandDeep)
                 Spacer(minLength: 0)
             }
+            .modifier(FlyIn(appeared: appeared,
+                            order: 0,
+                            reduceMotion: reduceMotion))
 
             // Scrollable content. The inner Spacers vertically
             // centre short content within the available space, but
@@ -1287,9 +1534,15 @@ struct StoryShell<Content: View>: View {
             // + action chip + feedback chips) can no longer spill
             // past the 500pt container into the hero above.
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: AppSpacing.md) {
                     Spacer(minLength: 0)
-                    content()
+                    ForEach(Array(elements.enumerated()),
+                            id: \.offset) { i, element in
+                        element
+                            .modifier(FlyIn(appeared: appeared,
+                                            order: i + 1,
+                                            reduceMotion: reduceMotion))
+                    }
                     Spacer(minLength: 0)
                 }
                 .frame(maxWidth: .infinity,
@@ -1302,6 +1555,50 @@ struct StoryShell<Content: View>: View {
         .frame(maxWidth: .infinity,
                maxHeight: .infinity,
                alignment: .topLeading)
+    }
+}
+
+/// Duolingo-style per-element entrance: each card child arrives in
+/// turn (eyebrow → title → body → evidence → chips), springing up
+/// from a small offset with a slight overshoot. The leading anchor
+/// on the scale makes elements feel like they settle from the left,
+/// matching the card's left-aligned text rhythm.
+///
+/// Timing:
+/// - `delay = 0.07 + order × 0.07`. The 0.07 base hold lets the
+///   card slide finish before the cascade starts, so the user sees
+///   "card arrives, THEN words fly in" rather than overlap mush.
+/// - `spring(response: 0.48, dampingFraction: 0.72)`. The 0.72
+///   damping gives the visible overshoot — the "alive" feel — while
+///   staying short enough that a 5-element cascade finishes around
+///   ~450ms total.
+///
+/// Reduce Motion: opacity is the only state change (handled by the
+/// `appeared` ternary on offset/scale), and the animation falls
+/// through to `.appReduced` so VoiceOver / motion-sensitive users
+/// get an instant rest state with no spring, no offset, no scale.
+private struct FlyIn: ViewModifier {
+    let appeared: Bool
+    let order: Int
+    let reduceMotion: Bool
+
+    private var delay: Double {
+        reduceMotion ? 0 : 0.07 + Double(order) * 0.07
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared || reduceMotion ? 0 : 24)
+            .scaleEffect(appeared || reduceMotion ? 1 : 0.94,
+                         anchor: .leading)
+            .animation(
+                reduceMotion
+                    ? .appReduced
+                    : .spring(response: 0.48, dampingFraction: 0.72)
+                        .delay(delay),
+                value: appeared
+            )
     }
 }
 
@@ -1615,7 +1912,11 @@ fileprivate struct FoodMirrorStoryView: View {
     /// stays decoupled from the view model that owns the moment,
     /// summary etc.). Called with `AnyView` so the cover can hold a
     /// uniform child type regardless of which page is showing.
-    let renderPage: (FoodMirrorView.StoryPageKind) -> AnyView
+    /// Second argument is the per-card "appeared" phase. The story
+    /// view flips this false → true on each index change so per-
+    /// element stagger and the value-card's bar-grow / count-up
+    /// flourish can animate from a hidden state to their rest state.
+    let renderPage: (FoodMirrorView.StoryPageKind, Bool) -> AnyView
     /// Renders the compact album thumbnail for a content page. Same
     /// rationale as `renderPage` — the cover doesn't know the
     /// page-specific styling.
@@ -1633,11 +1934,23 @@ fileprivate struct FoodMirrorStoryView: View {
     /// Current page index within `pages`. Manual advance only — no
     /// timer ever mutates this.
     @State private var index: Int = 0
-    /// Flag flipped by `onChange(of: index)` so the inserted card can
-    /// run its scale+opacity entrance animation. Reset to `false`
-    /// just before each card change and back to `true` on the next
-    /// run loop, which produces a clean spring-in on every advance.
-    @State private var contentAppeared: Bool = true
+    /// Per-card entrance flag. Reset to `false` immediately before
+    /// each card change and flipped back to `true` on the next run
+    /// loop, which drives `StoryShell`'s per-element `FlyIn` cascade
+    /// (eyebrow → title → body → evidence → chips, one at a time)
+    /// on every advance. Starts `false` so the FIRST card also runs
+    /// the cascade once the cover settles in. Distinct from
+    /// `presented` (whole-cover scale+fade); content elements inside
+    /// the shell read `contentAppeared`, the cover wrapper reads
+    /// `presented`.
+    @State private var contentAppeared: Bool = false
+    /// Whole-cover entrance flag. Drives the scale-from-0.90 +
+    /// fade-from-0 "zoom open" the user sees the instant the cover
+    /// appears. Replaces the broken matchedGeometryEffect zoom from
+    /// the prior overlay experiment — the cover slide handles the
+    /// presentation context, this spring sells the "expands open"
+    /// inside that context.
+    @State private var presented: Bool = false
     /// Which album card (if any) is currently expanded to full-
     /// screen. nil means we're showing the grid (or a non-album
     /// content page).
@@ -1649,6 +1962,14 @@ fileprivate struct FoodMirrorStoryView: View {
 
     var body: some View {
         ZStack {
+            // Opaque base layer FIRST. This is the fix for the
+            // home-screen / Mirror-tab bleed-through that broke the
+            // overlay attempt — guarantees the cover is fully opaque
+            // edge to edge regardless of what the gradient above it
+            // does. `bgCanvas` matches the Mirror tab's canvas color
+            // so the cover reads as a continuation of that surface.
+            Color.bgCanvas.ignoresSafeArea()
+
             backgroundLayer
                 .ignoresSafeArea()
 
@@ -1685,10 +2006,42 @@ fileprivate struct FoodMirrorStoryView: View {
                     )
             }
         }
+        // Whole-cover zoom-open: scale from 0.90 + fade from 0 on
+        // appear so the story content "expands into" the cover
+        // rather than hard-cutting. The cover's own slide-up still
+        // plays underneath; this adds the "blooms open" feel that
+        // the prior matched-geometry attempt was trying (and failing)
+        // to provide. Reduce Motion sticks at rest values — no
+        // scale, no fade.
+        .scaleEffect(presented || reduceMotion ? 1.0 : 0.90)
+        .opacity(presented || reduceMotion ? 1.0 : 0.0)
+        .onAppear {
+            // First-card fly-in: flipping `contentAppeared` here
+            // (not just in `onChange(of: index)`) is what makes the
+            // FIRST card's per-element cascade actually run. Before
+            // this, the initial value was already `true` so card 1
+            // skipped the kinetic stagger entirely — exactly the
+            // "fly-in didn't render" symptom from the prior pass.
+            if reduceMotion {
+                presented = true
+                contentAppeared = true
+            } else {
+                withAnimation(
+                    .spring(response: 0.42, dampingFraction: 0.82)
+                ) {
+                    presented = true
+                }
+                withAnimation(
+                    .spring(response: 0.5, dampingFraction: 0.7)
+                ) {
+                    contentAppeared = true
+                }
+            }
+        }
         .onChange(of: index) { _, _ in
             // Reset the entrance flag so the new card runs the
-            // spring-in animation on appear. The async hop ensures
-            // SwiftUI registers the false → true transition as an
+            // per-element fly-in. The async hop ensures SwiftUI
+            // registers the false → true transition as an
             // animatable change instead of collapsing them into a
             // single frame.
             contentAppeared = false
@@ -1696,7 +2049,7 @@ fileprivate struct FoodMirrorStoryView: View {
                 withAnimation(
                     reduceMotion
                         ? .none
-                        : .spring(response: 0.4, dampingFraction: 0.85)
+                        : .spring(response: 0.5, dampingFraction: 0.7)
                 ) {
                     contentAppeared = true
                 }
@@ -1767,10 +2120,13 @@ fileprivate struct FoodMirrorStoryView: View {
 
     /// The current page rendered inside a brand-tinted card surface.
     /// On index change, the new card replaces the old with an
-    /// asymmetric slide (trailing → leading) and runs a subtle
-    /// scale+opacity entrance for the "premium" feel — Duolingo-style
-    /// without per-element stagger (intentional V1 simplification,
-    /// see the decisions log in the task description).
+    /// asymmetric slide (trailing → leading). The per-card entrance
+    /// is now driven INSIDE the card by `StoryShell`'s `FlyIn`
+    /// cascade (eyebrow → title → body → evidence → chips, one at
+    /// a time) — the old whole-card scale+opacity wrap was removed
+    /// because it competed with the per-element animation and read
+    /// as a single block-in instead of the intended Duolingo-style
+    /// staggered assembly.
     @ViewBuilder
     private var cardArea: some View {
         let kind = currentKind
@@ -1780,15 +2136,9 @@ fileprivate struct FoodMirrorStoryView: View {
                     .id("album")
             } else if let kind {
                 cardSurface {
-                    renderPage(kind)
+                    renderPage(kind, contentAppeared)
                 }
                 .id("card-\(kind.rawValue)-\(index)")
-                .modifier(
-                    StoryCardEntrance(
-                        appeared: contentAppeared,
-                        reduceMotion: reduceMotion
-                    )
-                )
             } else {
                 // Defensive: empty pages list shouldn't be possible
                 // (the entry card hides when there's nothing to
@@ -1959,7 +2309,11 @@ fileprivate struct FoodMirrorStoryView: View {
             // every frame against changing content. The card
             // already has a hairline border + the dim scrim behind
             // it to set it off from the background.
-            renderPage(kind)
+            // Expanded album cards are presented via a scale-up
+            // transition rather than a fresh per-element cascade, so
+            // we pass `appeared: true` — the inner content renders at
+            // its rest state immediately while the outer card scales.
+            renderPage(kind, true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: AppRadius.xl)
@@ -2109,22 +2463,79 @@ fileprivate struct FoodMirrorStoryView: View {
     }
 }
 
-/// Subtle scale + opacity entrance applied to each card as it
-/// becomes the current page. The whole-card spring reads as "the
-/// next idea just landed" without requiring the per-element stagger
-/// that would have to thread through every page renderer.
-private struct StoryCardEntrance: ViewModifier {
+/// Two-bar reveal's signature beat: a number that rolls 0 → target
+/// when `appeared` flips. Generation token cancels any in-flight
+/// dispatch loop if the card is replaced mid-animation (rapid Next
+/// taps), so a stale schedule can't overwrite the next card's
+/// counting state.
+///
+/// Under Reduce Motion the number jumps straight to `target`.
+private struct CountingNumber: View {
+    let target: Double
+    let unit: String
+    let valueFont: AppFont.Style
+    let valueColor: Color
     let appeared: Bool
     let reduceMotion: Bool
 
-    func body(content: Content) -> some View {
-        content
-            .scaleEffect(
-                (appeared || reduceMotion) ? 1.0 : 0.96
-            )
-            .opacity(
-                (appeared || reduceMotion) ? 1.0 : 0.0
-            )
+    @State private var shown: Double = 0
+    @State private var generation: Int = 0
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 2) {
+            Text("\(Int(shown.rounded()))")
+                .appFont(valueFont)
+                .foregroundStyle(valueColor)
+                .monospacedDigit()
+            Text(unitDisplay)
+                .appFont(.caption)
+                .foregroundStyle(Color.inkMute)
+        }
+        .onAppear {
+            if appeared {
+                if reduceMotion { shown = target }
+                else            { runCount() }
+            }
+        }
+        .onChange(of: appeared) { _, now in
+            if !now {
+                // Card stepping away — cancel any pending schedule
+                // and reset to baseline so the next appearance
+                // starts cleanly.
+                generation += 1
+                shown = 0
+                return
+            }
+            if reduceMotion { shown = target; return }
+            runCount()
+        }
+    }
+
+    private var unitDisplay: String {
+        // Counts (meals / foods) read better with a leading space;
+        // mass and energy units sit flush per nutrition-label
+        // convention.
+        switch unit {
+        case "meals", "foods": return " \(unit)"
+        default:               return unit
+        }
+    }
+
+    private func runCount() {
+        generation += 1
+        let gen = generation
+        let steps = 20
+        let duration = 0.6
+        shown = 0
+        for i in 1...steps {
+            let when = DispatchTime.now()
+                + duration * Double(i) / Double(steps)
+            DispatchQueue.main.asyncAfter(deadline: when) {
+                // Stale schedule from a prior appearance — ignore.
+                guard gen == generation else { return }
+                shown = target * Double(i) / Double(steps)
+            }
+        }
     }
 }
 

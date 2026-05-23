@@ -429,6 +429,15 @@ enum FoodOSPairedBeliefs {
         let surpriseScore: Double
         let thisWeekCount: Int
         let lastWeekCount: Int
+        /// Raw last-week value, in `unit`. Rendered as the left "before" bar.
+        let beforeValue: Double
+        /// Raw this-week value, in `unit`. Rendered as the right "after" bar.
+        let afterValue: Double
+        /// Display unit for the bar labels ("g", "kcal", "meals", "foods").
+        let unit: String
+        /// Signed week-over-week delta as a rounded percent.
+        /// Negative = dropped, positive = climbed.
+        let deltaPercent: Int
 
         var confidence: FoodOSMoment.Confidence {
             (thisWeekCount + lastWeekCount) >= 12 ? .high : .medium
@@ -437,6 +446,13 @@ enum FoodOSPairedBeliefs {
         var qualifiesAsRevelation: Bool {
             surpriseScore >= FoodOSPairedBeliefs.surpriseThreshold
         }
+    }
+
+    /// Rounded signed percent change from `before` to `after`. Returns 0
+    /// when `before` is non-positive so a divide-by-zero never escapes.
+    private static func signedDeltaPercent(before: Double, after: Double) -> Int {
+        guard before > 0 else { return 0 }
+        return Int(((after - before) / before * 100).rounded())
     }
 
     /// Best value-revelation candidate across the four value heads.
@@ -512,7 +528,12 @@ enum FoodOSPairedBeliefs {
             evidenceLine:   evidence,
             surpriseScore:  surprise,
             thisWeekCount:  axis.thisCount,
-            lastWeekCount:  axis.lastCount
+            lastWeekCount:  axis.lastCount,
+            beforeValue:    axis.lastAvg.rounded(),
+            afterValue:     axis.thisAvg.rounded(),
+            unit:           "g",
+            deltaPercent:   signedDeltaPercent(before: axis.lastAvg,
+                                               after:  axis.thisAvg)
         )
     }
 
@@ -555,7 +576,11 @@ enum FoodOSPairedBeliefs {
             evidenceLine:   evidence,
             surpriseScore:  surprise,
             thisWeekCount:  thisValues.count,
-            lastWeekCount:  lastValues.count
+            lastWeekCount:  lastValues.count,
+            beforeValue:    lastAvg.rounded(),
+            afterValue:     thisAvg.rounded(),
+            unit:           "kcal",
+            deltaPercent:   signedDeltaPercent(before: lastAvg, after: thisAvg)
         )
     }
 
@@ -584,7 +609,12 @@ enum FoodOSPairedBeliefs {
             evidenceLine:   evidence,
             surpriseScore:  surprise,
             thisWeekCount:  cur,
-            lastWeekCount:  prev
+            lastWeekCount:  prev,
+            beforeValue:    Double(prev),
+            afterValue:     Double(cur),
+            unit:           "meals",
+            deltaPercent:   signedDeltaPercent(before: Double(prev),
+                                               after:  Double(cur))
         )
     }
 
@@ -614,7 +644,12 @@ enum FoodOSPairedBeliefs {
             evidenceLine:   evidence,
             surpriseScore:  surprise,
             thisWeekCount:  thisWeek.count,
-            lastWeekCount:  lastWeek.count
+            lastWeekCount:  lastWeek.count,
+            beforeValue:    Double(lastDistinct),
+            afterValue:     Double(thisDistinct),
+            unit:           "foods",
+            deltaPercent:   signedDeltaPercent(before: Double(lastDistinct),
+                                               after:  Double(thisDistinct))
         )
     }
 }

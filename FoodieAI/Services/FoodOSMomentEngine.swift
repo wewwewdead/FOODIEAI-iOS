@@ -35,6 +35,16 @@ struct FoodOSMoment: Equatable {
         case low, medium, high
     }
 
+    /// Raw before/after numbers for a value-revelation card's two-bar
+    /// reveal. Populated only by `valueRevelationMoment`; nil for every
+    /// other moment kind (no fabricated chart).
+    struct Reveal: Equatable {
+        let before: Double
+        let after: Double
+        let unit: String
+        let deltaPercent: Int
+    }
+
     let kind: Kind
     let title: String
     let body: String?
@@ -46,6 +56,31 @@ struct FoodOSMoment: Equatable {
     /// view can later expose A/B telemetry on which branch fired.
     let priorityScore: Double
     let generatedAt: Date
+    /// Populated explicitly by `valueRevelationMoment`; nil everywhere
+    /// else (mood / recognition / change / reflection have no
+    /// before/after to chart). Defaulted on the initializer below so
+    /// non-value branches don't need to spell out `reveal: nil`.
+    let reveal: Reveal?
+
+    init(kind: Kind,
+         title: String,
+         body: String?,
+         evidenceLine: String?,
+         confidence: Confidence,
+         actionLabel: String?,
+         priorityScore: Double,
+         generatedAt: Date,
+         reveal: Reveal? = nil) {
+        self.kind = kind
+        self.title = title
+        self.body = body
+        self.evidenceLine = evidenceLine
+        self.confidence = confidence
+        self.actionLabel = actionLabel
+        self.priorityScore = priorityScore
+        self.generatedAt = generatedAt
+        self.reveal = reveal
+    }
 }
 
 // MARK: - FoodOSBeliefEngine
@@ -677,7 +712,13 @@ enum FoodOSMomentEngine {
             confidence:    candidate.confidence,
             actionLabel:   nil,
             priorityScore: 95 + min(candidate.surpriseScore * 10, 4),
-            generatedAt:   now
+            generatedAt:   now,
+            reveal:        FoodOSMoment.Reveal(
+                before:       candidate.beforeValue,
+                after:        candidate.afterValue,
+                unit:         candidate.unit,
+                deltaPercent: candidate.deltaPercent
+            )
         )
         guard Self.passesSafety(moment) else { return nil }
         return (moment, candidate.repeatKey)
