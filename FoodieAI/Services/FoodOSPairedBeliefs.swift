@@ -403,4 +403,218 @@ enum FoodOSPairedBeliefs {
         guard let first = subject.first else { return subject }
         return first.uppercased() + subject.dropFirst()
     }
+
+    // MARK: - Value revelations
+    //
+    // Quantity-based revelations that fire on week-over-week shifts.
+    // Mood-independent on purpose so flat-mood users (who can't clear
+    // the paired-belief surprise gate) still see a revelation when a
+    // real macro / calorie / consistency / variety change occurred.
+    // Shares the same surpriseThreshold so the two surfaces agree on
+    // what "meaningfully different" means.
+
+    enum ValueSubtype: String, Equatable {
+        case macroTrend
+        case calorieTrend
+        case consistency
+        case varietyTrend
+    }
+
+    struct ValueCandidate: Equatable {
+        let subtype: ValueSubtype
+        let repeatKey: String
+        let title: String
+        let body: String?
+        let evidenceLine: String
+        let surpriseScore: Double
+        let thisWeekCount: Int
+        let lastWeekCount: Int
+
+        var confidence: FoodOSMoment.Confidence {
+            (thisWeekCount + lastWeekCount) >= 12 ? .high : .medium
+        }
+
+        var qualifiesAsRevelation: Bool {
+            surpriseScore >= FoodOSPairedBeliefs.surpriseThreshold
+        }
+    }
+
+    /// Best value-revelation candidate across the four value heads.
+    /// Returns the single qualifying candidate with the highest
+    /// surprise; nil when no head clears the shared gate.
+    static func bestValueCandidate(thisWeek: [FoodLog],
+                                   lastWeek: [FoodLog]) -> ValueCandidate? {
+        var out: [ValueCandidate] = []
+        if let c = macroTrendCandidate(thisWeek: thisWeek, lastWeek: lastWeek) {
+            out.append(c)
+        }
+        if let c = calorieTrendCandidate(thisWeek: thisWeek, lastWeek: lastWeek) {
+            out.append(c)
+        }
+        if let c = consistencyCandidate(thisWeek: thisWeek, lastWeek: lastWeek) {
+            out.append(c)
+        }
+        if let c = varietyTrendCandidate(thisWeek: thisWeek, lastWeek: lastWeek) {
+            out.append(c)
+        }
+        return out
+            .filter(\.qualifiesAsRevelation)
+            .max { a, b in
+                if a.surpriseScore != b.surpriseScore {
+                    return a.surpriseScore < b.surpriseScore
+                }
+                return a.repeatKey > b.repeatKey
+            }
+    }
+
+    private struct MacroAxis {
+        let key: String          // protein|carbs|fat
+        let label: String        // "protein"
+        let thisAvg: Double
+        let lastAvg: Double
+        let thisCount: Int
+        let lastCount: Int
+    }
+
+    private static func macroTrendCandidate(thisWeek: [FoodLog],
+                                            lastWeek: [FoodLog]) -> ValueCandidate? {
+        let axes: [MacroAxis] = [
+            macroAxis(key: "protein", label: "protein",
+                      thisWeek: thisWeek, lastWeek: lastWeek) { $0.proteinG },
+            macroAxis(key: "carbs", label: "carbs",
+                      thisWeek: thisWeek, lastWeek: lastWeek) { $0.carbsG },
+            macroAxis(key: "fat", label: "fat",
+                      thisWeek: thisWeek, lastWeek: lastWeek) { $0.fatG }
+        ].compactMap { $0 }
+
+        let scored = axes.compactMap { axis -> (MacroAxis, Double)? in
+            guard axis.thisCount >= 3, axis.lastCount >= 3,
+                  axis.lastAvg > 0 else { return nil }
+            let surprise = min(abs(axis.thisAvg - axis.lastAvg) / axis.lastAvg,
+                               1.0)
+            return (axis, surprise)
+        }
+        guard let best = scored.max(by: { $0.1 < $1.1 }) else { return nil }
+        let (axis, surprise) = best
+
+        let direction = axis.thisAvg < axis.lastAvg ? "dropped" : "climbed"
+        let from = Int(axis.lastAvg.rounded())
+        let to   = Int(axis.thisAvg.rounded())
+        let title = "Your \(axis.label) \(direction) from about \(from)g to \(to)g per meal this week."
+        let body  = "A real shift — worth noticing if it wasn't on purpose."
+        let evidence = "Based on \(axis.thisCount) meals this week and \(axis.lastCount) last week."
+
+        return ValueCandidate(
+            subtype:        .macroTrend,
+            repeatKey:      "macroTrend:\(axis.key)",
+            title:          title,
+            body:           body,
+            evidenceLine:   evidence,
+            surpriseScore:  surprise,
+            thisWeekCount:  axis.thisCount,
+            lastWeekCount:  axis.lastCount
+        )
+    }
+
+    private static func macroAxis(key: String,
+                                  label: String,
+                                  thisWeek: [FoodLog],
+                                  lastWeek: [FoodLog],
+                                  extract: (FoodLog) -> Double?) -> MacroAxis? {
+        let thisValues = thisWeek.compactMap(extract).filter { $0.isFinite && $0 >= 0 }
+        let lastValues = lastWeek.compactMap(extract).filter { $0.isFinite && $0 >= 0 }
+        guard !thisValues.isEmpty, !lastValues.isEmpty else { return nil }
+        return MacroAxis(
+            key:        key,
+            label:      label,
+            thisAvg:    thisValues.reduce(0, +) / Double(thisValues.count),
+            lastAvg:    lastValues.reduce(0, +) / Double(lastValues.count),
+            thisCount:  thisValues.count,
+            lastCount:  lastValues.count
+        )
+    }
+
+    private static func calorieTrendCandidate(thisWeek: [FoodLog],
+                                              lastWeek: [FoodLog]) -> ValueCandidate? {
+        let thisValues = thisWeek.map(\.calories).filter { $0.isFinite && $0 > 0 }
+        let lastValues = lastWeek.map(\.calories).filter { $0.isFinite && $0 > 0 }
+        guard thisValues.count >= 3, lastValues.count >= 3 else { return nil }
+        let thisAvg = thisValues.reduce(0, +) / Double(thisValues.count)
+        let lastAvg = lastValues.reduce(0, +) / Double(lastValues.count)
+        guard lastAvg > 0 else { return nil }
+        let surprise = min(abs(thisAvg - lastAvg) / lastAvg, 1.0)
+        let delta = Int(abs(thisAvg - lastAvg).rounded())
+        let direction = thisAvg < lastAvg ? "lighter" : "heavier"
+        let title = "Your meals ran about \(delta) calories \(direction) this week."
+        let evidence = "Based on \(thisValues.count) meals this week and \(lastValues.count) last week."
+        return ValueCandidate(
+            subtype:        .calorieTrend,
+            repeatKey:      "calorieTrend",
+            title:          title,
+            body:           nil,
+            evidenceLine:   evidence,
+            surpriseScore:  surprise,
+            thisWeekCount:  thisValues.count,
+            lastWeekCount:  lastValues.count
+        )
+    }
+
+    private static func consistencyCandidate(thisWeek: [FoodLog],
+                                             lastWeek: [FoodLog]) -> ValueCandidate? {
+        let cur  = thisWeek.count
+        let prev = lastWeek.count
+        // Floor: ignore noise when both weeks are very small.
+        guard cur + prev >= 4 else { return nil }
+        let surprise = min(Double(abs(cur - prev)) / Double(max(prev, 1)), 1.0)
+        let mealNoun = max(cur, prev) == 1 ? "meal" : "meals"
+        let title: String
+        if cur > prev {
+            title = "You logged far more this week than last — \(cur) \(mealNoun) vs \(prev)."
+        } else if cur < prev {
+            title = "You logged less this week than last — \(cur) \(mealNoun) vs \(prev)."
+        } else {
+            return nil
+        }
+        let evidence = "Based on \(cur) meals this week and \(prev) last week."
+        return ValueCandidate(
+            subtype:        .consistency,
+            repeatKey:      "consistency",
+            title:          title,
+            body:           nil,
+            evidenceLine:   evidence,
+            surpriseScore:  surprise,
+            thisWeekCount:  cur,
+            lastWeekCount:  prev
+        )
+    }
+
+    private static func varietyTrendCandidate(thisWeek: [FoodLog],
+                                              lastWeek: [FoodLog]) -> ValueCandidate? {
+        guard thisWeek.count >= 3, lastWeek.count >= 3 else { return nil }
+        let thisDistinct = Set(thisWeek.map { $0.foodName.lowercased() }).count
+        let lastDistinct = Set(lastWeek.map { $0.foodName.lowercased() }).count
+        guard lastDistinct > 0 else { return nil }
+        let surprise = min(Double(abs(thisDistinct - lastDistinct))
+                           / Double(max(lastDistinct, 1)), 1.0)
+        let foodNoun = thisDistinct == 1 ? "food" : "foods"
+        let title: String
+        if thisDistinct > lastDistinct {
+            title = "Your meals got more varied — \(thisDistinct) different \(foodNoun) this week."
+        } else if thisDistinct < lastDistinct {
+            title = "Your meals got more focused — \(thisDistinct) different \(foodNoun) this week."
+        } else {
+            return nil
+        }
+        let evidence = "Based on \(thisWeek.count) meals this week and \(lastWeek.count) last week."
+        return ValueCandidate(
+            subtype:        .varietyTrend,
+            repeatKey:      "varietyTrend",
+            title:          title,
+            body:           nil,
+            evidenceLine:   evidence,
+            surpriseScore:  surprise,
+            thisWeekCount:  thisWeek.count,
+            lastWeekCount:  lastWeek.count
+        )
+    }
 }

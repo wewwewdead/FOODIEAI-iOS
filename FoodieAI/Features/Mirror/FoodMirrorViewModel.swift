@@ -81,8 +81,32 @@ final class FoodMirrorViewModel: ObservableObject {
     /// chip row reappears for each fresh moment.
     @Published private(set) var lastFeedbackForCurrentMoment: FoodOSMomentFeedback?
 
+    /// Mood-paired-belief revelation as its own card in the deck.
+    /// Independent of `currentMoment` and `valueRevelation`: each
+    /// appears only when its own signal qualifies, so a flat-mood
+    /// user can see the value card without a mood card and vice
+    /// versa. Cleared between refreshes when no mood signal qualifies.
+    @Published private(set) var moodRevelation: FoodOSMoment?
+
+    /// Week-over-week value revelation (macro / calorie / consistency /
+    /// variety). Mood-independent — fires for flat-mood users where
+    /// the paired-belief surface stays silent.
+    @Published private(set) var valueRevelation: FoodOSMoment?
+
+    /// Per-revelation feedback state. Independent so tapping Helpful
+    /// on one card doesn't dismiss the other's chip row.
+    @Published private(set) var lastFeedbackForMoodRevelation: FoodOSMomentFeedback?
+    @Published private(set) var lastFeedbackForValueRevelation: FoodOSMomentFeedback?
+
     private let foodLogs: any FoodLogsFetching
     private let feedbackStore: FoodOSMomentFeedbackStore
+
+    /// Per-revelation suppression keys. Tracked separately so the
+    /// mood card and value card each refuse to repeat their own
+    /// previous subject back-to-back without interfering with each
+    /// other.
+    private var lastMoodRevelationKey: String?
+    private var lastValueRevelationKey: String?
 
     init(foodLogs: any FoodLogsFetching = FoodLogService(),
          feedbackStore: FoodOSMomentFeedbackStore = .shared) {
@@ -191,7 +215,22 @@ final class FoodMirrorViewModel: ObservableObject {
                 now:                  now,
                 timeZone:             timeZone,
                 preferences:          feedbackStore.preferences,
-                lastRevelationRepeatKey: currentMoment?.revelationRepeatKey
+                lastRevelationRepeatKey: lastMoodRevelationKey
+            )
+
+            // Dedicated revelation cards — computed independently from
+            // the same log windows. The mood revelation here mirrors
+            // whatever the priority chain produced (same suppression
+            // key, same `revelationMoment`), so the two stay in lock-
+            // step; the value revelation is new and mood-independent.
+            let revs = FoodOSMomentEngine.revelations(
+                thirtyDayLogs:      thirtyLogs,
+                thisWeekLogs:       sevenLogs,
+                lastWeekLogs:       prevSevenLogs,
+                timeZone:           timeZone,
+                now:                now,
+                lastMoodRepeatKey:  lastMoodRevelationKey,
+                lastValueRepeatKey: lastValueRevelationKey
             )
 
             guard myToken == refreshToken else { return }
@@ -208,6 +247,17 @@ final class FoodMirrorViewModel: ObservableObject {
                 lastFeedbackForCurrentMoment = nil
             }
             currentMoment = moment
+
+            if moodRevelation != revs.mood {
+                lastFeedbackForMoodRevelation = nil
+            }
+            if valueRevelation != revs.value {
+                lastFeedbackForValueRevelation = nil
+            }
+            moodRevelation         = revs.mood
+            valueRevelation        = revs.value
+            lastMoodRevelationKey  = revs.moodRepeatKey
+            lastValueRevelationKey = revs.valueRepeatKey
             isRefreshing = false
             lastUpdatedAt = now
             refreshErrorMessage = nil
@@ -284,11 +334,29 @@ final class FoodMirrorViewModel: ObservableObject {
     /// engine can later use to surface a "worked before" moment.
     func recordFeedback(_ feedback: FoodOSMomentFeedback) {
         guard let moment = currentMoment else { return }
+        recordFeedback(feedback, for: moment)
+    }
+
+    /// Per-moment feedback entry point. The story deck now hosts up
+    /// to three rateable moments (currentMoment + moodRevelation +
+    /// valueRevelation); each rates against its own tag bucket and
+    /// updates its own confirmation row so chips on one card don't
+    /// vanish when the user taps a chip on another.
+    func recordFeedback(_ feedback: FoodOSMomentFeedback,
+                        for moment: FoodOSMoment) {
         feedbackStore.record(feedback: feedback, for: moment)
         if feedback == .willTry {
             feedbackStore.startExperiment(from: moment)
         }
-        lastFeedbackForCurrentMoment = feedback
+        if moment == currentMoment {
+            lastFeedbackForCurrentMoment = feedback
+        }
+        if moment == moodRevelation {
+            lastFeedbackForMoodRevelation = feedback
+        }
+        if moment == valueRevelation {
+            lastFeedbackForValueRevelation = feedback
+        }
     }
 
     /// Returns `[start, end)` where `end` is exclusive, both expressed

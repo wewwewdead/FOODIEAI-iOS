@@ -591,6 +591,98 @@ enum FoodOSMomentEngine {
         return fallbackMoment(evidence: evidenceLine, now: now)
     }
 
+    // MARK: - Separate mood + value revelations
+    //
+    // The priority-chain `compute(...)` above is unchanged — other
+    // surfaces depend on its exact behavior. This independent pair of
+    // entry points feeds the dedicated story cards: each revelation
+    // type is gated only by its own signal and exposed as its own
+    // FoodOSMoment so the deck can present them as distinct pages.
+
+    /// Both revelation moments for this refresh, computed
+    /// independently. Either or both may be nil when their own
+    /// signal doesn't clear the surprise gate. `mood` is the same
+    /// paired-belief output the priority chain returns; `value` is
+    /// the new week-over-week trend output. Repeat keys are surfaced
+    /// alongside each moment so the caller can suppress back-to-back
+    /// repetition per type.
+    struct FoodOSRevelations: Equatable {
+        let mood: FoodOSMoment?
+        let moodRepeatKey: String?
+        let value: FoodOSMoment?
+        let valueRepeatKey: String?
+    }
+
+    static func revelations(thirtyDayLogs: [FoodLog],
+                            thisWeekLogs: [FoodLog],
+                            lastWeekLogs: [FoodLog],
+                            timeZone: TimeZone = .current,
+                            now: Date = Date(),
+                            lastMoodRepeatKey: String? = nil,
+                            lastValueRepeatKey: String? = nil) -> FoodOSRevelations {
+        // Mood revelation: gated by the learning floor so a brand-new
+        // account can't surface one before the rest of FoodOS has
+        // any data to lean on.
+        let mood: FoodOSMoment? = {
+            guard thirtyDayLogs.count >= readinessFloor else { return nil }
+            guard let m = revelationMoment(
+                thirtyDayLogs: thirtyDayLogs,
+                timeZone:      timeZone,
+                now:           now,
+                lastRepeatKey: lastMoodRepeatKey
+            ), Self.passesSafety(m) else { return nil }
+            return m
+        }()
+
+        let valuePair = valueRevelationMoment(
+            thisWeek:       thisWeekLogs,
+            lastWeek:       lastWeekLogs,
+            now:            now,
+            lastRepeatKey:  lastValueRepeatKey
+        )
+
+        return FoodOSRevelations(
+            mood:           mood,
+            moodRepeatKey:  mood?.revelationRepeatKey,
+            value:          valuePair?.moment,
+            valueRepeatKey: valuePair?.repeatKey
+        )
+    }
+
+    /// Wraps the best `ValueCandidate` (if any) into a FoodOSMoment
+    /// with `kind: .revelation`. Reusing the existing kind keeps the
+    /// feedback wiring (chips, bandit tags, copy-safety filter) the
+    /// same as the mood revelation; the `momentTag` extension routes
+    /// it to one of the new value tags via the unique evidence-line
+    /// marker. Returns nil when the candidate fails the surprise gate
+    /// or the assembled copy doesn't pass safety.
+    private static func valueRevelationMoment(
+        thisWeek: [FoodLog],
+        lastWeek: [FoodLog],
+        now: Date,
+        lastRepeatKey: String?
+    ) -> (moment: FoodOSMoment, repeatKey: String)? {
+        guard let candidate = FoodOSPairedBeliefs.bestValueCandidate(
+            thisWeek: thisWeek,
+            lastWeek: lastWeek
+        ) else { return nil }
+        if let lastRepeatKey, candidate.repeatKey == lastRepeatKey {
+            return nil
+        }
+        let moment = FoodOSMoment(
+            kind:          .revelation,
+            title:         candidate.title,
+            body:          candidate.body,
+            evidenceLine:  candidate.evidenceLine,
+            confidence:    candidate.confidence,
+            actionLabel:   nil,
+            priorityScore: 95 + min(candidate.surpriseScore * 10, 4),
+            generatedAt:   now
+        )
+        guard Self.passesSafety(moment) else { return nil }
+        return (moment, candidate.repeatKey)
+    }
+
     // MARK: branches
 
     private static func learningMoment(thirtyDayLogs: [FoodLog],

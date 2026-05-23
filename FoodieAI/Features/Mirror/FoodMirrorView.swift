@@ -604,6 +604,8 @@ struct FoodMirrorView: View {
     fileprivate enum StoryPageKind: String, Identifiable, CaseIterable {
         case quickStats
         case moment
+        case moodRevelation
+        case valueRevelation
         case todaysNudge
         case thisWeekChanged
         case weeklySummary
@@ -627,8 +629,20 @@ struct FoodMirrorView: View {
             summary.thirtyDayLogCount > 0 ||
             summary.moodLogCount > 0
         if hasQuickStats { pages.append(.quickStats) }
+        // Dedicated revelation cards — each independent, each gated
+        // only by its own signal. A flat-mood user with a real
+        // macro shift sees the value card without a mood card; a
+        // mixed-mood user whose macros also moved sees both as
+        // separate pages.
+        if viewModel.moodRevelation != nil  { pages.append(.moodRevelation) }
+        if viewModel.valueRevelation != nil { pages.append(.valueRevelation) }
         if let moment = viewModel.currentMoment,
-           moment.kind != .learning {
+           moment.kind != .learning,
+           // Dedup: when the priority chain returned the mood
+           // revelation, the dedicated `.moodRevelation` card is its
+           // canonical home — skip the generic `.moment` page so the
+           // same revelation doesn't appear twice in the deck.
+           moment.kind != .revelation {
             pages.append(.moment)
         }
         if summary.todaysGentleNudge   != nil { pages.append(.todaysNudge) }
@@ -655,7 +669,27 @@ struct FoodMirrorView: View {
             storyQuickStatsPage(summary)
         case .moment:
             if let moment = viewModel.currentMoment {
-                storyMomentPage(moment)
+                storyMomentPage(
+                    moment,
+                    eyebrow: "FOR YOU · FOODOS MOMENT",
+                    recordedFeedback: viewModel.lastFeedbackForCurrentMoment
+                )
+            }
+        case .moodRevelation:
+            if let moment = viewModel.moodRevelation {
+                storyMomentPage(
+                    moment,
+                    eyebrow: "MOOD REVELATION",
+                    recordedFeedback: viewModel.lastFeedbackForMoodRevelation
+                )
+            }
+        case .valueRevelation:
+            if let moment = viewModel.valueRevelation {
+                storyMomentPage(
+                    moment,
+                    eyebrow: "WHAT CHANGED",
+                    recordedFeedback: viewModel.lastFeedbackForValueRevelation
+                )
             }
         case .todaysNudge:
             if let nudge = summary.todaysGentleNudge {
@@ -768,11 +802,19 @@ struct FoodMirrorView: View {
     /// layout as the inline moment card but with bolder spacing.
     /// Crucially, the feedback chips remain Buttons so they consume
     /// their own taps and the carousel doesn't advance under them.
-    private func storyMomentPage(_ moment: FoodOSMoment) -> some View {
+    ///
+    /// `eyebrow` and `recordedFeedback` are passed in so a single
+    /// renderer covers all three rateable moments — the priority-
+    /// chain pick, the dedicated mood revelation, and the dedicated
+    /// value revelation — without each one needing its own near-
+    /// duplicate body.
+    private func storyMomentPage(_ moment: FoodOSMoment,
+                                 eyebrow: String,
+                                 recordedFeedback: FoodOSMomentFeedback?) -> some View {
         StoryShell(
             badge: .init(symbol: momentBadgeSymbol(for: moment),
                          tint: .brandDeep, bg: .brandSoft),
-            eyebrow: "FOR YOU · FOODOS MOMENT"
+            eyebrow: eyebrow
         ) {
             VStack(alignment: .leading, spacing: AppSpacing.md) {
                 Text(moment.title)
@@ -798,9 +840,9 @@ struct FoodMirrorView: View {
                 if FoodOSMomentFeedbackPolicy.showsControls(for: moment) {
                     FoodOSMomentFeedbackView(
                         moment: moment,
-                        recordedFeedback: viewModel.lastFeedbackForCurrentMoment,
+                        recordedFeedback: recordedFeedback,
                         onTap: { feedback in
-                            viewModel.recordFeedback(feedback)
+                            viewModel.recordFeedback(feedback, for: moment)
                         }
                     )
                 }
@@ -913,6 +955,26 @@ struct FoodMirrorView: View {
                 ),
                 eyebrow: "FOODOS MOMENT",
                 shortTitle: moment?.title ?? "A moment for you."
+            )
+        case .moodRevelation:
+            let moment = viewModel.moodRevelation
+            return .init(
+                badge: .init(
+                    symbol: moment.map(momentBadgeSymbol(for:)) ?? "sparkles",
+                    tint: .brandDeep, bg: .brandSoft
+                ),
+                eyebrow: "MOOD REVELATION",
+                shortTitle: moment?.title ?? "A pattern in how meals land."
+            )
+        case .valueRevelation:
+            let moment = viewModel.valueRevelation
+            return .init(
+                badge: .init(
+                    symbol: "chart.line.uptrend.xyaxis",
+                    tint: .catBenefitsInk, bg: .catBenefits
+                ),
+                eyebrow: "WHAT CHANGED",
+                shortTitle: moment?.title ?? "A real shift this week."
             )
         case .todaysNudge:
             return .init(

@@ -4651,3 +4651,333 @@ final class FoodOSStoryBuilderTests: XCTestCase {
         XCTAssertTrue(FoodOSMomentCopySafety.isSafe(action))
     }
 }
+
+// MARK: - Value revelations (mood-independent)
+//
+// These tests exercise the new dedicated revelations(...) entry point
+// that produces mood and value revelations independently. The mood
+// branch is the existing paired-belief output; the value branch is
+// brand-new week-over-week trend output that must fire for flat-mood
+// users (e.g., 37 loved / 1 fine) where the mood gate can't clear.
+
+final class FoodOSValueRevelationTests: XCTestCase {
+
+    private static let timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    private static let now = Date(timeIntervalSince1970: 1_730_000_000)
+
+    /// Real-data shape: mood is essentially flat (loved across the
+    /// board) so the paired-belief gate can't clear, but per-meal
+    /// protein dropped from ~44g last week to ~25g this week. The
+    /// value revelation card must fire; the mood card must stay nil.
+    func test_flatMoodUser_seesValueCardAndNoMoodCard() {
+        var thirtyDay: [FoodLog] = []
+        let thisWeek: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 25, mood: .loved)
+        }
+        let lastWeek: [FoodLog] = (8...13).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 44, mood: .loved)
+        }
+        // Pad the 30-day window with more flat-mood logs so the
+        // engine has enough evidence to even consider the mood
+        // branch (it won't qualify because mood is uniform — that's
+        // the point).
+        thirtyDay += thisWeek
+        thirtyDay += lastWeek
+        thirtyDay += (15...22).map {
+            Self.makeLog(name: "Past \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 30, mood: .loved)
+        }
+
+        let revs = FoodOSMomentEngine.revelations(
+            thirtyDayLogs: thirtyDay,
+            thisWeekLogs:  thisWeek,
+            lastWeekLogs:  lastWeek,
+            timeZone:      Self.timeZone,
+            now:           Self.now
+        )
+
+        XCTAssertNil(revs.mood,
+                     "Flat-mood user must NOT get a mood revelation card.")
+        XCTAssertNotNil(revs.value,
+                        "Flat-mood user WITH a real macro shift must see "
+                        + "the value revelation card.")
+        XCTAssertEqual(revs.value?.kind, .revelation)
+        XCTAssertEqual(revs.value?.momentTag, .valueMacroTrend,
+                       "Value moment should bucket into the macroTrend tag.")
+        XCTAssertEqual(revs.valueRepeatKey, "macroTrend:protein")
+        let title = revs.value?.title.lowercased() ?? ""
+        XCTAssertTrue(title.contains("protein"))
+        XCTAssertTrue(title.contains("dropped"))
+        XCTAssertTrue(FoodOSMomentCopySafety.isSafe(
+            title: revs.value?.title ?? "",
+            body: revs.value?.body,
+            evidence: revs.value?.evidenceLine
+        ))
+    }
+
+    /// Mixed-mood user with strong time-of-day divergence AND a
+    /// calorie shift across weeks — both cards must appear as
+    /// distinct pages, each independently gated.
+    func test_mixedMood_plusValueShift_bothCardsAppear() {
+        // 30-day window: mornings strongly loved, afternoons tough.
+        var thirtyDay: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Morning \($0)", daysAgo: $0,
+                         hour: 8, calories: 500, mood: .loved)
+        }
+        thirtyDay += (7...14).map {
+            Self.makeLog(name: "Afternoon \($0)", daysAgo: $0,
+                         hour: 14, calories: 500, mood: .tough)
+        }
+
+        let thisWeek: [FoodLog] = (1...4).map {
+            Self.makeLog(name: "Light \($0)", daysAgo: $0,
+                         hour: 12, calories: 400, mood: .loved)
+        }
+        let lastWeek: [FoodLog] = (8...11).map {
+            Self.makeLog(name: "Heavy \($0)", daysAgo: $0,
+                         hour: 12, calories: 800, mood: .loved)
+        }
+
+        let revs = FoodOSMomentEngine.revelations(
+            thirtyDayLogs: thirtyDay,
+            thisWeekLogs:  thisWeek,
+            lastWeekLogs:  lastWeek,
+            timeZone:      Self.timeZone,
+            now:           Self.now
+        )
+
+        XCTAssertNotNil(revs.mood, "Mood card should fire on divergent mood.")
+        XCTAssertNotNil(revs.value, "Value card should fire on calorie shift.")
+        XCTAssertNotEqual(revs.mood, revs.value,
+                          "Mood and value are independent moments.")
+    }
+
+    /// Mixed-mood user with divergence but flat macros across weeks
+    /// — mood card appears, value card does not.
+    func test_moodDivergent_butFlatMacros_onlyMoodCard() {
+        var thirtyDay: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Morning \($0)", daysAgo: $0,
+                         hour: 8, calories: 500, mood: .loved)
+        }
+        thirtyDay += (7...14).map {
+            Self.makeLog(name: "Afternoon \($0)", daysAgo: $0,
+                         hour: 14, calories: 500, mood: .tough)
+        }
+
+        // Identical weeks — no week-over-week shift.
+        let thisWeek: [FoodLog] = (1...4).map {
+            Self.makeLog(name: "Same \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 25, carbsG: 50)
+        }
+        let lastWeek: [FoodLog] = (8...11).map {
+            Self.makeLog(name: "Same \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 25, carbsG: 50)
+        }
+
+        let revs = FoodOSMomentEngine.revelations(
+            thirtyDayLogs: thirtyDay,
+            thisWeekLogs:  thisWeek,
+            lastWeekLogs:  lastWeek,
+            timeZone:      Self.timeZone,
+            now:           Self.now
+        )
+
+        XCTAssertNotNil(revs.mood)
+        XCTAssertNil(revs.value,
+                     "Flat macros must NOT produce a value revelation.")
+    }
+
+    /// Below-threshold value shift (< 18% relative change on all
+    /// axes) must keep the value card hidden.
+    func test_valueChangeBelowThreshold_noCard() {
+        let thisWeek: [FoodLog] = (1...4).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 510,
+                         proteinG: 25, carbsG: 50)
+        }
+        let lastWeek: [FoodLog] = (8...11).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 26, carbsG: 51)
+        }
+
+        XCTAssertNil(
+            FoodOSPairedBeliefs.bestValueCandidate(
+                thisWeek: thisWeek,
+                lastWeek: lastWeek
+            ),
+            "Tiny week-over-week wobbles must stay below the surprise gate."
+        )
+    }
+
+    /// Suppression: the same value subject should not repeat on the
+    /// next refresh when the caller passes back its repeat key.
+    func test_valueRevelation_doesNotRepeatSameSubject() {
+        let thisWeek: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 25)
+        }
+        let lastWeek: [FoodLog] = (8...13).map {
+            Self.makeLog(name: "Meal \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 44)
+        }
+
+        let first = FoodOSMomentEngine.revelations(
+            thirtyDayLogs: thisWeek + lastWeek,
+            thisWeekLogs:  thisWeek,
+            lastWeekLogs:  lastWeek,
+            timeZone:      Self.timeZone,
+            now:           Self.now
+        )
+        XCTAssertNotNil(first.value)
+
+        let second = FoodOSMomentEngine.revelations(
+            thirtyDayLogs:      thisWeek + lastWeek,
+            thisWeekLogs:       thisWeek,
+            lastWeekLogs:       lastWeek,
+            timeZone:           Self.timeZone,
+            now:                Self.now,
+            lastValueRepeatKey: first.valueRepeatKey
+        )
+        XCTAssertNil(second.value,
+                     "Value revelation must not repeat the same subject.")
+    }
+
+    /// Copy safety: every value-revelation subtype must produce
+    /// strings that clear the safety filter. Drives directly off the
+    /// pure candidate factory so we don't depend on the engine wrap.
+    func test_valueRevelationCopy_passesSafetyAcrossSubtypes() {
+        // macroTrend
+        var thisWeek: [FoodLog] = (1...4).map {
+            Self.makeLog(name: "A\($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 25)
+        }
+        var lastWeek: [FoodLog] = (8...11).map {
+            Self.makeLog(name: "B\($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 44)
+        }
+        assertCandidateSafe(
+            FoodOSPairedBeliefs.bestValueCandidate(
+                thisWeek: thisWeek, lastWeek: lastWeek)
+        )
+
+        // calorieTrend (no macro divergence)
+        thisWeek = (1...4).map {
+            Self.makeLog(name: "A\($0)", daysAgo: $0,
+                         hour: 12, calories: 350,
+                         proteinG: 25, carbsG: 40)
+        }
+        lastWeek = (8...11).map {
+            Self.makeLog(name: "B\($0)", daysAgo: $0,
+                         hour: 12, calories: 700,
+                         proteinG: 25, carbsG: 40)
+        }
+        assertCandidateSafe(
+            FoodOSPairedBeliefs.bestValueCandidate(
+                thisWeek: thisWeek, lastWeek: lastWeek)
+        )
+
+        // consistency
+        thisWeek = (1...12).map {
+            Self.makeLog(name: "A\($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 25)
+        }
+        lastWeek = [Self.makeLog(name: "B", daysAgo: 10,
+                                 hour: 12, calories: 500,
+                                 proteinG: 25)]
+        assertCandidateSafe(
+            FoodOSPairedBeliefs.bestValueCandidate(
+                thisWeek: thisWeek, lastWeek: lastWeek)
+        )
+
+        // varietyTrend
+        thisWeek = (1...8).map {
+            Self.makeLog(name: "Distinct \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 25)
+        }
+        lastWeek = (8...15).map { _ in
+            Self.makeLog(name: "Same", daysAgo: 10,
+                         hour: 12, calories: 500,
+                         proteinG: 25)
+        }
+        assertCandidateSafe(
+            FoodOSPairedBeliefs.bestValueCandidate(
+                thisWeek: thisWeek, lastWeek: lastWeek)
+        )
+    }
+
+    // MARK: helpers
+
+    private func assertCandidateSafe(
+        _ candidate: FoodOSPairedBeliefs.ValueCandidate?,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let c = candidate else {
+            XCTFail("Expected a value candidate to assert safety on",
+                    file: file, line: line)
+            return
+        }
+        XCTAssertTrue(
+            FoodOSMomentCopySafety.isSafe(
+                title: c.title,
+                body: c.body,
+                evidence: c.evidenceLine
+            ),
+            "Value candidate copy must pass safety filter: \(c.title)",
+            file: file, line: line
+        )
+    }
+
+    private static func makeLog(name: String,
+                                daysAgo: Int,
+                                hour: Int = 12,
+                                calories: Double = 500,
+                                proteinG: Double? = 20,
+                                carbsG: Double = 50,
+                                sugarG: Double = 5,
+                                mood: FoodLog.Mood? = nil) -> FoodLog {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let day = cal.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        var comps = cal.dateComponents([.year, .month, .day], from: day)
+        comps.hour = hour; comps.minute = 0; comps.timeZone = timeZone
+        let dt = cal.date(from: comps) ?? day
+        return FoodLog(
+            id: UUID(),
+            userId: UUID(),
+            foodName: name,
+            imagePath: nil,
+            imageThumbPath: nil,
+            calories: calories,
+            carbsG: carbsG,
+            sugarG: sugarG,
+            proteinG: proteinG,
+            fatG: 15,
+            fiberG: 5,
+            benefits: [],
+            drawbacks: [],
+            nutrients: [],
+            coachName: nil,
+            coachAdvice: nil,
+            eatenAt: dt,
+            createdAt: dt,
+            origin: .analyzed,
+            sourceLogId: nil,
+            mood: mood
+        )
+    }
+}

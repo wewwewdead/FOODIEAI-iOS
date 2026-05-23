@@ -26,6 +26,10 @@ enum FoodOSMomentTag: String, Codable, CaseIterable, Equatable {
     case revelationTimeOfDay
     case revelationMacroLean
     case revelationDayType
+    case valueMacroTrend
+    case valueCalorieTrend
+    case valueConsistency
+    case valueVarietyTrend
 }
 
 // MARK: - FoodOSMomentFeedback
@@ -169,6 +173,24 @@ extension FoodOSMoment {
             .joined(separator: " ")
             .lowercased()
 
+        // Value-revelation evidence carries a unique "this week and ...
+        // last week" marker; route to value keys first so a value
+        // moment mentioning "protein" doesn't get mistagged as the
+        // mood macro-lean revelation.
+        if isValueRevelationCopy {
+            if joined.contains("dropped") || joined.contains("climbed") {
+                if joined.contains("protein") { return "macroTrend:protein" }
+                if joined.contains("carbs") { return "macroTrend:carbs" }
+                if joined.contains("fat") { return "macroTrend:fat" }
+            }
+            if joined.contains("calories") { return "calorieTrend" }
+            if joined.contains("varied") || joined.contains("focused") {
+                return "varietyTrend"
+            }
+            if joined.contains("logged") { return "consistency" }
+            return nil
+        }
+
         if joined.contains("morning") { return "timeOfDay:morning" }
         if joined.contains("midday") { return "timeOfDay:midday" }
         if joined.contains("evening") { return "timeOfDay:evening" }
@@ -180,6 +202,18 @@ extension FoodOSMoment {
         if joined.contains("weekend") { return "dayType:weekend" }
         if joined.contains("weekday") { return "dayType:weekday" }
         return nil
+    }
+
+    /// True when this revelation moment was minted by the value-
+    /// revelation branch (week-over-week trend). Detected via the
+    /// distinctive "this week and N last week" evidence-line pattern
+    /// shared by all four value subtypes; mood revelations cite
+    /// "mood notes" instead, so the two are unambiguous.
+    fileprivate var isValueRevelationCopy: Bool {
+        guard let evidence = evidenceLine?.lowercased() else { return false }
+        return evidence.contains("this week")
+            && evidence.contains("last week")
+            && !evidence.contains("mood note")
     }
 
     /// Stable tag for this moment shape. Used by the feedback store
@@ -211,6 +245,21 @@ extension FoodOSMoment {
             let joined = [title, body ?? "", evidenceLine ?? ""]
                 .joined(separator: " ")
                 .lowercased()
+            // Value-revelation copy carries a unique week-over-week
+            // evidence marker; route those to value tags first so the
+            // mood macro-lean tag isn't claimed by a value moment that
+            // happens to mention "protein".
+            if isValueRevelationCopy {
+                if joined.contains("dropped") || joined.contains("climbed") {
+                    return .valueMacroTrend
+                }
+                if joined.contains("calories") { return .valueCalorieTrend }
+                if joined.contains("varied") || joined.contains("focused") {
+                    return .valueVarietyTrend
+                }
+                if joined.contains("logged") { return .valueConsistency }
+                return .unknown
+            }
             if joined.contains("morning")
                 || joined.contains("midday")
                 || joined.contains("evening") {
