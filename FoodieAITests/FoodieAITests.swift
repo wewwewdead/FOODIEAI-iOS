@@ -2331,7 +2331,47 @@ final class FoodMirrorViewModelTests: XCTestCase {
         )
     }
 
+    // MARK: revelation freshness
+
+    /// The app caller passes the current revelation's repeat key
+    /// into the next engine refresh. With identical logs, the second
+    /// refresh must fall through to a calmer non-revelation moment
+    /// instead of showing the same subject again.
+    func test_refresh_doesNotRepeatSameRevelationBackToBack() async {
+        let tz = TimeZone(identifier: "America/Los_Angeles")!
+        let now = Date(timeIntervalSince1970: 1_730_000_000)
+        let stub = StubFetcher()
+        stub.result = .success(Self.makeRevelationLogs(now: now,
+                                                       timeZone: tz))
+        let store = FoodOSMomentFeedbackStore(fileURL: tempStoreURL())
+        let vm = FoodMirrorViewModel(foodLogs: stub,
+                                     feedbackStore: store)
+
+        await vm.refresh(now: now, timeZone: tz)
+        XCTAssertEqual(vm.currentMoment?.kind, .revelation)
+        XCTAssertEqual(vm.currentMoment?.revelationRepeatKey,
+                       "timeOfDay:morning")
+
+        await vm.refresh(now: now.addingTimeInterval(60), timeZone: tz)
+        XCTAssertNotEqual(vm.currentMoment?.kind, .revelation)
+    }
+
     // MARK: helpers
+
+    private func tempStoreURL(named: String = #function) -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FoodMirrorViewModelTests", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        let slug = named
+            .replacingOccurrences(of: "(", with: "_")
+            .replacingOccurrences(of: ")", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+        return dir.appendingPathComponent(
+            "store_\(slug)_\(UUID().uuidString).json"
+        )
+    }
 
     /// Thread-safe stub: first two `logs(from:to:)` calls sleep
     /// then return logs named `firstPairName`; every call after
@@ -2410,6 +2450,59 @@ final class FoodMirrorViewModelTests: XCTestCase {
             ))
         }
         return out
+    }
+
+    nonisolated static func makeRevelationLogs(now: Date,
+                                               timeZone: TimeZone) -> [FoodLog] {
+        var logs: [FoodLog] = []
+        logs += (1...4).map {
+            makeLog(name: "Morning \($0)", daysAgo: $0,
+                    hour: 8, mood: .loved,
+                    now: now, timeZone: timeZone)
+        }
+        logs += (5...12).map {
+            makeLog(name: "Other \($0)", daysAgo: $0,
+                    hour: 12, mood: .tough,
+                    now: now, timeZone: timeZone)
+        }
+        return logs
+    }
+
+    nonisolated private static func makeLog(name: String,
+                                            daysAgo: Int,
+                                            hour: Int,
+                                            mood: FoodLog.Mood?,
+                                            now: Date,
+                                            timeZone: TimeZone) -> FoodLog {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let day = cal.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        var comps = cal.dateComponents([.year, .month, .day], from: day)
+        comps.hour = hour; comps.minute = 0; comps.timeZone = timeZone
+        let dt = cal.date(from: comps) ?? day
+        return FoodLog(
+            id: UUID(),
+            userId: UUID(),
+            foodName: name,
+            imagePath: nil,
+            imageThumbPath: nil,
+            calories: 500,
+            carbsG: 50,
+            sugarG: 5,
+            proteinG: 20,
+            fatG: 15,
+            fiberG: 5,
+            benefits: [],
+            drawbacks: [],
+            nutrients: [],
+            coachName: nil,
+            coachAdvice: nil,
+            eatenAt: dt,
+            createdAt: dt,
+            origin: .analyzed,
+            sourceLogId: nil,
+            mood: mood
+        )
     }
 }
 
@@ -2884,6 +2977,253 @@ final class FoodOSMomentEngineTests: XCTestCase {
                        "Fallback branch carries priority 10")
     }
 
+    // MARK: 15. revelation requires surprise and evidence
+
+    /// Morning mood notes sit far above the user's baseline, with
+    /// enough observations to clear the shared 3-note floor. The new
+    /// branch lives immediately after learning, so it should beat
+    /// ordinary reflection/recognition candidates when the surprise
+    /// gate clears.
+    func test_revelation_firesForHighSurpriseTimeOfDayBelief() {
+        var logs: [FoodLog] = (1...4).map {
+            Self.makeLog(name: "Morning \($0)", daysAgo: $0,
+                         hour: 8, mood: .loved)
+        }
+        logs += (5...8).map {
+            Self.makeLog(name: "Midday \($0)", daysAgo: $0,
+                         hour: 12, mood: .tough)
+        }
+        logs += (9...12).map {
+            Self.makeLog(name: "Evening \($0)", daysAgo: $0,
+                         hour: 19, mood: .tough)
+        }
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs: Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+
+        XCTAssertEqual(moment.kind, .revelation)
+        XCTAssertEqual(moment.momentTag, .revelationTimeOfDay)
+        XCTAssertEqual(moment.revelationRepeatKey, "timeOfDay:morning")
+        XCTAssertGreaterThanOrEqual(moment.priorityScore, 95)
+        XCTAssertTrue(moment.evidenceLine?.contains("4 morning meals") == true)
+        XCTAssertTrue(FoodOSMomentCopySafety.isSafe(
+            title: moment.title,
+            body: moment.body,
+            evidence: moment.evidenceLine
+        ))
+    }
+
+    /// Protein-leaning meals are all positive while carb/balanced
+    /// meals are tougher, so the macro paired-belief should qualify.
+    /// Keeping all logs at midday prevents time-of-day from becoming
+    /// the explanation instead.
+    func test_revelation_firesForHighSurpriseMacroBelief() {
+        var logs: [FoodLog] = (1...4).map {
+            Self.makeLog(name: "Protein \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 40, carbsG: 20, mood: .fine)
+        }
+        logs += (5...8).map {
+            Self.makeLog(name: "Carb \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 5, carbsG: 80, mood: .tough)
+        }
+        logs += (9...12).map {
+            Self.makeLog(name: "Balanced \($0)", daysAgo: $0,
+                         hour: 12, calories: 500,
+                         proteinG: 20, carbsG: 40, mood: .tough)
+        }
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs: Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+
+        XCTAssertEqual(moment.kind, .revelation)
+        XCTAssertEqual(moment.momentTag, .revelationMacroLean)
+        XCTAssertTrue(moment.title.lowercased().contains("protein"))
+    }
+
+    /// Weekend meals have distinct composition and better mood notes.
+    /// This proves the day-type candidate is implemented without
+    /// depending on a specific weekday for the pinned timestamp.
+    func test_revelation_firesForHighSurpriseDayTypeBelief() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = Self.timeZone
+        var weekendDays: [Int] = []
+        var weekdayDays: [Int] = []
+        for day in 1...30 {
+            let date = cal.date(byAdding: .day, value: -day, to: Self.now)
+                ?? Self.now
+            if cal.isDateInWeekend(date) {
+                weekendDays.append(day)
+            } else {
+                weekdayDays.append(day)
+            }
+        }
+
+        var logs = Array(weekendDays.prefix(4)).enumerated().map { idx, day in
+            Self.makeLog(name: "Weekend \(idx)", daysAgo: day,
+                         hour: 12, calories: 800, mood: .loved)
+        }
+        logs += Array(weekdayDays.prefix(8)).enumerated().map { idx, day in
+            Self.makeLog(name: "Weekday \(idx)", daysAgo: day,
+                         hour: 12, calories: 400, mood: .tough)
+        }
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs: Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+
+        XCTAssertEqual(moment.kind, .revelation)
+        XCTAssertEqual(moment.momentTag, .revelationDayType)
+        XCTAssertTrue(moment.title.lowercased().contains("weekend"))
+        XCTAssertTrue(moment.body?.lowercased().contains("weekend") == true)
+    }
+
+    /// When every bucket sits close to the user's overall baseline,
+    /// the revelation branch must stay silent and let the old chain
+    /// continue.
+    func test_revelation_doesNotFireForLowSurprisePattern() {
+        var logs: [FoodLog] = []
+        for day in 1...12 {
+            let mood: FoodLog.Mood = day.isMultiple(of: 2) ? .fine : .tough
+            let hour = [8, 12, 19][(day - 1) % 3]
+            logs.append(Self.makeLog(name: "Food \(day)", daysAgo: day,
+                                     hour: hour, mood: mood))
+        }
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs: Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+
+        XCTAssertNotEqual(moment.kind, .revelation)
+    }
+
+    /// Two observations in the standout bucket are not enough, even
+    /// when both notes are positive and the posterior is far from
+    /// baseline.
+    func test_revelation_requiresThreeObservationsInBucket() {
+        var logs: [FoodLog] = (1...2).map {
+            Self.makeLog(name: "Morning \($0)", daysAgo: $0,
+                         hour: 8, mood: .loved)
+        }
+        logs += (3...12).map {
+            Self.makeLog(name: "Midday \($0)", daysAgo: $0,
+                         hour: 12, mood: .tough)
+        }
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs: Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+
+        XCTAssertNotEqual(moment.kind, .revelation)
+    }
+
+    /// The optional repeat marker lets callers suppress the same
+    /// revelation subject on the next refresh; when no alternate
+    /// revelation exists, the engine falls through to the old chain.
+    func test_revelation_doesNotRepeatSameSubjectBackToBack() {
+        var logs: [FoodLog] = (1...4).map {
+            Self.makeLog(name: "Morning \($0)", daysAgo: $0,
+                         hour: 8, mood: .loved)
+        }
+        logs += (5...12).map {
+            Self.makeLog(name: "Other \($0)", daysAgo: $0,
+                         hour: 12, mood: .tough)
+        }
+
+        let first = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs: Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+        XCTAssertEqual(first.kind, .revelation)
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs: Array(logs.prefix(5)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone,
+            lastRevelationRepeatKey: first.revelationRepeatKey
+        )
+
+        XCTAssertNotEqual(moment.kind, .revelation)
+    }
+
+    /// Paired beliefs reuse the same Beta prior: even a bucket with
+    /// only positive observations must stay below 1.0 and above 0.0.
+    func test_pairedBeliefPosterior_neverReturnsZeroOrOne() {
+        var logs: [FoodLog] = (1...4).map {
+            Self.makeLog(name: "Morning \($0)", daysAgo: $0,
+                         hour: 8, mood: .loved)
+        }
+        logs += (5...12).map {
+            Self.makeLog(name: "Other \($0)", daysAgo: $0,
+                         hour: 12, mood: .tough)
+        }
+
+        let candidate = FoodOSPairedBeliefs.candidates(
+            in: logs,
+            timeZone: Self.timeZone
+        ).first
+
+        XCTAssertNotNil(candidate)
+        XCTAssertGreaterThan(candidate!.posteriorMean, 0)
+        XCTAssertLessThan(candidate!.posteriorMean, 1)
+        XCTAssertGreaterThan(candidate!.baselinePosterior, 0)
+        XCTAssertLessThan(candidate!.baselinePosterior, 1)
+    }
+
+    /// Regression guard: when no revelation qualifies, the old
+    /// recognition output remains exactly the same.
+    func test_noRevelation_preservesExistingRecognitionOutput() {
+        var logs: [FoodLog] = (1...6).map {
+            Self.makeLog(name: "Sweet potato", daysAgo: $0, calories: 400)
+        }
+        logs += (7...12).map {
+            Self.makeLog(name: "Other \($0)", daysAgo: $0, calories: 400)
+        }
+
+        let moment = FoodOSMomentEngine.compute(
+            thirtyDayLogs: logs,
+            sevenDayLogs: Array(logs.prefix(3)),
+            previousSevenDayLogs: [],
+            now: Self.now,
+            timeZone: Self.timeZone
+        )
+
+        XCTAssertEqual(moment.kind, .recognition)
+        XCTAssertEqual(moment.title, "Sweet potato seems to be one of your reliable meals.")
+        XCTAssertEqual(moment.body, nil)
+        XCTAssertEqual(moment.evidenceLine,
+                       "You logged Sweet potato 6 times in the last 30 days.")
+        XCTAssertEqual(moment.actionLabel, "Use it as today's anchor meal?")
+    }
+
     // MARK: - Helpers
 
     /// Synthetic FoodLog at `daysAgo` days before `Self.now`, in
@@ -2894,6 +3234,7 @@ final class FoodOSMomentEngineTests: XCTestCase {
                                 hour: Int = 12,
                                 calories: Double = 500,
                                 proteinG: Double? = 20,
+                                carbsG: Double = 50,
                                 sugarG: Double = 5,
                                 mood: FoodLog.Mood? = nil) -> FoodLog {
         var cal = Calendar(identifier: .gregorian)
@@ -2909,7 +3250,7 @@ final class FoodOSMomentEngineTests: XCTestCase {
             imagePath: nil,
             imageThumbPath: nil,
             calories: calories,
-            carbsG: 50,
+            carbsG: carbsG,
             sugarG: sugarG,
             proteinG: proteinG,
             fatG: 15,
@@ -2963,7 +3304,8 @@ final class FoodOSMomentFeedbackTests: XCTestCase {
         kind: FoodOSMoment.Kind = .nudge,
         title: String = "Test",
         body: String? = nil,
-        evidenceLine: String? = nil
+        evidenceLine: String? = nil,
+        actionLabel: String? = nil
     ) -> FoodOSMoment {
         FoodOSMoment(
             kind: kind,
@@ -2971,7 +3313,7 @@ final class FoodOSMomentFeedbackTests: XCTestCase {
             body: body,
             evidenceLine: evidenceLine,
             confidence: .medium,
-            actionLabel: nil,
+            actionLabel: actionLabel,
             priorityScore: 60,
             generatedAt: Self.now
         )
@@ -3259,6 +3601,21 @@ final class FoodOSMomentFeedbackTests: XCTestCase {
                        evidenceLine: "Based on your recent meals.").momentTag,
             .genericReflection
         )
+        XCTAssertEqual(
+            makeMoment(kind: .revelation,
+                       title: "Your mornings have been your best-mood meals.").momentTag,
+            .revelationTimeOfDay
+        )
+        XCTAssertEqual(
+            makeMoment(kind: .revelation,
+                       title: "Your higher-protein meals have been landing better.").momentTag,
+            .revelationMacroLean
+        )
+        XCTAssertEqual(
+            makeMoment(kind: .revelation,
+                       title: "Your weekends look different and land steadier.").momentTag,
+            .revelationDayType
+        )
         XCTAssertEqual(makeMoment(kind: .learning).momentTag, .unknown)
     }
 
@@ -3284,6 +3641,91 @@ final class FoodOSMomentFeedbackTests: XCTestCase {
         XCTAssertFalse(FoodOSMomentFeedbackPolicy.showsWillTry(
             for: makeMoment(kind: .reflection)
         ))
+        XCTAssertFalse(FoodOSMomentFeedbackPolicy.showsWillTry(
+            for: makeMoment(kind: .revelation)
+        ))
+    }
+
+    // MARK: 13. recognition gets "I'll try this" only with an action label
+
+    /// Anchor-grade recognition (engine produced "Use it as today's
+    /// anchor meal?") unlocks the active-experiment loop — the chip
+    /// must render so the user can opt in.
+    func test_feedbackPolicy_showsWillTry_forRecognitionWithActionLabel() {
+        let m = makeMoment(
+            kind: .recognition,
+            title: "Sweet potato seems to be one of your reliable meals.",
+            body: nil,
+            evidenceLine: "You logged Sweet potato 6 times in the last 30 days.",
+            actionLabel: "Use it as today's anchor meal?"
+        )
+        XCTAssertTrue(FoodOSStoryBuilder.shouldRenderActionLabel(m),
+                      "Precondition: this label is renderable.")
+        XCTAssertTrue(FoodOSMomentFeedbackPolicy.showsWillTry(for: m))
+    }
+
+    /// Recognition card with no actionLabel — observation only, no
+    /// promise to make.
+    func test_feedbackPolicy_hidesWillTry_forRecognitionWithoutActionLabel() {
+        let m = makeMoment(
+            kind: .recognition,
+            actionLabel: nil
+        )
+        XCTAssertFalse(FoodOSMomentFeedbackPolicy.showsWillTry(for: m))
+    }
+
+    /// Weak recognition (count below the anchor floor) — engine
+    /// returns nil for actionLabel; the chip must stay hidden.
+    func test_feedbackPolicy_hidesWillTry_forWeakRecognition() {
+        let m = makeMoment(
+            kind: .recognition,
+            title: "Sweet potato shows up here and there.",
+            evidenceLine: "You logged Sweet potato 3 times in the last 30 days.",
+            actionLabel: nil
+        )
+        XCTAssertFalse(FoodOSStoryBuilder.shouldRenderActionLabel(m))
+        XCTAssertFalse(FoodOSMomentFeedbackPolicy.showsWillTry(for: m))
+    }
+
+    /// Recognition with whitespace-only or unsafe action label still
+    /// falls through to false — we route through the same renderable
+    /// check the UI uses.
+    func test_feedbackPolicy_hidesWillTry_forRecognitionWithUnsafeActionLabel() {
+        let unsafe = makeMoment(
+            kind: .recognition,
+            actionLabel: "You must stop eating like this."
+        )
+        XCTAssertFalse(FoodOSStoryBuilder.shouldRenderActionLabel(unsafe))
+        XCTAssertFalse(FoodOSMomentFeedbackPolicy.showsWillTry(for: unsafe))
+
+        let blank = makeMoment(
+            kind: .recognition,
+            actionLabel: "   "
+        )
+        XCTAssertFalse(FoodOSMomentFeedbackPolicy.showsWillTry(for: blank))
+    }
+
+    /// Kinds that are neither action-prompting nor recognition still
+    /// hide the chip — change, celebration, reflection, learning —
+    /// even if a hand-authored actionLabel slips through.
+    func test_feedbackPolicy_hidesWillTry_forOtherKindsRegardlessOfActionLabel() {
+        let actionable = "Use it as today's anchor meal?"
+        for kind in [FoodOSMoment.Kind.change,
+                     .celebration,
+                     .reflection,
+                     .learning,
+                     .revelation] {
+            let withLabel = makeMoment(kind: kind, actionLabel: actionable)
+            XCTAssertFalse(
+                FoodOSMomentFeedbackPolicy.showsWillTry(for: withLabel),
+                "\(kind) must not surface I'll try this even with an action label"
+            )
+            let withoutLabel = makeMoment(kind: kind, actionLabel: nil)
+            XCTAssertFalse(
+                FoodOSMomentFeedbackPolicy.showsWillTry(for: withoutLabel),
+                "\(kind) must not surface I'll try this"
+            )
+        }
     }
 }
 
@@ -4209,4 +4651,3 @@ final class FoodOSStoryBuilderTests: XCTestCase {
         XCTAssertTrue(FoodOSMomentCopySafety.isSafe(action))
     }
 }
-

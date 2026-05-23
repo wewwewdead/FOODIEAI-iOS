@@ -190,7 +190,8 @@ final class FoodMirrorViewModel: ObservableObject {
                 previousSevenDayLogs: prevSevenLogs,
                 now:                  now,
                 timeZone:             timeZone,
-                preferences:          feedbackStore.preferences
+                preferences:          feedbackStore.preferences,
+                lastRevelationRepeatKey: currentMoment?.revelationRepeatKey
             )
 
             guard myToken == refreshToken else { return }

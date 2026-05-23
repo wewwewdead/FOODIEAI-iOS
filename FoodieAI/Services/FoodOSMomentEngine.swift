@@ -25,6 +25,7 @@ struct FoodOSMoment: Equatable {
         case celebration   // consistency / logging cadence improved
         case experiment    // small, safe, time-boxed prompt
         case reflection    // gentle fallback — calm, never empty
+        case revelation    // uncanny cross-variable connection
     }
 
     /// Confidence the engine has in this moment. Used by the view to
@@ -469,12 +470,13 @@ enum FoodOSMomentEngine {
     ///
     /// Priority chain:
     ///   1. learning (under the readiness floor)
-    ///   2. celebration (consistency improved week over week)
-    ///   3. change (this week shifted meaningfully)
-    ///   4. mood reflection (strong mood posterior + enough notes)
-    ///   5. nudge (clear slot pattern — dinner heavier than lunch)
-    ///   6. recognition (top food appears repeatedly)
-    ///   7. gentle reflection fallback
+    ///   2. revelation (paired-variable belief + surprise gate)
+    ///   3. celebration (consistency improved week over week)
+    ///   4. change (this week shifted meaningfully)
+    ///   5. mood reflection (strong mood posterior + enough notes)
+    ///   6. nudge (clear slot pattern — dinner heavier than lunch)
+    ///   7. recognition (top food appears repeatedly)
+    ///   8. gentle reflection fallback
     ///
     /// The first branch that fires wins. Safe by construction:
     /// unsafe copy falls back to the gentle reflection so callers
@@ -490,7 +492,8 @@ enum FoodOSMomentEngine {
                         previousSevenDayLogs: [FoodLog],
                         now: Date = Date(),
                         timeZone: TimeZone = .current,
-                        preferences: [FoodOSMomentPreference] = []) -> FoodOSMoment {
+                        preferences: [FoodOSMomentPreference] = [],
+                        lastRevelationRepeatKey: String? = nil) -> FoodOSMoment {
 
         // 1. Learning gate. The learner never demotes the learning
         // moment — users below the readiness floor need the "still
@@ -514,6 +517,10 @@ enum FoodOSMomentEngine {
         // generic nudge so a "what worked for you before" line takes
         // precedence over a fresh suggestion.
         let candidates: [() -> FoodOSMoment?] = [
+            { revelationMoment(thirtyDayLogs: thirtyDayLogs,
+                               timeZone: timeZone,
+                               now: now,
+                               lastRepeatKey: lastRevelationRepeatKey) },
             { celebrationMoment(current: sevenDayLogs,
                                 previous: previousSevenDayLogs,
                                 evidence: evidenceLine,
@@ -602,6 +609,29 @@ enum FoodOSMomentEngine {
             confidence:   .low,
             actionLabel:  "Log another meal",
             priorityScore: 100,
+            generatedAt:   now
+        )
+    }
+
+    private static func revelationMoment(thirtyDayLogs: [FoodLog],
+                                         timeZone: TimeZone,
+                                         now: Date,
+                                         lastRepeatKey: String?) -> FoodOSMoment? {
+        guard let belief = FoodOSPairedBeliefs.bestCandidate(
+            in: thirtyDayLogs,
+            timeZone: timeZone,
+            excludingRepeatKey: lastRepeatKey
+        ) else {
+            return nil
+        }
+        return FoodOSMoment(
+            kind:         .revelation,
+            title:        belief.title,
+            body:         belief.body,
+            evidenceLine: belief.evidenceLine,
+            confidence:   belief.confidence,
+            actionLabel:  nil,
+            priorityScore: 95 + min(belief.surpriseScore * 10, 4),
             generatedAt:   now
         )
     }

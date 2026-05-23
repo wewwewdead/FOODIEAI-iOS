@@ -1068,6 +1068,7 @@ struct FoodMirrorView: View {
         case .recognition: return "fork.knife"
         case .nudge:       return "leaf.fill"
         case .experiment:  return "wand.and.stars"
+        case .revelation:  return "sparkles"
         case .learning:    return "hourglass"
         case .reflection:  return "heart.fill"
         }

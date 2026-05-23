@@ -23,6 +23,9 @@ enum FoodOSMomentTag: String, Codable, CaseIterable, Equatable {
     case weeklyChange
     case genericReflection
     case unknown
+    case revelationTimeOfDay
+    case revelationMacroLean
+    case revelationDayType
 }
 
 // MARK: - FoodOSMomentFeedback
@@ -160,6 +163,25 @@ struct FoodOSMomentPreference: Codable, Equatable {
 // engine.
 
 extension FoodOSMoment {
+    var revelationRepeatKey: String? {
+        guard kind == .revelation else { return nil }
+        let joined = [title, body ?? "", evidenceLine ?? ""]
+            .joined(separator: " ")
+            .lowercased()
+
+        if joined.contains("morning") { return "timeOfDay:morning" }
+        if joined.contains("midday") { return "timeOfDay:midday" }
+        if joined.contains("evening") { return "timeOfDay:evening" }
+
+        if joined.contains("protein") { return "macroLean:protein" }
+        if joined.contains("carb") { return "macroLean:carb" }
+        if joined.contains("balanced") { return "macroLean:balanced" }
+
+        if joined.contains("weekend") { return "dayType:weekend" }
+        if joined.contains("weekday") { return "dayType:weekday" }
+        return nil
+    }
+
     /// Stable tag for this moment shape. Used by the feedback store
     /// to bucket events and by the bandit to score priority
     /// adjustments. Pure — no I/O, no side effects.
@@ -185,6 +207,25 @@ extension FoodOSMoment {
             let evidence = (evidenceLine ?? "").lowercased()
             if evidence.contains("mood note") { return .moodReflection }
             return .genericReflection
+        case .revelation:
+            let joined = [title, body ?? "", evidenceLine ?? ""]
+                .joined(separator: " ")
+                .lowercased()
+            if joined.contains("morning")
+                || joined.contains("midday")
+                || joined.contains("evening") {
+                return .revelationTimeOfDay
+            }
+            if joined.contains("protein")
+                || joined.contains("carb")
+                || joined.contains("balanced") {
+                return .revelationMacroLean
+            }
+            if joined.contains("weekday")
+                || joined.contains("weekend") {
+                return .revelationDayType
+            }
+            return .unknown
         case .learning, .experiment:
             return .unknown
         }
@@ -209,8 +250,18 @@ enum FoodOSMomentFeedbackPolicy {
 
     /// "I'll try this" is a forward-looking promise — only meaningful
     /// on moments that actually prompt an action. Nudge + experiment
-    /// qualify; reflections and recognitions do not.
+    /// always qualify. Recognition qualifies only when the engine has
+    /// also produced a renderable action label (e.g. the anchor-meal
+    /// prompt), since that's what turns the card from observation into
+    /// something a user can opt into.
     static func showsWillTry(for moment: FoodOSMoment) -> Bool {
-        moment.kind == .nudge || moment.kind == .experiment
+        switch moment.kind {
+        case .nudge, .experiment:
+            return true
+        case .recognition:
+            return FoodOSStoryBuilder.shouldRenderActionLabel(moment)
+        case .learning, .change, .celebration, .reflection, .revelation:
+            return false
+        }
     }
 }

@@ -1,0 +1,406 @@
+import Foundation
+
+// MARK: - FoodOSPairedBeliefs
+//
+// Cross-variable observations for FoodOS revelation moments. These
+// use the same Beta(1, 1) posterior as `FoodOSBeliefEngine.moodBelief`
+// and keep the same count >= 3 evidence floor. Missing mood, macro,
+// or timestamp data is skipped rather than treated as a negative.
+
+enum FoodOSPairedBeliefs {
+    static let minimumObservationCount = 3
+    static let surpriseThreshold = 0.18
+    static let peerGapThreshold = 0.12
+
+    enum Subtype: String, Equatable {
+        case timeOfDay
+        case macroLean
+        case dayType
+    }
+
+    enum Direction: Equatable {
+        case better
+        case tougher
+    }
+
+    struct Candidate: Equatable {
+        let subtype: Subtype
+        let subject: String
+        let repeatKey: String
+        let title: String
+        let body: String?
+        let evidenceLine: String
+        let posteriorMean: Double
+        let baselinePosterior: Double
+        let surpriseScore: Double
+        let observationCount: Int
+        let positiveCount: Int
+        let negativeCount: Int
+        let direction: Direction
+
+        var confidence: FoodOSMoment.Confidence {
+            observationCount >= 6 ? .high : .medium
+        }
+
+        var qualifiesAsRevelation: Bool {
+            observationCount >= FoodOSPairedBeliefs.minimumObservationCount
+                && surpriseScore >= FoodOSPairedBeliefs.surpriseThreshold
+                && confidence != .low
+        }
+    }
+
+    static func surpriseScore(bucketPosterior: Double,
+                              baselinePosterior: Double) -> Double {
+        abs(bucketPosterior - baselinePosterior)
+    }
+
+    static func candidates(in logs: [FoodLog],
+                           timeZone: TimeZone) -> [Candidate] {
+        let baseline = FoodOSBeliefEngine.moodBelief(in: logs)
+        guard baseline.hasEnoughEvidence else { return [] }
+        let baselineMean = baseline.posteriorPositiveMean
+
+        var out: [Candidate] = []
+        if let time = bestTimeOfDayCandidate(in: logs,
+                                             timeZone: timeZone,
+                                             baseline: baselineMean) {
+            out.append(time)
+        }
+        if let macro = bestMacroLeanCandidate(in: logs,
+                                              baseline: baselineMean) {
+            out.append(macro)
+        }
+        if let dayType = bestDayTypeCandidate(in: logs,
+                                              timeZone: timeZone,
+                                              baseline: baselineMean) {
+            out.append(dayType)
+        }
+
+        return out
+            .filter(\.qualifiesAsRevelation)
+            .sorted { a, b in
+                if a.surpriseScore != b.surpriseScore {
+                    return a.surpriseScore > b.surpriseScore
+                }
+                if a.observationCount != b.observationCount {
+                    return a.observationCount > b.observationCount
+                }
+                return a.repeatKey < b.repeatKey
+            }
+    }
+
+    static func bestCandidate(in logs: [FoodLog],
+                              timeZone: TimeZone,
+                              excludingRepeatKey repeatKey: String? = nil) -> Candidate? {
+        candidates(in: logs, timeZone: timeZone)
+            .first { $0.repeatKey != repeatKey }
+    }
+
+    private struct Bucket {
+        let key: String
+        let subject: String
+        let evidenceSubject: String
+        let logs: [FoodLog]
+        let compositionLine: String?
+    }
+
+    private static func bestTimeOfDayCandidate(in logs: [FoodLog],
+                                               timeZone: TimeZone,
+                                               baseline: Double) -> Candidate? {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+
+        let buckets = [
+            Bucket(key: "morning",
+                   subject: "your mornings",
+                   evidenceSubject: "morning meals",
+                   logs: logs.filter { cal.component(.hour, from: $0.eatenAt) < 11 },
+                   compositionLine: nil),
+            Bucket(key: "midday",
+                   subject: "your midday meals",
+                   evidenceSubject: "midday meals",
+                   logs: logs.filter {
+                       let hour = cal.component(.hour, from: $0.eatenAt)
+                       return hour >= 11 && hour < 16
+                   },
+                   compositionLine: nil),
+            Bucket(key: "evening",
+                   subject: "your evenings",
+                   evidenceSubject: "evening meals",
+                   logs: logs.filter { cal.component(.hour, from: $0.eatenAt) >= 16 },
+                   compositionLine: nil)
+        ]
+
+        return bestMoodCandidate(
+            subtype: .timeOfDay,
+            buckets: buckets,
+            baseline: baseline
+        )
+    }
+
+    private static func bestMacroLeanCandidate(in logs: [FoodLog],
+                                               baseline: Double) -> Candidate? {
+        var protein: [FoodLog] = []
+        var carb: [FoodLog] = []
+        var balanced: [FoodLog] = []
+
+        for log in logs {
+            switch macroLean(for: log) {
+            case .protein: protein.append(log)
+            case .carb: carb.append(log)
+            case .balanced: balanced.append(log)
+            case .none: break
+            }
+        }
+
+        let buckets = [
+            Bucket(key: "protein",
+                   subject: "your higher-protein meals",
+                   evidenceSubject: "higher-protein meals",
+                   logs: protein,
+                   compositionLine: nil),
+            Bucket(key: "carb",
+                   subject: "your carb-leaning meals",
+                   evidenceSubject: "carb-leaning meals",
+                   logs: carb,
+                   compositionLine: nil),
+            Bucket(key: "balanced",
+                   subject: "your balanced meals",
+                   evidenceSubject: "balanced meals",
+                   logs: balanced,
+                   compositionLine: nil)
+        ]
+
+        return bestMoodCandidate(
+            subtype: .macroLean,
+            buckets: buckets,
+            baseline: baseline
+        )
+    }
+
+    private static func bestDayTypeCandidate(in logs: [FoodLog],
+                                             timeZone: TimeZone,
+                                             baseline: Double) -> Candidate? {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+
+        let weekdayLogs = logs.filter { !cal.isDateInWeekend($0.eatenAt) }
+        let weekendLogs = logs.filter { cal.isDateInWeekend($0.eatenAt) }
+        guard weekdayLogs.count >= minimumObservationCount,
+              weekendLogs.count >= minimumObservationCount else {
+            return nil
+        }
+        guard let divergence = strongestDayTypeDivergence(
+            weekday: weekdayLogs,
+            weekend: weekendLogs
+        ), divergence.score >= surpriseThreshold else {
+            return nil
+        }
+
+        let buckets = [
+            Bucket(key: "weekday",
+                   subject: "your weekdays",
+                   evidenceSubject: "weekday meals",
+                   logs: weekdayLogs,
+                   compositionLine: divergence.line),
+            Bucket(key: "weekend",
+                   subject: "your weekends",
+                   evidenceSubject: "weekend meals",
+                   logs: weekendLogs,
+                   compositionLine: divergence.line)
+        ]
+
+        return bestMoodCandidate(
+            subtype: .dayType,
+            buckets: buckets,
+            baseline: baseline
+        )
+    }
+
+    private static func bestMoodCandidate(subtype: Subtype,
+                                          buckets: [Bucket],
+                                          baseline: Double) -> Candidate? {
+        struct Scored {
+            let bucket: Bucket
+            let belief: FoodOSBeliefEngine.MoodBelief
+            let surprise: Double
+        }
+
+        let scored = buckets.compactMap { bucket -> Scored? in
+            let belief = FoodOSBeliefEngine.moodBelief(in: bucket.logs)
+            guard belief.hasEnoughEvidence else { return nil }
+            let surprise = surpriseScore(
+                bucketPosterior: belief.posteriorPositiveMean,
+                baselinePosterior: baseline
+            )
+            return Scored(bucket: bucket, belief: belief, surprise: surprise)
+        }
+        guard let best = scored.max(by: {
+            if $0.surprise != $1.surprise {
+                return $0.surprise < $1.surprise
+            }
+            return $0.belief.total < $1.belief.total
+        }) else {
+            return nil
+        }
+
+        let sameDirectionPeers = scored.filter {
+            ($0.belief.posteriorPositiveMean >= baseline)
+                == (best.belief.posteriorPositiveMean >= baseline)
+                && $0.bucket.key != best.bucket.key
+        }
+        if let nearestPeer = sameDirectionPeers.min(by: {
+            abs(best.belief.posteriorPositiveMean - $0.belief.posteriorPositiveMean)
+                < abs(best.belief.posteriorPositiveMean - $1.belief.posteriorPositiveMean)
+        }) {
+            let gap = abs(best.belief.posteriorPositiveMean
+                          - nearestPeer.belief.posteriorPositiveMean)
+            guard gap >= peerGapThreshold else { return nil }
+        }
+
+        let direction: Direction = best.belief.posteriorPositiveMean >= baseline
+            ? .better
+            : .tougher
+        let evidence = evidenceLine(
+            bucket: best.bucket,
+            count: best.belief.total,
+            positive: best.belief.positive
+        )
+        let copy = copyForCandidate(
+            subtype: subtype,
+            bucket: best.bucket,
+            direction: direction,
+            surprise: best.surprise
+        )
+
+        return Candidate(
+            subtype: subtype,
+            subject: best.bucket.subject,
+            repeatKey: "\(subtype.rawValue):\(best.bucket.key)",
+            title: copy.title,
+            body: copy.body,
+            evidenceLine: evidence,
+            posteriorMean: best.belief.posteriorPositiveMean,
+            baselinePosterior: baseline,
+            surpriseScore: best.surprise,
+            observationCount: best.belief.total,
+            positiveCount: best.belief.positive,
+            negativeCount: best.belief.negative,
+            direction: direction
+        )
+    }
+
+    private static func evidenceLine(bucket: Bucket,
+                                     count: Int,
+                                     positive: Int) -> String {
+        let noun = count == 1 ? "mood note" : "mood notes"
+        return "Based on \(count) \(bucket.evidenceSubject) with \(noun); \(positive) were fine or loved."
+    }
+
+    private static func copyForCandidate(subtype: Subtype,
+                                         bucket: Bucket,
+                                         direction: Direction,
+                                         surprise: Double) -> (title: String, body: String?) {
+        let pointGap = Int((surprise * 100).rounded())
+        switch (subtype, direction) {
+        case (.timeOfDay, .better):
+            return (
+                "\(capitalized(bucket.subject)) have been your best-mood meals.",
+                "That sits about \(pointGap) points above your usual meal mood pattern."
+            )
+        case (.timeOfDay, .tougher):
+            return (
+                "\(capitalized(bucket.subject)) have been your tougher mood window.",
+                "That sits about \(pointGap) points below your usual meal mood pattern."
+            )
+        case (.macroLean, .better):
+            return (
+                "\(capitalized(bucket.subject)) have been landing better for you.",
+                "That mood pattern is about \(pointGap) points above your recent baseline."
+            )
+        case (.macroLean, .tougher):
+            return (
+                "\(capitalized(bucket.subject)) have been landing tougher for you.",
+                "That mood pattern is about \(pointGap) points below your recent baseline."
+            )
+        case (.dayType, .better):
+            return (
+                "\(capitalized(bucket.subject)) look different and land steadier.",
+                bucket.compositionLine
+            )
+        case (.dayType, .tougher):
+            return (
+                "\(capitalized(bucket.subject)) look different and land tougher.",
+                bucket.compositionLine
+            )
+        }
+    }
+
+    private enum MacroLean {
+        case protein
+        case carb
+        case balanced
+    }
+
+    private static func macroLean(for log: FoodLog) -> MacroLean? {
+        guard log.calories.isFinite, log.calories > 0,
+              let protein = log.proteinG, protein.isFinite,
+              log.carbsG.isFinite else {
+            return nil
+        }
+        let proteinRatio = (protein * 4) / log.calories
+        let carbRatio = (log.carbsG * 4) / log.calories
+        if proteinRatio >= 0.25 { return .protein }
+        if carbRatio >= 0.55 { return .carb }
+        return .balanced
+    }
+
+    private static func strongestDayTypeDivergence(
+        weekday: [FoodLog],
+        weekend: [FoodLog]
+    ) -> (score: Double, line: String)? {
+        let weekdayCalories = mean(weekday.map(\.calories))
+        let weekendCalories = mean(weekend.map(\.calories))
+        let calorieScore: Double = {
+            guard weekdayCalories > 0, weekendCalories > 0 else { return 0 }
+            return abs(weekendCalories - weekdayCalories) / weekdayCalories
+        }()
+
+        let weekdayVariety = varietyRatio(weekday)
+        let weekendVariety = varietyRatio(weekend)
+        let varietyScore = abs(weekendVariety - weekdayVariety)
+
+        if calorieScore >= varietyScore, calorieScore > 0 {
+            let direction = weekendCalories > weekdayCalories ? "higher" : "lower"
+            return (
+                calorieScore,
+                "Weekend meals have averaged \(direction) calories than weekdays."
+            )
+        }
+        if varietyScore > 0 {
+            let direction = weekendVariety > weekdayVariety ? "more" : "less"
+            return (
+                varietyScore,
+                "Weekend meals have shown \(direction) food variety than weekdays."
+            )
+        }
+        return nil
+    }
+
+    private static func varietyRatio(_ logs: [FoodLog]) -> Double {
+        guard !logs.isEmpty else { return 0 }
+        let unique = Set(logs.map { $0.foodName.lowercased() }).count
+        return Double(unique) / Double(logs.count)
+    }
+
+    private static func mean(_ values: [Double]) -> Double {
+        let finite = values.filter { $0.isFinite && $0 > 0 }
+        guard !finite.isEmpty else { return 0 }
+        return finite.reduce(0, +) / Double(finite.count)
+    }
+
+    private static func capitalized(_ subject: String) -> String {
+        guard let first = subject.first else { return subject }
+        return first.uppercased() + subject.dropFirst()
+    }
+}
