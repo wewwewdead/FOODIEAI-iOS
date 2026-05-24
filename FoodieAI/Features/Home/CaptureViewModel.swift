@@ -275,9 +275,16 @@ final class CaptureViewModel: ObservableObject {
         // Renderer + UIImage.draw(in:) are documented as thread-safe on
         // modern iOS; hop to a userInitiated detached task so the main
         // thread stays free for the Siri-aura animation kick-off.
+        #if DEBUG
+        let analyzeCompressionStart = Date()
+        #endif
         let jpeg = await Task.detached(priority: .userInitiated) {
             ImagePreparation.compressMain(image)
         }.value
+        #if DEBUG
+        NSLog("[Perf] analyze image compression %.2fms",
+              Date().timeIntervalSince(analyzeCompressionStart) * 1000)
+        #endif
 
         // If the user discarded / reset while compression was running,
         // we're no longer in `.analyzing`. Don't overwrite the fresh
@@ -544,10 +551,24 @@ final class CaptureViewModel: ObservableObject {
         // (HEIC → JPEG re-encode at two sizes) that running them on the
         // MainActor visibly hitched the "Save to today" press response.
         let mainTask = Task.detached(priority: .userInitiated) {
-            ImagePreparation.compressMain(image)
+            #if DEBUG
+            let start = Date()
+            defer {
+                NSLog("[Perf] save main compression %.2fms",
+                      Date().timeIntervalSince(start) * 1000)
+            }
+            #endif
+            return ImagePreparation.compressMain(image)
         }
         let thumbTask = Task.detached(priority: .userInitiated) {
-            ImagePreparation.compressThumbnail(image)
+            #if DEBUG
+            let start = Date()
+            defer {
+                NSLog("[Perf] save thumbnail compression %.2fms",
+                      Date().timeIntervalSince(start) * 1000)
+            }
+            #endif
+            return ImagePreparation.compressThumbnail(image)
         }
         let mainData  = await mainTask.value
         let thumbData = await thumbTask.value

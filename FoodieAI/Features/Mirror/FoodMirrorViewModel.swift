@@ -125,6 +125,9 @@ final class FoodMirrorViewModel: ObservableObject {
     /// notifications. Owned here so the view can hand the timing to
     /// the model without managing a free-floating Task<Void, Never>?.
     private var debounceTask: Task<Void, Never>?
+    private var lastSuccessfulRefreshAt: Date?
+    private var isDirty: Bool = true
+    private let automaticRefreshFreshness: TimeInterval = 25
 
     /// True when the surface currently has user-facing content we
     /// shouldn't blank out during a refresh. Loading and idle don't
@@ -143,8 +146,30 @@ final class FoodMirrorViewModel: ObservableObject {
     /// but will simply re-issue the queries. Swift cancellation
     /// (task cancellation, .refreshable abort, tab switch) is treated
     /// as a no-op — never surfaced as a failure to the user.
-    func refresh(now: Date = Date(),
-                 timeZone: TimeZone = .current) async {
+    @discardableResult
+    func refresh(reason: RefreshReason = .pullToRefresh,
+                 now: Date = Date(),
+                 timeZone: TimeZone = .current,
+                 tab: AppTab? = nil) async -> Bool {
+        guard shouldRefresh(reason: reason, now: now) else { return false }
+
+        if let tab {
+            TabPerformanceProbe.refreshStarted(tab)
+        }
+        defer {
+            if let tab {
+                TabPerformanceProbe.refreshEnded(tab)
+            }
+        }
+
+        #if DEBUG
+        let refreshStart = Date()
+        defer {
+            NSLog("[Perf] FoodMirror refresh %.2fms",
+                  Date().timeIntervalSince(refreshStart) * 1000)
+        }
+        #endif
+
         refreshToken &+= 1
         let myToken = refreshToken
         let previousState = state
@@ -180,7 +205,7 @@ final class FoodMirrorViewModel: ObservableObject {
                     state = previousState
                     isRefreshing = false
                 }
-                return
+                return true
             }
 
             // Slice the previous 7 days from the 30-day pull. No
@@ -233,7 +258,7 @@ final class FoodMirrorViewModel: ObservableObject {
                 lastValueRepeatKey: lastValueRevelationKey
             )
 
-            guard myToken == refreshToken else { return }
+            guard myToken == refreshToken else { return true }
 
             if summary.hasEnoughData {
                 state = .loaded(summary)
@@ -260,21 +285,25 @@ final class FoodMirrorViewModel: ObservableObject {
             lastValueRevelationKey = revs.valueRepeatKey
             isRefreshing = false
             lastUpdatedAt = now
+            lastSuccessfulRefreshAt = now
+            isDirty = false
             refreshErrorMessage = nil
+            return true
         } catch is CancellationError {
             if myToken == refreshToken {
                 state = previousState
                 isRefreshing = false
             }
+            return true
         } catch {
             if Task.isCancelled {
                 if myToken == refreshToken {
                     state = previousState
                     isRefreshing = false
                 }
-                return
+                return true
             }
-            guard myToken == refreshToken else { return }
+            guard myToken == refreshToken else { return true }
             isRefreshing = false
             if hadContent {
                 // Keep the previously-loaded surface visible. The
@@ -286,7 +315,12 @@ final class FoodMirrorViewModel: ObservableObject {
                 refreshErrorMessage = nil
                 state = .failed(error.localizedDescription)
             }
+            return true
         }
+    }
+
+    func markDirty() {
+        isDirty = true
     }
 
     /// Coalesce bursts of `.foodLogDidChange` notifications into a
@@ -299,6 +333,7 @@ final class FoodMirrorViewModel: ObservableObject {
     /// Pull-to-refresh and the initial `.task` load skip this path
     /// and call `refresh()` directly.
     func scheduleDebouncedRefresh(
+        reason: RefreshReason = .foodLogChanged,
         delay: Duration = .milliseconds(300)
     ) {
         debounceTask?.cancel()
@@ -309,7 +344,7 @@ final class FoodMirrorViewModel: ObservableObject {
                 return
             }
             guard !Task.isCancelled else { return }
-            await self?.refresh()
+            await self?.refresh(reason: reason, tab: .mirror)
         }
     }
 
@@ -319,6 +354,14 @@ final class FoodMirrorViewModel: ObservableObject {
     func cancelPendingRefresh() {
         debounceTask?.cancel()
         debounceTask = nil
+    }
+
+    private func shouldRefresh(reason: RefreshReason, now: Date) -> Bool {
+        if reason.isUserInitiated || reason == .foodLogChanged || isDirty {
+            return true
+        }
+        guard let lastSuccessfulRefreshAt else { return true }
+        return now.timeIntervalSince(lastSuccessfulRefreshAt) >= automaticRefreshFreshness
     }
 
     /// Record the user's reaction to the current FoodOS Moment.

@@ -29,9 +29,18 @@ import Supabase
 /// per-query `ilike` keeps v1 honest with no schema change.
 actor MealHistoryService {
     private let client: SupabaseClient
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     init(client: SupabaseClient = FoodieClient.shared) {
         self.client = client
+    }
+
+    static func queryDateString(_ date: Date) -> String {
+        iso8601Formatter.string(from: date)
     }
 
     // MARK: - Repeat detection
@@ -91,13 +100,10 @@ actor MealHistoryService {
         let cutoff = Calendar.current.date(
             byAdding: .day, value: -30, to: Date()
         ) ?? Date()
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
         let logs: [FoodLog] = try await client
             .from("food_logs")
             .select()
-            .gte("eaten_at", value: f.string(from: cutoff))
+            .gte("eaten_at", value: Self.queryDateString(cutoff))
             .order("eaten_at", ascending: false)
             .execute()
             .value
@@ -138,13 +144,10 @@ actor MealHistoryService {
             return []
         }
 
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
         return try await client
             .from("food_logs")
             .select()
-            .gte("eaten_at", value: f.string(from: sevenDaysAgo))
+            .gte("eaten_at", value: Self.queryDateString(sevenDaysAgo))
             .order("eaten_at", ascending: false)
             .execute()
             .value
@@ -160,13 +163,10 @@ actor MealHistoryService {
         let cutoff = Calendar.current.date(
             byAdding: .day, value: -14, to: Date()
         ) ?? Date()
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
         return try await client
             .from("food_logs")
             .select()
-            .gte("eaten_at", value: f.string(from: cutoff))
+            .gte("eaten_at", value: Self.queryDateString(cutoff))
             .order("eaten_at", ascending: false)
             .limit(14)
             .execute()
@@ -199,13 +199,10 @@ actor MealHistoryService {
         let cutoff = Calendar.current.date(
             byAdding: .day, value: -30, to: Date()
         ) ?? Date()
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
         var query = client
             .from("food_logs")
             .select()
-            .gte("eaten_at", value: f.string(from: cutoff))
+            .gte("eaten_at", value: Self.queryDateString(cutoff))
             .not("mood", operator: .is, value: "null")
 
         if let filter {
@@ -240,13 +237,10 @@ actor MealHistoryService {
         guard let cutoff = cal.date(byAdding: .day, value: -14, to: now) else {
             return []
         }
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
         let logs: [FoodLog] = try await client
             .from("food_logs")
             .select()
-            .gte("eaten_at", value: f.string(from: cutoff))
+            .gte("eaten_at", value: Self.queryDateString(cutoff))
             .order("eaten_at", ascending: false)
             .execute()
             .value
@@ -260,14 +254,11 @@ actor MealHistoryService {
     /// week-level dominant repetition rather than the trailing-14-day
     /// one. Range is half-open `[from, to)` matching `FoodLogService.logs`.
     func patternsForRange(from: Date, to: Date) async throws -> [Pattern] {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
         let logs: [FoodLog] = try await client
             .from("food_logs")
             .select()
-            .gte("eaten_at", value: f.string(from: from))
-            .lt ("eaten_at", value: f.string(from: to))
+            .gte("eaten_at", value: Self.queryDateString(from))
+            .lt ("eaten_at", value: Self.queryDateString(to))
             .order("eaten_at", ascending: false)
             .execute()
             .value

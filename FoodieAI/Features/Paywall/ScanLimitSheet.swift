@@ -32,7 +32,7 @@ struct ScanLimitSheet: View {
                 .foregroundStyle(Color.brandDeep)
                 .padding(.bottom, 4)
 
-            Text("You've used today's \(info.limit) photo scans.")
+            Text(headlineCopy)
                 .appFont(.display2)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(Color.ink)
@@ -44,26 +44,37 @@ struct ScanLimitSheet: View {
                 .foregroundStyle(Color.inkMute)
                 .padding(.horizontal, AppSpacing.lg)
 
+            // Pro users already pay — don't ask them to upgrade. They
+            // get manual logging as the single primary action; free
+            // users get upgrade above the manual fallback.
             VStack(spacing: AppSpacing.md) {
-                PrimaryButton(title: "Upgrade to Pro",
-                              leadingSystemImage: "sparkles") {
-                    onUpgrade()
+                if isPro {
+                    PrimaryButton(title: "Log this meal manually",
+                                  leadingSystemImage: "square.and.pencil") {
+                        Haptics.tap()
+                        onManualLog()
+                    }
+                } else {
+                    PrimaryButton(title: "Upgrade to Pro",
+                                  leadingSystemImage: "sparkles") {
+                        onUpgrade()
+                    }
+                    Button {
+                        Haptics.tap()
+                        onManualLog()
+                    } label: {
+                        Text("Log this meal manually")
+                            .appFont(.title2)
+                            .foregroundStyle(Color.ink)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 60)
+                            .background(
+                                Capsule()
+                                    .stroke(Color.ink, lineWidth: 1.5)
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
-                Button {
-                    Haptics.tap()
-                    onManualLog()
-                } label: {
-                    Text("Log this meal manually")
-                        .appFont(.title2)
-                        .foregroundStyle(Color.ink)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 60)
-                        .background(
-                            Capsule()
-                                .stroke(Color.ink, lineWidth: 1.5)
-                        )
-                }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.top, AppSpacing.sm)
@@ -90,6 +101,14 @@ struct ScanLimitSheet: View {
         }
     }
 
+    private var isPro: Bool { info.tier == "pro" }
+
+    private var headlineCopy: String {
+        isPro
+            ? "That's all \(info.limit) scans for today."
+            : "You've used today's \(info.limit) photo scans."
+    }
+
     private var resetsCopy: String {
         if let when = info.resetsAt {
             let f = DateFormatter()
@@ -105,6 +124,16 @@ struct ScanLimitSheet: View {
 #Preview("ScanLimitSheet — free") {
     ScanLimitSheet(
         info: ScanLimitInfo(limit: 2, tier: "free",
+                            resetsAt: Calendar.current.startOfDay(for: Date().addingTimeInterval(86400))),
+        onUpgrade: {},
+        onManualLog: {},
+        onDismiss: {}
+    )
+}
+
+#Preview("ScanLimitSheet — pro") {
+    ScanLimitSheet(
+        info: ScanLimitInfo(limit: 10, tier: "pro",
                             resetsAt: Calendar.current.startOfDay(for: Date().addingTimeInterval(86400))),
         onUpgrade: {},
         onManualLog: {},

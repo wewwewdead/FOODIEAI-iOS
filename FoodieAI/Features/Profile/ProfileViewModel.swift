@@ -35,7 +35,15 @@ final class ProfileViewModel: ObservableObject {
     /// screens (Tracker) re-render with the new daily goals on save.
     @Published private(set) var lastResolvedProfile: Profile?
 
+    /// Total food_logs count for the signed-in user. Loaded lazily
+    /// alongside the profile so the Pro lifetime line ("142 meals
+    /// snapped with Pro") has data when it renders. `nil` until the
+    /// first fetch resolves; failures keep it `nil` and the line just
+    /// stays hidden — the count is decorative, not load-bearing.
+    @Published private(set) var lifetimeScans: Int?
+
     private let profileService: ProfileService
+    private let foodLogService: FoodLogService
     private let auth: AuthService
     private var cancellables = Set<AnyCancellable>()
 
@@ -50,8 +58,10 @@ final class ProfileViewModel: ObservableObject {
     private var isLoadingProfile = false
 
     init(profileService: ProfileService = ProfileService(),
+         foodLogService: FoodLogService = FoodLogService(),
          auth: AuthService) {
         self.profileService = profileService
+        self.foodLogService = foodLogService
         self.auth = auth
         bindUnsavedChangeTracking()
     }
@@ -74,6 +84,10 @@ final class ProfileViewModel: ObservableObject {
         await load()
     }
 
+    var needsInitialLoad: Bool {
+        !hasLoadedSuccessfully
+    }
+
     func load() async {
         guard !isLoadingProfile else { return }
         isLoadingProfile = true
@@ -88,6 +102,11 @@ final class ProfileViewModel: ObservableObject {
             state = .loaded(profile)
             lastResolvedProfile = profile
             hasLoadedSuccessfully = true
+            // Fire-and-forget. Lifetime count is decorative; if the
+            // request fails or is cancelled the line just doesn't
+            // render, which is the right behavior for a count that
+            // exists purely to make the subscription feel earned.
+            Task { [weak self] in await self?.refreshLifetimeScans() }
         } catch is CancellationError {
             // SwiftUI cancelled `.task` (tab switch, view teardown).
             // Leave state alone so we don't paint a failed banner over
@@ -132,6 +151,20 @@ final class ProfileViewModel: ObservableObject {
         } catch {
             saveError = error
             Haptics.error()
+        }
+    }
+
+    /// Pulls the current lifetime food_log count. Safe to call multiple
+    /// times — overwrites with the latest value, no de-dupe needed
+    /// since the request is cheap (HEAD + Content-Range).
+    func refreshLifetimeScans() async {
+        do {
+            let count = try await foodLogService.lifetimeCount()
+            lifetimeScans = count
+        } catch is CancellationError {
+            return
+        } catch {
+            // Swallowed by design — the line just doesn't render.
         }
     }
 

@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import FoodieAI
 
 final class FoodieAITests: XCTestCase {
@@ -9,6 +10,59 @@ final class FoodieAITests: XCTestCase {
             timeZone: tz
         )
         XCTAssertEqual(end.timeIntervalSince(start), 24 * 60 * 60, accuracy: 1)
+    }
+}
+
+final class PersistentTabLoadStateTests: XCTestCase {
+    func testLoadedTabsStartsWithHomeOnly() {
+        let state = PersistentTabLoadState()
+
+        XCTAssertEqual(state.loadedTabs, [.home])
+        XCTAssertTrue(state.isLoaded(.home))
+        XCTAssertFalse(state.isLoaded(.tracker))
+        XCTAssertFalse(state.isLoaded(.mirror))
+        XCTAssertFalse(state.isLoaded(.profile))
+    }
+
+    func testSelectingTabMarksItLoaded() {
+        var state = PersistentTabLoadState()
+
+        state.markLoaded(.tracker)
+
+        XCTAssertTrue(state.isLoaded(.home))
+        XCTAssertTrue(state.isLoaded(.tracker))
+        XCTAssertFalse(state.isLoaded(.mirror))
+        XCTAssertFalse(state.isLoaded(.profile))
+    }
+
+    func testLoadedTabRemainsLoadedAfterSwitchingAway() {
+        var state = PersistentTabLoadState()
+
+        state.markLoaded(.mirror)
+        state.markLoaded(.home)
+
+        XCTAssertTrue(state.isLoaded(.home))
+        XCTAssertTrue(state.isLoaded(.mirror))
+    }
+}
+
+@MainActor
+final class CaptureViewModelTests: XCTestCase {
+    func testDiscardCurrentRemovesPickedPhoto() {
+        let vm = CaptureViewModel()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8))
+            .image { context in
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+            }
+
+        vm.setPhoto(image)
+        XCTAssertNotNil(vm.state.image)
+
+        vm.discardCurrent()
+
+        XCTAssertTrue(vm.state.isIdle)
+        XCTAssertNil(vm.state.image)
     }
 }
 
@@ -2310,12 +2364,12 @@ final class FoodMirrorViewModelTests: XCTestCase {
         )
         let vm = FoodMirrorViewModel(foodLogs: stub)
 
-        async let first: Void = vm.refresh()
+        async let first = vm.refresh()
         // Let refresh #1 begin its sleep so refresh #2 starts during
         // that window — otherwise the test would just be serializing
         // two back-to-back fetches.
         try? await Task.sleep(for: .milliseconds(40))
-        async let second: Void = vm.refresh()
+        async let second = vm.refresh()
         _ = await (first, second)
 
         guard case .loaded(let summary) = vm.state else {
@@ -2354,6 +2408,64 @@ final class FoodMirrorViewModelTests: XCTestCase {
 
         await vm.refresh(now: now.addingTimeInterval(60), timeZone: tz)
         XCTAssertNotEqual(vm.currentMoment?.kind, .revelation)
+    }
+
+    func test_automaticRefresh_skipsWhenFresh() async {
+        let now = Date(timeIntervalSince1970: 1_730_000_000)
+        let stub = StubFetcher()
+        stub.result = .success(Self.makeLogs(count: 12))
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        await vm.refresh(reason: .tabBecameActive, now: now)
+        XCTAssertEqual(stub.calls, 2)
+
+        await vm.refresh(reason: .tabBecameActive,
+                         now: now.addingTimeInterval(5))
+
+        XCTAssertEqual(stub.calls, 2,
+                       "Fresh automatic activation should not re-fetch")
+    }
+
+    func test_pullToRefresh_bypassesFreshnessGuard() async {
+        let now = Date(timeIntervalSince1970: 1_730_000_000)
+        let stub = StubFetcher()
+        stub.result = .success(Self.makeLogs(count: 12))
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        await vm.refresh(reason: .tabBecameActive, now: now)
+        await vm.refresh(reason: .pullToRefresh,
+                         now: now.addingTimeInterval(5))
+
+        XCTAssertEqual(stub.calls, 4,
+                       "Pull-to-refresh should issue a fresh 7-day + 30-day pair")
+    }
+
+    func test_dirtyMirrorRefreshesWhenTabBecomesActive() async {
+        let now = Date(timeIntervalSince1970: 1_730_000_000)
+        let stub = StubFetcher()
+        stub.result = .success(Self.makeLogs(count: 12))
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        await vm.refresh(reason: .tabBecameActive, now: now)
+        XCTAssertEqual(stub.calls, 2)
+
+        vm.markDirty()
+        await vm.refresh(reason: .tabBecameActive,
+                         now: now.addingTimeInterval(5))
+
+        XCTAssertEqual(stub.calls, 4,
+                       "Dirty inactive Mirror should refresh on next activation")
+    }
+
+    func test_markingInactiveMirrorDirtyDoesNotStartRefresh() async {
+        let stub = StubFetcher()
+        stub.result = .success(Self.makeLogs(count: 12))
+        let vm = FoodMirrorViewModel(foodLogs: stub)
+
+        vm.markDirty()
+
+        XCTAssertEqual(stub.calls, 0,
+                       "Marking an inactive tab dirty should not fetch until activation")
     }
 
     // MARK: helpers
@@ -2511,6 +2623,29 @@ final class FoodMirrorViewModelTests: XCTestCase {
 @MainActor
 final class HomeMirrorPreviewViewModelTests: XCTestCase {
 
+    final class CountingFetcher: FoodLogsFetching, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls = 0
+        var logs: [FoodLog] = FoodMirrorViewModelTests.makeLogs(count: 12)
+
+        var calls: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return _calls
+        }
+
+        func logs(from: Date, to: Date) async throws -> [FoodLog] {
+            incrementCalls()
+            return logs
+        }
+
+        private func incrementCalls() {
+            lock.lock()
+            _calls += 1
+            lock.unlock()
+        }
+    }
+
     /// First refresh succeeds → cardModel populated. Second refresh
     /// throws a real network error → cardModel must stay populated
     /// (Home should never flicker over a transient blip).
@@ -2547,6 +2682,109 @@ final class HomeMirrorPreviewViewModelTests: XCTestCase {
 
         XCTAssertEqual(vm.cardModel, snapshot,
                        "Cancellation must not blank the Home preview")
+    }
+
+    func test_homePreview_debouncedRefreshCoalescesMultipleScheduleCalls() async {
+        let stub = CountingFetcher()
+        let vm = HomeMirrorPreviewViewModel(foodLogs: stub)
+
+        vm.scheduleDebouncedRefresh(delay: .milliseconds(50))
+        vm.scheduleDebouncedRefresh(delay: .milliseconds(50))
+        vm.scheduleDebouncedRefresh(delay: .milliseconds(50))
+
+        try? await Task.sleep(for: .milliseconds(200))
+
+        XCTAssertEqual(stub.calls, 2,
+                       "One refresh should issue the 7-day and 30-day queries once each")
+        XCTAssertNotNil(vm.cardModel)
+    }
+
+    func test_homePreview_cancelPendingRefreshPreventsDebouncedRefresh() async {
+        let stub = CountingFetcher()
+        let vm = HomeMirrorPreviewViewModel(foodLogs: stub)
+
+        vm.scheduleDebouncedRefresh(delay: .milliseconds(150))
+        vm.cancelPendingRefresh()
+
+        try? await Task.sleep(for: .milliseconds(250))
+
+        XCTAssertEqual(stub.calls, 0)
+        XCTAssertNil(vm.cardModel)
+    }
+}
+
+// MARK: - FoodImageService cache pruning
+
+final class FoodImageServiceCacheTests: XCTestCase {
+    func test_signedURLCachePruningRemovesExpiredEntries() async {
+        let service = FoodImageService()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        await service.seedSignedURLCacheForTesting([
+            "expired": (
+                URL(string: "https://example.com/expired")!,
+                now.addingTimeInterval(-1)
+            ),
+            "fresh": (
+                URL(string: "https://example.com/fresh")!,
+                now.addingTimeInterval(600)
+            )
+        ])
+
+        await service.pruneSignedURLCacheForTesting(now: now)
+
+        let keys = await service.signedURLCacheKeysForTesting()
+        XCTAssertFalse(keys.contains("expired"))
+        XCTAssertTrue(keys.contains("fresh"))
+    }
+
+    func test_signedURLCachePruningEnforcesMaximumSize() async {
+        let service = FoodImageService()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        var entries: [String: (url: URL, expiresAt: Date)] = [:]
+        for index in 0..<305 {
+            entries["path-\(index)"] = (
+                URL(string: "https://example.com/\(index)")!,
+                now.addingTimeInterval(1_000 + TimeInterval(index))
+            )
+        }
+        await service.seedSignedURLCacheForTesting(entries)
+
+        await service.pruneSignedURLCacheForTesting(now: now)
+
+        let keys = await service.signedURLCacheKeysForTesting()
+        let count = await service.signedURLCacheCountForTesting()
+        XCTAssertLessThanOrEqual(count, 300)
+        XCTAssertFalse(keys.contains("path-0"),
+                       "Earliest-expiring entries should be evicted first")
+        XCTAssertTrue(keys.contains("path-304"))
+    }
+}
+
+// MARK: - Cached date formatter compatibility
+
+final class CachedDateFormatterTests: XCTestCase {
+    func test_analyzeServiceLocalDateStringUsesYYYYMMDD() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        let date = cal.date(from: DateComponents(
+            timeZone: .current,
+            year: 2026,
+            month: 5,
+            day: 24,
+            hour: 12,
+            minute: 0
+        ))!
+
+        XCTAssertEqual(AnalyzeService.localDateString(now: date), "2026-05-24")
+    }
+
+    func test_mealHistoryQueryDateStringMatchesExistingISO8601Format() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000.123)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        XCTAssertEqual(MealHistoryService.queryDateString(date),
+                       formatter.string(from: date))
     }
 }
 

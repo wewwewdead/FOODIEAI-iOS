@@ -10,6 +10,8 @@ import SwiftUI
 /// have tactile press states; sections cascade in with a staggered
 /// spring on first paint.
 struct ProfileView: View {
+    let isActive: Bool
+
     @EnvironmentObject private var auth: AuthService
     /// Optional because the Phase 7 verification probes
     /// (LAUNCH_PROFILE_DIRECT, LAUNCH_PROFILE_UPDATE_PROBE) instantiate
@@ -26,9 +28,11 @@ struct ProfileView: View {
     /// Phase 22 — comparison/upsell sheet entry from the PLAN section.
     @State private var showingSubscriptionInfo = false
     @State private var hasAppeared = false
+    @State private var automaticLoadTask: Task<Void, Never>? = nil
     @FocusState private var nameFieldFocused: Bool
 
-    init() {
+    init(isActive: Bool = true) {
+        self.isActive = isActive
         // We can't read @EnvironmentObject during init; ProfileViewModel
         // takes the AuthService reference here for sign-out delegation.
         _viewModel = StateObject(wrappedValue: ProfileViewModel(auth: AuthService()))
@@ -47,7 +51,16 @@ struct ProfileView: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .task {
-            await viewModel.loadIfNeeded()
+            guard isActive else { return }
+            scheduleAutomaticLoad(reason: .initialAppear)
+        }
+        .onChange(of: isActive) { _, active in
+            if active {
+                scheduleAutomaticLoad(reason: .tabBecameActive)
+            } else {
+                automaticLoadTask?.cancel()
+                automaticLoadTask = nil
+            }
         }
         .onChange(of: viewModel.lastResolvedProfile) { _, newProfile in
             // Broadcast every successful load/save into the shared store
@@ -92,10 +105,10 @@ struct ProfileView: View {
     private var profileBackground: some View {
         Color.bgCanvas
             .overlay {
-                AuroraWash(intensity: 0.30).ignoresSafeArea()
+                AuroraWash(intensity: 0.30, isActive: isActive).ignoresSafeArea()
             }
             .overlay(alignment: .top) {
-                AmbientFloater(intensity: 0.40)
+                AmbientFloater(intensity: 0.40, isActive: isActive)
                     .frame(height: 460)
                     .allowsHitTesting(false)
             }
@@ -129,6 +142,20 @@ struct ProfileView: View {
             }
             .clipped()
             .allowsHitTesting(false)
+    }
+
+    private func scheduleAutomaticLoad(reason: RefreshReason) {
+        automaticLoadTask?.cancel()
+        automaticLoadTask = Task { @MainActor in
+            TabPerformanceProbe.appeared(.profile)
+            await Task.yield()
+            guard !Task.isCancelled, isActive else { return }
+            TabPerformanceProbe.firstFrameYielded(.profile)
+            guard viewModel.needsInitialLoad else { return }
+            TabPerformanceProbe.refreshStarted(.profile)
+            await viewModel.loadIfNeeded()
+            TabPerformanceProbe.refreshEnded(.profile)
+        }
     }
 
     @ViewBuilder
@@ -314,6 +341,10 @@ struct ProfileView: View {
                 .foregroundStyle(Color.brandDeep)
         }
         .frame(width: 68, height: 68)
+        // Pro-only halo: rotating gold ring sits just outside the
+        // avatar so paying users get an instant "this is my premium
+        // account" cue every time they open Profile. No-op for free.
+        .proAvatarRing(active: subscriptions.tier == .pro, lineWidth: 2.5, inset: -4)
         .appShadow(.shadowFloating)
         .scaleEffect(hasAppeared ? 1.0 : 0.55)
         .rotationEffect(.degrees(hasAppeared ? 0 : -12))
@@ -397,7 +428,43 @@ struct ProfileView: View {
             case .free:  freeUpgradeRow
             case .pro:   proManageRow
             }
+
+            // Pro-only "lifetime scans" line. Sits under the manage
+            // row as a quiet receipt of accumulated value — no chart,
+            // no comparison, just the count + a tiny gold camera so
+            // the Pro user feels their subscription compounding. The
+            // line stays hidden until the count loads, and stays
+            // hidden forever if the count fetch fails.
+            if subscriptions.tier == .pro,
+               let count = viewModel.lifetimeScans, count > 0 {
+                lifetimeScansLine(count: count)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
+        .animation(.easeOut(duration: 0.25), value: viewModel.lifetimeScans)
+    }
+
+    private func lifetimeScansLine(count: Int) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "camera.fill")
+                .font(.system(size: 11, weight: .heavy))
+                .foregroundStyle(ProGold.deep)
+            (
+                Text("\(count) ").appFont(.captionStrong)
+                + Text(count == 1 ? "meal snapped with Pro"
+                                  : "meals snapped with Pro").appFont(.caption)
+            )
+            .foregroundStyle(Color.inkMute)
+            .monospacedDigit()
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, AppSpacing.xs)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            count == 1
+                ? "1 meal snapped with Pro"
+                : "\(count) meals snapped with Pro"
+        )
     }
 
     private var planUsageLabel: String {

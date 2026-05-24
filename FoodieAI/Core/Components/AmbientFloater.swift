@@ -85,7 +85,13 @@ struct AmbientFloater: View {
                 // start a fresh loop from the frozen phase.
             }
         }
-        .onChange(of: isActive) { _, _ in startDriftIfNeeded() }
+        .onChange(of: isActive) { _, active in
+            if active {
+                startDriftIfNeeded()
+            } else {
+                stopDrift()
+            }
+        }
     }
 
     private func startDriftIfNeeded() {
@@ -96,6 +102,14 @@ struct AmbientFloater: View {
         // value tween that drives cheap offset math in body).
         withAnimation(.linear(duration: 30).repeatForever(autoreverses: false)) {
             driftPhase = 1
+        }
+    }
+
+    private func stopDrift() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            driftPhase = 0
         }
     }
 

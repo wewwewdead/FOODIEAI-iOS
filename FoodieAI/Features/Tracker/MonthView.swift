@@ -5,7 +5,10 @@ import SwiftUI
 /// logged days are tinted brand and today's cell is outlined.
 struct MonthView: View {
     @ObservedObject var viewModel: MonthViewModel
+    let isActive: Bool
     @State private var selectedBucket: DailyBucket?
+    @State private var automaticRefreshTask: Task<Void, Never>? = nil
+    @State private var lastAutomaticRefreshAt: Date? = nil
 
     private let calendar: Calendar = {
         var c = Calendar.current
@@ -23,11 +26,41 @@ struct MonthView: View {
             .padding(.bottom, AppSpacing.xl3)
         }
         .refreshable { await viewModel.refresh() }
-        .task { await viewModel.refresh() }
+        .task {
+            guard isActive else { return }
+            scheduleAutomaticRefresh()
+        }
+        .onChange(of: isActive) { _, active in
+            if active {
+                scheduleAutomaticRefresh()
+            } else {
+                automaticRefreshTask?.cancel()
+                automaticRefreshTask = nil
+            }
+        }
         .sheet(item: $selectedBucket) { bucket in
             DayDetailSheet(bucket: bucket, onDeleted: {
                 Task { await viewModel.refresh() }
             })
+        }
+    }
+
+    private func scheduleAutomaticRefresh() {
+        automaticRefreshTask?.cancel()
+        automaticRefreshTask = Task { @MainActor in
+            TabPerformanceProbe.appeared(.tracker)
+            await Task.yield()
+            guard !Task.isCancelled, isActive else { return }
+            TabPerformanceProbe.firstFrameYielded(.tracker)
+            let now = Date()
+            if let lastAutomaticRefreshAt,
+               now.timeIntervalSince(lastAutomaticRefreshAt) < 25 {
+                return
+            }
+            lastAutomaticRefreshAt = now
+            TabPerformanceProbe.refreshStarted(.tracker)
+            await viewModel.refresh()
+            TabPerformanceProbe.refreshEnded(.tracker)
         }
     }
 

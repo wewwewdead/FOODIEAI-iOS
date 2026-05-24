@@ -2,12 +2,10 @@ import SwiftUI
 
 /// Premium-polish wave: custom floating glass tab bar.
 ///
-/// Overlays a hidden system `TabView` (we keep TabView for its lifecycle,
-/// state restoration, and tap-to-pop-to-root behavior — but hide the
-/// system chrome and present this floating capsule on top). Selection
-/// stays bound to the same Int the existing `MainTabView` already uses,
-/// so all routing (NotificationRouter, deep-links, programmatic switches)
-/// continues to work unchanged.
+/// Overlays MainTabView's persistent tab content host. Selection stays
+/// bound to the same Int the app already uses, so routing
+/// (NotificationRouter, deep-links, programmatic switches) continues to
+/// work unchanged.
 ///
 /// Design:
 ///   - 64pt capsule that floats 16pt above the bottom safe area
@@ -21,8 +19,10 @@ import SwiftUI
 struct FloatingTabBar: View {
     @Binding var selection: Int
     let tabs: [TabSpec]
+    var onTabTap: ((Int, Int) -> Void)? = nil
 
     @Namespace private var indicator
+    @State private var indicatorSelection: Int = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -31,40 +31,45 @@ struct FloatingTabBar: View {
                 TabButton(
                     spec: spec,
                     isSelected: selection == index,
+                    showsIndicator: indicatorSelection == index,
                     namespace: indicator,
                     reduceMotion: reduceMotion,
                     onTap: {
                         guard selection != index else {
                             // Tap on already-selected tab → soft haptic
-                            // only (the system "pop to root" behavior is
-                            // owned by the underlying TabView).
+                            // only.
                             Haptics.soft()
                             return
                         }
+                        onTabTap?(selection, index)
                         Haptics.tap()
                         // CRITICAL perf fix: do NOT wrap this in
                         // `withAnimation`. A withAnimation here would
                         // propagate the spring curve through the
-                        // `$selection` binding into TabView's content
-                        // swap, causing the entire destination tab's
-                        // body to ride the spring (sticky transition).
-                        // The matchedGeometryEffect on the indicator
-                        // capsule gets its animation from the
-                        // `.animation(.spring..., value: selection)`
-                        // applied to this HStack below — scoped to
-                        // just the indicator, never to tab content.
+                        // `$selection` binding into the root content
+                        // host. The indicator animation is driven by
+                        // private `indicatorSelection` state below.
                         selection = index
                     }
                 )
             }
         }
-        // Scopes the spring to the HStack only — the matchedGeometryEffect
-        // indicator capsule animates, but the parent TabView's tab swap
-        // happens instantly (no spring propagation through the binding).
-        .animation(
-            reduceMotion ? .appReduced : .spring(response: 0.42, dampingFraction: 0.78),
-            value: selection
-        )
+        .onAppear {
+            indicatorSelection = selection
+        }
+        .onChange(of: selection) { _, newValue in
+            if reduceMotion {
+                indicatorSelection = newValue
+            } else {
+                // Keep the pill motion local to the tab bar. The parent
+                // content host sees a plain selection mutation, while
+                // this internal state drives the matchedGeometryEffect
+                // spring.
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    indicatorSelection = newValue
+                }
+            }
+        }
         .padding(6)
         .liquidGlass(in: Capsule(), tint: .brand, strokeOpacity: 0.22)
         // One combined shadow instead of two — each .shadow() forces
@@ -95,6 +100,7 @@ struct FloatingTabBar: View {
     private struct TabButton: View {
         let spec: TabSpec
         let isSelected: Bool
+        let showsIndicator: Bool
         let namespace: Namespace.ID
         let reduceMotion: Bool
         let onTap: () -> Void
@@ -112,27 +118,30 @@ struct FloatingTabBar: View {
                 onTap()
             }) {
                 ZStack {
-                    if isSelected {
+                    if showsIndicator {
                         Capsule()
                             .fill(Color.brand)
                             .matchedGeometryEffect(id: "tabIndicator", in: namespace)
                             .shadow(color: Color.brand.opacity(0.42), radius: 10, x: 0, y: 4)
                     }
+                    Image(systemName: resolvedSymbol)
+                        .font(.system(size: 15, weight: .heavy))
+                        .symbolRenderingMode(.hierarchical)
+                        .scaleEffect(pressStamp ? 1.18 : 1.0)
+                        .foregroundStyle(Color.inkLight)
+                        .opacity(isSelected ? 0 : 1)
+
                     HStack(spacing: 6) {
                         Image(systemName: resolvedSymbol)
                             .font(.system(size: 15, weight: .heavy))
                             .symbolRenderingMode(.hierarchical)
                             .scaleEffect(pressStamp ? 1.18 : 1.0)
-                        if isSelected {
-                            Text(spec.title)
-                                .appFont(.captionStrong)
-                                .lineLimit(1)
-                                .transition(.scale.combined(with: .opacity))
-                        }
+                        Text(spec.title)
+                            .appFont(.captionStrong)
+                            .lineLimit(1)
                     }
-                    .foregroundStyle(isSelected ? Color.brandDeep : Color.inkLight)
-                    .padding(.horizontal, isSelected ? 16 : 12)
-                    .padding(.vertical, 10)
+                    .foregroundStyle(Color.brandDeep)
+                    .opacity(isSelected ? 1 : 0)
                 }
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)

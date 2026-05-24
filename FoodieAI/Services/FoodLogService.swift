@@ -109,6 +109,18 @@ actor FoodLogService {
             .value
     }
 
+    /// Lifetime count of the signed-in user's `food_logs`. Uses
+    /// PostgREST's HEAD + exact count so no rows transfer — only the
+    /// `Content-Range` header is consumed. RLS scopes the count to
+    /// the current user. Returns 0 if the server omits the count.
+    func lifetimeCount() async throws -> Int {
+        let response = try await client
+            .from("food_logs")
+            .select("id", head: true, count: .exact)
+            .execute()
+        return response.count ?? 0
+    }
+
     func delete(_ id: UUID) async throws {
         try await client
             .from("food_logs")

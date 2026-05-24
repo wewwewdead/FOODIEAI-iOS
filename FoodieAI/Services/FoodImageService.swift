@@ -13,6 +13,7 @@ actor FoodImageService {
     private var signedURLCache: [String: (url: URL, expiresAt: Date)] = [:]
     private let signedURLTTL: TimeInterval    = 60 * 60
     private let signedURLBuffer: TimeInterval = 60
+    private let signedURLCacheLimit = 300
 
     init(client: SupabaseClient = FoodieClient.shared) {
         self.client = client
@@ -136,9 +137,46 @@ actor FoodImageService {
         NSLog("[FoodImage] cachedSignedURL MISS %@", path)
         #endif
         let url = try await signedUrl(for: path, expiresIn: Int(signedURLTTL))
+        pruneSignedURLCache(now: now)
         signedURLCache[path] = (url, now.addingTimeInterval(signedURLTTL))
         return url
     }
+
+    private func pruneSignedURLCache(now: Date) {
+        let minimumUsableExpiry = now.addingTimeInterval(signedURLBuffer)
+        signedURLCache = signedURLCache.filter { _, entry in
+            entry.expiresAt > minimumUsableExpiry
+        }
+
+        guard signedURLCache.count >= signedURLCacheLimit else { return }
+
+        let entriesToRemove = signedURLCache.count - signedURLCacheLimit + 1
+        let oldestKeys = signedURLCache
+            .sorted { lhs, rhs in lhs.value.expiresAt < rhs.value.expiresAt }
+            .prefix(entriesToRemove)
+            .map(\.key)
+        for key in oldestKeys {
+            signedURLCache.removeValue(forKey: key)
+        }
+    }
+
+    #if DEBUG
+    func seedSignedURLCacheForTesting(_ entries: [String: (url: URL, expiresAt: Date)]) {
+        signedURLCache = entries
+    }
+
+    func pruneSignedURLCacheForTesting(now: Date) {
+        pruneSignedURLCache(now: now)
+    }
+
+    func signedURLCacheKeysForTesting() -> Set<String> {
+        Set(signedURLCache.keys)
+    }
+
+    func signedURLCacheCountForTesting() -> Int {
+        signedURLCache.count
+    }
+    #endif
 }
 
 /// Phase 12: result of `uploadMealImages` — the two storage paths to write

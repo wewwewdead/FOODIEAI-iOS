@@ -41,6 +41,13 @@ final class SubscriptionManager: ObservableObject {
     // MARK: - Published state
 
     @Published private(set) var tier: Tier = .free
+    // Optimistic fallback used only before the server's
+    // `subscription/status` round-trip lands (and when offline). The
+    // authoritative cap comes from `apply(statusBody:)` /
+    // `applyServerLimitReached(...)`. Set to 4 to match the server's
+    // FREE_FIRST_WEEK_LIMIT — new users (when first-impression matters
+    // most) see the correct generous cap immediately; day-8+ users see
+    // 4 for one round-trip before sync corrects to 2.
     @Published private(set) var dailyLimit: Int = 4
     @Published private(set) var scansUsedToday: Int = 0
     @Published private(set) var resetsAt: Date?

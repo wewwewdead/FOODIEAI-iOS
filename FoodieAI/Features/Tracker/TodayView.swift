@@ -21,6 +21,7 @@ import SwiftUI
 /// preserved verbatim.
 struct TodayView: View {
     @ObservedObject var viewModel: TrackerViewModel
+    let isActive: Bool
     /// Daily goals come from the shared ProfileStore — owned by
     /// MainTabView so Profile edits propagate here without a manual
     /// refresh. Calorie/carb/sugar are user-editable (persisted in
@@ -48,12 +49,7 @@ struct TodayView: View {
     /// recomputes visibility from the current totals + time, so a
     /// genuine refresh re-surfaces the card if conditions still hold.
     @State private var underCalorieReminderDismissed: Bool = false
-    /// Perf: prevents `.task` from re-firing `viewModel.refresh()`
-    /// on every tab return. The view model already holds today's
-    /// state in memory between tab switches; only the first appear
-    /// needs the network round-trip. Pull-to-refresh and observed
-    /// `.foodLogDidChange` notifications still trigger fresh fetches.
-    @State private var hasLoadedOnce: Bool = false
+    @State private var automaticRefreshTask: Task<Void, Never>? = nil
 
     var body: some View {
         ScrollView {
@@ -78,9 +74,9 @@ struct TodayView: View {
             // scrolls; content slides over it for a parallax-lite feel.
             ZStack {
                 Color.bgCanvas
-                AuroraWash(intensity: 0.32)
+                AuroraWash(intensity: 0.32, isActive: isActive)
                 VStack {
-                    AmbientFloater(intensity: 0.35)
+                    AmbientFloater(intensity: 0.35, isActive: isActive)
                         .frame(height: 480)
                     Spacer(minLength: 0)
                 }
@@ -92,16 +88,19 @@ struct TodayView: View {
             // who pulled the screen down genuinely *wants* to see the
             // current end-of-day state, not yesterday's dismissal.
             underCalorieReminderDismissed = false
-            await viewModel.refresh()
+            await viewModel.refresh(reason: .pullToRefresh, tab: .tracker)
         }
         .task {
-            // Perf: only refresh on the first tab visit. Subsequent
-            // returns to the Tracker tab reuse the in-memory state;
-            // pull-to-refresh re-arms a real network call. This was
-            // a major contributor to laggy tab switches into Tracker.
-            guard !hasLoadedOnce else { return }
-            hasLoadedOnce = true
-            await viewModel.refresh()
+            guard isActive else { return }
+            scheduleAutomaticRefresh(reason: .initialAppear)
+        }
+        .onChange(of: isActive) { _, active in
+            if active {
+                scheduleAutomaticRefresh(reason: .tabBecameActive)
+            } else {
+                automaticRefreshTask?.cancel()
+                automaticRefreshTask = nil
+            }
         }
         .onChange(of: notifRouter.requestedRecap) { _, requested in
             // Phase 17 — react to a recap notification tap by opening
@@ -109,7 +108,7 @@ struct TodayView: View {
             guard requested else { return }
             // Refresh first to make sure `latestRecap` is loaded.
             Task {
-                await viewModel.refresh()
+                await viewModel.refresh(reason: .retry, tab: .tracker)
                 await MainActor.run {
                     if viewModel.latestRecap != nil {
                         showingRecap = true
@@ -131,6 +130,17 @@ struct TodayView: View {
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
             }
+        }
+    }
+
+    private func scheduleAutomaticRefresh(reason: RefreshReason) {
+        automaticRefreshTask?.cancel()
+        automaticRefreshTask = Task { @MainActor in
+            TabPerformanceProbe.appeared(.tracker)
+            await Task.yield()
+            guard !Task.isCancelled, isActive else { return }
+            TabPerformanceProbe.firstFrameYielded(.tracker)
+            await viewModel.refresh(reason: reason, tab: .tracker)
         }
     }
 

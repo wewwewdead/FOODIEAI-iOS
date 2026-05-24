@@ -26,11 +26,17 @@ final class OnboardingViewModel: ObservableObject {
         case physiology    = 3
         case coaches       = 4
         case notifications = 5
-        case completing    = 6
+        /// Phase 22 — informational comparison of Free vs Pro. Always
+        /// rendered; both CTAs advance to `.completing` so onboarding
+        /// is never blocked by a purchase decision. Tapping "Try Pro"
+        /// presents the existing `PaywallView` sheet; the user can
+        /// buy or dismiss either way and we still proceed.
+        case subscription  = 6
+        case completing    = 7
         /// Sentinel that tells `OnboardingFlow` it should yield — the
         /// gate values are persisted; RootView will route to MainTabView
         /// on its next render.
-        case finished      = 7
+        case finished      = 8
     }
 
     @Published var step: Step {
@@ -91,7 +97,8 @@ final class OnboardingViewModel: ObservableObject {
         case .archetype:      step = .physiology
         case .physiology:     step = .coaches
         case .coaches:        step = .notifications
-        case .notifications:  step = .completing
+        case .notifications:  step = .subscription
+        case .subscription:   step = .completing
         case .completing:     step = .finished
         case .finished:       break
         }
@@ -104,6 +111,7 @@ final class OnboardingViewModel: ObservableObject {
         case .physiology:     step = .archetype
         case .coaches:        step = .physiology
         case .notifications:  step = .coaches
+        case .subscription:   step = .notifications
         }
     }
 

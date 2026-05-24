@@ -64,7 +64,13 @@ struct AuroraWash: View {
             startRotationIfNeeded()
         }
         .onDisappear { isVisible = false }
-        .onChange(of: isActive) { _, _ in startRotationIfNeeded() }
+        .onChange(of: isActive) { _, active in
+            if active {
+                startRotationIfNeeded()
+            } else {
+                stopRotation()
+            }
+        }
     }
 
     private func startRotationIfNeeded() {
@@ -72,6 +78,14 @@ struct AuroraWash: View {
         // 90s for a full rotation — well below detection threshold.
         withAnimation(.linear(duration: 90).repeatForever(autoreverses: false)) {
             rotation = .degrees(360)
+        }
+    }
+
+    private func stopRotation() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            rotation = .degrees(0)
         }
     }
 }

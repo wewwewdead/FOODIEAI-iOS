@@ -63,6 +63,9 @@ final class TrackerViewModel: ObservableObject {
     /// concurrent requests against the same Supabase session. Drop the
     /// duplicate rather than racing two writes into `state`.
     private var isRefreshing = false
+    private var lastSuccessfulRefreshAt: Date?
+    private var isDirty = true
+    private let automaticRefreshFreshness: TimeInterval = 25
 
     /// Phase 16. Account age threshold (in days) below which we don't
     /// generate or surface observations. Avoids pre-loading editorial
@@ -84,10 +87,23 @@ final class TrackerViewModel: ObservableObject {
         self.timeZone = timeZone
     }
 
-    func refresh() async {
-        guard !isRefreshing else { return }
+    @discardableResult
+    func refresh(reason: RefreshReason = .pullToRefresh,
+                 now: Date = Date(),
+                 tab: AppTab? = nil) async -> Bool {
+        guard shouldRefresh(reason: reason, now: now) else { return false }
+        guard !isRefreshing else { return false }
         isRefreshing = true
         defer { isRefreshing = false }
+
+        if let tab {
+            TabPerformanceProbe.refreshStarted(tab)
+        }
+        defer {
+            if let tab {
+                TabPerformanceProbe.refreshEnded(tab)
+            }
+        }
 
         // Don't flash `.loading` over an existing loaded state — pull-to-refresh
         // should keep the rows visible while the new fetch is in flight.
@@ -140,6 +156,8 @@ final class TrackerViewModel: ObservableObject {
             } else {
                 state = .loaded(logs: logs, totals: LocalDailyTotals.sum(logs))
             }
+            lastSuccessfulRefreshAt = now
+            isDirty = false
 
             // If there's no card today AND we have patterns, kick off a
             // best-effort generation in the background. Wrapped in
@@ -150,12 +168,13 @@ final class TrackerViewModel: ObservableObject {
                 patterns: resolvedPatterns,
                 hasExisting: observation != nil
             )
+            return true
         } catch is CancellationError {
             // SwiftUI cancelled `.task` (segment switch / tab churn).
             // Leave `state` and side-channel arrays alone — a follow-up
             // refresh will reconcile. Painting `.failed(CancellationError)`
             // here would flash a fake error banner.
-            return
+            return true
         } catch {
             #if DEBUG
             NSLog("[Tracker] refresh FAILED: %@", "\(error)")
@@ -172,7 +191,20 @@ final class TrackerViewModel: ObservableObject {
                 self.graceDaysRemaining = profile.graceDaysRemaining
             }
             state = .failed(error)
+            return true
         }
+    }
+
+    func markDirty() {
+        isDirty = true
+    }
+
+    private func shouldRefresh(reason: RefreshReason, now: Date) -> Bool {
+        if reason.isUserInitiated || reason == .foodLogChanged || isDirty {
+            return true
+        }
+        guard let lastSuccessfulRefreshAt else { return true }
+        return now.timeIntervalSince(lastSuccessfulRefreshAt) >= automaticRefreshFreshness
     }
 
     /// Delete a saved meal (DB row + storage objects), then refresh so

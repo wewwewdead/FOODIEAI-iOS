@@ -45,6 +45,10 @@ struct SavedConfirmationSheet: View {
     /// parent is responsible for dismissing this sheet (via `onClose`)
     /// and routing to the requested destination.
     var onNextStepAction: ((NextStepHint.Action) -> Void)? = nil
+    /// When true, layers a small gold sparkle burst on top of the
+    /// existing brand confetti so Pro users get a daily "this moment
+    /// is yours" sparkle alongside the standard celebration.
+    var isPro: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     @State private var checkmarkScale: CGFloat = 0
@@ -116,6 +120,14 @@ struct SavedConfirmationSheet: View {
             // does the "explosion" weight, this adds the on-brand
             // personality.
             BrandConfetti(active: confettiActive)
+
+            // Pro-only: a smaller, slower gold sparkle burst layered
+            // over the brand confetti. Same trigger, different palette
+            // and timing — reads as champagne settling after the green
+            // confetti instead of competing with it.
+            if isPro {
+                GoldSparkleBurst(active: confettiActive)
+            }
 
             // Radial burst — a hollow brand ring that scales out and fades.
             Circle()

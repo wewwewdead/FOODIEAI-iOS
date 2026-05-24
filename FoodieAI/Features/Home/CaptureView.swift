@@ -24,6 +24,8 @@ import UIKit
 /// result rendering replaces the empty-state hero copy in place. The
 /// SavedConfirmationSheet still presents from .saved.
 struct CaptureView: View {
+    let isActive: Bool
+
     @StateObject private var viewModel = CaptureViewModel()
     /// Phase 18 — observed so we can drop the mood pulse rather than
     /// ambush the user when they re-foreground the app.
@@ -42,6 +44,8 @@ struct CaptureView: View {
     @State private var pickerSheet: PickerSheet? = nil
     @State private var showingSourceDialog = false
     @State private var photosSelection: PhotosPickerItem? = nil
+    @State private var photoLoadTask: Task<Void, Never>? = nil
+    @State private var photoLoadGeneration: UInt64 = 0
     @State private var isShowingLibrary = false
     /// Phase 15 — Quick Re-log picker presentation flag.
     @State private var showingRecentMeals = false
@@ -115,6 +119,10 @@ struct CaptureView: View {
     /// limit-reached sheet's Upgrade button and any future explicit
     /// upgrade affordance.
     @State private var showingPaywall: Bool = false
+    /// Phase 22 — scan-budget explainer sheet. Tapping the top-bar
+    /// scan counter chip presents this regardless of remaining count
+    /// so users always have a one-tap path to "how does this work".
+    @State private var showingScanLimitsInfo: Bool = false
     /// Phase 21.5 — action sheet for the daily quest card. Tap on the
     /// card flips this; user picks between Scan or Manual Log paths,
     /// both of which already exist on this view.
@@ -134,6 +142,11 @@ struct CaptureView: View {
     /// the modal is up and promote it to `pendingManualMoodLog` once
     /// the modal dismisses. Keeps the two overlays from racing.
     @State private var manualLogAwaitingMood: FoodLog? = nil
+    @State private var homeActivationTask: Task<Void, Never>? = nil
+
+    init(isActive: Bool = true) {
+        self.isActive = isActive
+    }
 
     /// Lightweight after-save banner state. The struct lives inline
     /// because no other surface reads or writes it.
@@ -191,7 +204,7 @@ struct CaptureView: View {
             // scrolls — the scroll content moves over the floater, not
             // with it.
             VStack {
-                AmbientFloater(intensity: 0.45)
+                AmbientFloater(intensity: 0.45, isActive: isActive)
                     .frame(height: 520)
                 Spacer(minLength: 0)
             }
@@ -290,6 +303,10 @@ struct CaptureView: View {
                 .onDisappear {
                     resultScrollTask?.cancel()
                     resultScrollTask = nil
+                    photoLoadTask?.cancel()
+                    photoLoadTask = nil
+                    photosSelection = nil
+                    mirrorPreview.cancelPendingRefresh()
                 }
             }
 
@@ -369,7 +386,14 @@ struct CaptureView: View {
         )
         .onChange(of: photosSelection) { _, newItem in
             guard let newItem else { return }
-            Task {
+            photoLoadTask?.cancel()
+            photoLoadGeneration &+= 1
+            let generation = photoLoadGeneration
+            photoLoadTask = Task {
+                #if DEBUG
+                let photoLoadStart = Date()
+                #endif
+
                 // Load the picker's bytes, then hand them off to a
                 // background task that downsamples via ImageIO without
                 // ever decoding the full-resolution buffer into memory.
@@ -377,23 +401,43 @@ struct CaptureView: View {
                 // decoded lands as a ~2048pt-edge UIImage instead, which
                 // the existing compressMain/compressThumbnail passes
                 // still resize to their target sizes for upload.
-                if let data = try? await newItem.loadTransferable(type: Data.self) {
-                    let image = await Task.detached(priority: .userInitiated) {
-                        ImagePreparation.downsampledImage(from: data)
-                            ?? UIImage(data: data)
-                    }.value
+                var preparedImage: UIImage?
+                do {
+                    if let data = try await newItem.loadTransferable(type: Data.self),
+                       !Task.isCancelled {
+                        preparedImage = await Task.detached(priority: .userInitiated) {
+                            ImagePreparation.downsampledImage(from: data)
+                                ?? UIImage(data: data)
+                        }.value
+                    }
                     // `data` (potentially tens of MB for a 12 MP HEIC)
                     // is released here as the enclosing `if let` falls
                     // out of scope — only the downsampled `UIImage`
                     // survives into setPhoto.
-                    if !Task.isCancelled, let image {
+                } catch {
+                    preparedImage = nil
+                }
+
+                if !Task.isCancelled, let image = preparedImage {
+                    #if DEBUG
+                    NSLog("[Perf] photo library load + downsample %.2fms",
+                          Date().timeIntervalSince(photoLoadStart) * 1000)
+                    #endif
+                    await MainActor.run {
+                        guard !Task.isCancelled,
+                              photoLoadGeneration == generation else { return }
                         viewModel.setPhoto(image, source: .library)
                     }
                 }
+
                 // Clear the selection so the same image can be repicked
                 // and so PhotosUI releases its internal reference to the
                 // PHAsset.
-                photosSelection = nil
+                await MainActor.run {
+                    guard photoLoadGeneration == generation else { return }
+                    photosSelection = nil
+                    photoLoadTask = nil
+                }
             }
         }
         // Phase 21.13 — the success sheet is gated on
@@ -412,7 +456,8 @@ struct CaptureView: View {
             SavedConfirmationSheet(
                 onClose: { viewModel.discardSaved() },
                 nextStep: computedNextStepHint(),
-                onNextStepAction: handleNextStepAction
+                onNextStepAction: handleNextStepAction,
+                isPro: subscriptions.tier == .pro
             )
             .presentationDetents([.fraction(0.7), .large])
             .premiumSheet(tint: .brand)
@@ -617,6 +662,31 @@ struct CaptureView: View {
             PaywallView()
                 .environmentObject(SubscriptionManager.shared)
         }
+        // Scan-budget explainer. Triggered by tapping the top-bar
+        // scan counter chip. Single source of truth for "how do
+        // scans work" — wraps the policy explanation and the upsell
+        // in one sheet so users always reach both via one tap.
+        .sheet(isPresented: $showingScanLimitsInfo) {
+            ScanLimitsExplainerSheet(
+                used: subscriptions.scansUsedToday,
+                limit: subscriptions.dailyLimit,
+                isPro: subscriptions.tier == .pro,
+                onTryPro: {
+                    // Dismiss this sheet first, then present the
+                    // paywall on the next runloop tick. SwiftUI can
+                    // only have one sheet at a time; this avoids the
+                    // "second sheet swallowed" race.
+                    showingScanLimitsInfo = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showingPaywall = true
+                    }
+                }
+            )
+            .presentationDetents([.fraction(0.72), .large])
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(28)
+            .presentationBackground(.regularMaterial)
+        }
         // Phase 21.5 — quest card → action sheet routing. Both options
         // hand off to the existing scan + manual-log paths. The
         // completion state is used only to swap the title copy so the
@@ -648,16 +718,26 @@ struct CaptureView: View {
         // yesterday's). Fire-and-forget; the load itself is silent
         // on failure.
         .task {
-            await viewModel.loadQuest()
-            // Refresh the Home Mirror preview alongside the daily
-            // quest load. Both are fire-and-forget; failures resolve
-            // to a silent hide rather than an error UI.
-            await mirrorPreview.refresh()
+            guard isActive else { return }
+            scheduleHomeActivationWork(reason: .initialAppear)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
-                Task { await viewModel.loadQuest() }
-                Task { await mirrorPreview.refresh() }
+                guard isActive else { return }
+                scheduleHomeActivationWork(reason: .tabBecameActive)
+            } else {
+                photoLoadTask?.cancel()
+                photoLoadTask = nil
+                photosSelection = nil
+            }
+        }
+        .onChange(of: isActive) { _, active in
+            if active {
+                scheduleHomeActivationWork(reason: .tabBecameActive)
+            } else {
+                homeActivationTask?.cancel()
+                homeActivationTask = nil
+                mirrorPreview.cancelPendingRefresh()
             }
         }
         .onReceive(
@@ -666,7 +746,10 @@ struct CaptureView: View {
             // Mirror tab listens to the same event; Home does the
             // same so the preview card stays in sync after a save
             // without the user having to leave Home.
-            Task { await mirrorPreview.refresh() }
+            mirrorPreview.markDirty()
+            if isActive {
+                mirrorPreview.scheduleDebouncedRefresh(reason: .foodLogChanged)
+            }
         }
         // Phase 21.11 — quest-completion celebration modal. Sits on
         // top of all main Home content (zIndex pushes it above the
@@ -834,6 +917,10 @@ struct CaptureView: View {
                         .appFont(.captionStrong)
                         .foregroundStyle(Color.brandDeep)
                 }
+                // Pro-only halo around the top-bar avatar — same gold
+                // ring as Profile so the cue is consistent everywhere
+                // the avatar appears.
+                .proAvatarRing(active: subscriptions.tier == .pro, lineWidth: 2, inset: -2)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Profile")
@@ -844,64 +931,28 @@ struct CaptureView: View {
 
     /// Phase 22 — small "scans left today" chip lives on the top bar.
     /// Reads the live `SubscriptionManager` so the count decrements
-    /// the moment a scan succeeds. At 0 remaining the chip mutes and
-    /// becomes a tap target → paywall. Free users see "N free scans
-    /// left"; Pro users see "N of 10 scans today" so the higher cap is
-    /// visible (and worth what they paid for).
+    /// the moment a scan succeeds. At 0 remaining the chip morphs into
+    /// a soft peach "Out · Go Pro" warning state with a pulsing halo
+    /// and a one-shot wiggle, and becomes the tap target → paywall.
+    /// Free users see "N left"; Pro users get a mini progress ring
+    /// showing N / 10 today so the higher cap reads as earned.
+    ///
+    /// Visuals & motion are owned by `ScanCounterChip` so it can hold
+    /// its own animation state without forcing every CaptureView
+    /// render to re-animate.
     @ViewBuilder
     private var scanCounterChip: some View {
-        let remaining = subscriptions.scansRemainingToday
-        let limit = subscriptions.dailyLimit
-        let isPro = subscriptions.tier == .pro
-        let isOut = remaining == 0
-
-        Button {
-            // No-op when scans remain — chip is informational.
-            // When out, route to the paywall (gentle, optional upgrade).
-            guard isOut else { return }
+        ScanCounterChip(
+            remaining: subscriptions.scansRemainingToday,
+            limit: subscriptions.dailyLimit,
+            isPro: subscriptions.tier == .pro
+        ) {
+            // Any state → explainer modal. The modal carries the
+            // "Try Pro" CTA itself so out-of-scans users still have a
+            // single tap to upgrade after seeing the policy.
             Haptics.tap()
-            showingPaywall = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: isPro ? "infinity" : "camera.fill")
-                    .font(.system(size: 11, weight: .heavy))
-                Text(scanCounterText(remaining: remaining, limit: limit, isPro: isPro))
-                    .appFont(.captionStrong)
-                    .lineLimit(1)
-            }
-            .foregroundStyle(isOut ? Color.inkMute : Color.brandDeep)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .background(
-                Capsule().fill(
-                    isOut
-                        ? Color.bgSurfaceSoft
-                        : Color.brandSoft
-                )
-            )
-            .overlay(
-                Capsule().strokeBorder(
-                    isOut ? Color.borderHairline : Color.brand.opacity(0.25),
-                    lineWidth: 1
-                )
-            )
+            showingScanLimitsInfo = true
         }
-        .buttonStyle(.plain)
-        .allowsHitTesting(isOut)
-        .accessibilityLabel(scanCounterText(remaining: remaining, limit: limit, isPro: isPro))
-        .accessibilityHint(isOut ? "Opens the Pro upgrade screen" : "")
-    }
-
-    private func scanCounterText(remaining: Int, limit: Int, isPro: Bool) -> String {
-        if isPro {
-            return "\(remaining) of \(limit) today"
-        }
-        if remaining == 0 {
-            return "No scans left today"
-        }
-        return remaining == 1
-            ? "1 free scan left today"
-            : "\(remaining) free scans left today"
     }
 
     // MARK: - Empty / picked flow
@@ -1049,10 +1100,17 @@ struct CaptureView: View {
                                 .transition(.opacity)
                             }
                             if viewModel.state.isAnalyzing {
-                                AnalyzingImageAura()
-                                    .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
-                                    .transition(.opacity)
-                                    .allowsHitTesting(false)
+                                // Pro analyses get a champagne-tinted
+                                // aura — same fluid motion as free,
+                                // but the palette skews to warm gold
+                                // so Pro users feel the moment is
+                                // theirs without an explicit label.
+                                AnalyzingImageAura(
+                                    isPro: subscriptions.tier == .pro
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
+                                .transition(.opacity)
+                                .allowsHitTesting(false)
                             }
                         } else {
                             photoCardEmptyContent
@@ -1097,6 +1155,18 @@ struct CaptureView: View {
                 )
             }
         }
+        .overlay(alignment: .topLeading) {
+            if showsChangePhotoButton {
+                RemovePhotoButton {
+                    Haptics.soft()
+                    removePickedPhoto()
+                }
+                .padding(AppSpacing.sm)
+                .transition(
+                    .scale(scale: 0.6).combined(with: .opacity)
+                )
+            }
+        }
         .animation(.appBouncy, value: showsChangePhotoButton)
     }
 
@@ -1105,6 +1175,14 @@ struct CaptureView: View {
     private var showsChangePhotoButton: Bool {
         if case .picked = viewModel.state { return true }
         return false
+    }
+
+    private func removePickedPhoto() {
+        photoLoadTask?.cancel()
+        photoLoadTask = nil
+        photosSelection = nil
+        firstScanGlowVisible = false
+        viewModel.discardCurrent()
     }
 
     private var photoCardEmptyContent: some View {
@@ -1593,8 +1671,22 @@ struct CaptureView: View {
     private func presentLibraryPicker() {
         // Reset prior selection so onChange fires even if user picks the
         // same image twice in a row.
+        photoLoadTask?.cancel()
+        photoLoadTask = nil
         photosSelection = nil
         isShowingLibrary = true
+    }
+
+    private func scheduleHomeActivationWork(reason: RefreshReason) {
+        homeActivationTask?.cancel()
+        homeActivationTask = Task { @MainActor in
+            TabPerformanceProbe.appeared(.home)
+            await Task.yield()
+            guard !Task.isCancelled, isActive else { return }
+            TabPerformanceProbe.firstFrameYielded(.home)
+            await viewModel.loadQuest()
+            await mirrorPreview.refresh(reason: reason, tab: .home)
+        }
     }
 }
 
@@ -1908,6 +2000,42 @@ private struct ChangePhotoButton: View {
     }
 }
 
+private struct RemovePhotoButton: View {
+    let action: () -> Void
+    @State private var pressed: Bool = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                Circle()
+                    .strokeBorder(Color.white.opacity(0.5), lineWidth: 1)
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .heavy))
+                    .foregroundStyle(Color.ink)
+            }
+            .frame(width: 32, height: 32)
+            .shadow(color: Color.ink.opacity(0.22), radius: 6, x: 0, y: 2)
+            .scaleEffect(pressed ? 0.88 : 1)
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if !pressed {
+                        withAnimation(.appPress) { pressed = true }
+                    }
+                }
+                .onEnded { _ in
+                    withAnimation(.appPress) { pressed = false }
+                }
+        )
+        .accessibilityLabel("Remove photo")
+        .accessibilityHint("Return to the empty scan card")
+    }
+}
+
 // MARK: - Delightful image entrance
 
 /// Duolingo-style "land" choreography for a freshly captured or picked
@@ -2057,7 +2185,13 @@ private struct FirstScanGlow: View {
 /// blur, blend modes, and continuously shifting sine-wave ribbons. It is
 /// decorative only; the actual analyze state remains driven by
 /// `CaptureViewModel.State.analyzing`.
+///
+/// `isPro` swaps the underlying palettes to champagne/gold without
+/// touching the motion — same fluid recipe, premium colorway. We don't
+/// surface this as a marketing line; it's a quiet daily moment that
+/// belongs to Pro users.
 private struct AnalyzingImageAura: View {
+    var isPro: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -2086,12 +2220,12 @@ private struct AnalyzingImageAura: View {
                     ZStack {
                         Color.black.opacity(0.16)
 
-                        SiriFluidGlow(time: seconds)
+                        SiriFluidGlow(time: seconds, isPro: isPro)
                             .blur(radius: 26)
                             .opacity(0.82)
                             .blendMode(.screen)
 
-                        SiriWaveRibbons(time: seconds)
+                        SiriWaveRibbons(time: seconds, isPro: isPro)
                             .blendMode(.screen)
 
                         LinearGradient(
@@ -2159,13 +2293,26 @@ private struct AnalyzingDot: View {
 
 private struct SiriFluidGlow: View {
     let time: TimeInterval
+    var isPro: Bool = false
 
-    private let colors: [Color] = [
+    // Pro palette: champagne, warm amber, peach blush, brand-cream
+    // (so the gold reads against the brand instead of looking
+    // photoshopped in). Same 4 stops so the existing blob layout
+    // (count/scale/positions) is unchanged.
+    private static let freeColors: [Color] = [
         Color(red: 0.15, green: 0.86, blue: 1.00),
         Color(red: 0.90, green: 0.21, blue: 1.00),
         Color(red: 1.00, green: 0.63, blue: 0.18),
-        Color.brandBright
+        Color.brandBright,
     ]
+    private static let proColors: [Color] = [
+        ProGold.cream,
+        ProGold.warm,
+        ProGold.rose,
+        Color.brandBright,
+    ]
+
+    private var colors: [Color] { isPro ? Self.proColors : Self.freeColors }
 
     var body: some View {
         GeometryReader { proxy in
@@ -2207,8 +2354,9 @@ private struct SiriFluidGlow: View {
 
 private struct SiriWaveRibbons: View {
     let time: TimeInterval
+    var isPro: Bool = false
 
-    private let ribbonColors: [[Color]] = [
+    private static let freeRibbonColors: [[Color]] = [
         [
             Color(red: 0.22, green: 0.92, blue: 1.00),
             Color(red: 0.73, green: 0.35, blue: 1.00),
@@ -2225,6 +2373,31 @@ private struct SiriWaveRibbons: View {
             Color(red: 1.00, green: 0.79, blue: 0.22)
         ]
     ]
+
+    // Pro palette: each ribbon walks the gold→cream→rose triad with a
+    // hint of white on the top ribbon for sparkle. Same three rows so
+    // the wave/blur geometry below stays identical.
+    private static let proRibbonColors: [[Color]] = [
+        [
+            ProGold.warm,
+            ProGold.cream,
+            ProGold.rose,
+        ],
+        [
+            ProGold.cream,
+            ProGold.warm,
+            ProGold.edgeDark,
+        ],
+        [
+            Color.white.opacity(0.95),
+            ProGold.cream,
+            ProGold.rose,
+        ],
+    ]
+
+    private var ribbonColors: [[Color]] {
+        isPro ? Self.proRibbonColors : Self.freeRibbonColors
+    }
 
     var body: some View {
         Canvas { context, size in
@@ -3171,8 +3344,727 @@ private struct ManualLogToastView: View {
     }
 }
 
+// MARK: - Scan counter chip
+
+/// The cutesy/premium pill that lives in the top bar showing scans
+/// left today. Lives in its own struct so the animation state — pulse,
+/// halo breathe, one-shot wiggle on the "ran out" moment — survives
+/// CaptureView re-renders without re-starting on every tick.
+///
+/// Three visual states keyed off `remaining` and `isPro`:
+///   • Plenty (remaining > 1 free, or pro any-N): brand-soft pill, a
+///     mini camera (free) or a depleting progress ring (pro), and a
+///     count that contentTransitions between values.
+///   • Low (remaining == 1, free only): pill stays brand-soft but the
+///     count shifts to a warm honey tone — a soft cue without nagging.
+///   • Out (remaining == 0): pill morphs to a warm peach with an
+///     orangeBadge halo gently breathing behind it. Icon swaps to a
+///     crown via SF Symbols' `.replace` effect, the label fades in
+///     "Out · Go Pro" (free) or "Maxed today" (pro), and the badge
+///     does a one-shot wiggle the first frame it enters this state so
+///     the user actually notices they ran out. Tappable → paywall.
+///
+/// `accessibilityReduceMotion` kills the wiggle and the halo breathe;
+/// state-transition crossfades stay since they're geometry-stable.
+private struct ScanCounterChip: View {
+    let remaining: Int
+    let limit: Int
+    let isPro: Bool
+    /// Fires on every tap regardless of state. The parent decides
+    /// what to present — historically out-state went straight to
+    /// the paywall, but the chip now always opens the explainer
+    /// sheet so users can learn the scan budget before being
+    /// upsold.
+    let onTap: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var haloBreathe = false
+    @State private var wiggle: Double = 0
+    /// Heartbeat scale — driven by `runHeartbeatLoop` while scans
+    /// remain so users actually notice the chip exists. Skipped when
+    /// out of scans (the warning halo + wiggle already own the
+    /// attention budget there) and under Reduce Motion.
+    @State private var heartbeatScale: CGFloat = 1.0
+
+    private var isOut: Bool { remaining == 0 }
+    private var isLow: Bool { !isPro && remaining == 1 }
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 6) {
+                iconView
+                labelView
+            }
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(fillBackground)
+            .overlay(rimStroke)
+            .background(outerHalo)
+            .rotationEffect(.degrees(wiggle))
+            // Heartbeat scale sits outside the rotation so the lub-dub
+            // doesn't stretch the wiggle into a jelly wobble. Layout
+            // size is unaffected — scaleEffect is purely visual.
+            .scaleEffect(heartbeatScale)
+            // The geometry-stable animation: state→state recolor and
+            // crossfade of the inner content. Spring keeps it bouncy
+            // without overshoot.
+            .animation(.spring(response: 0.55, dampingFraction: 0.78), value: isOut)
+            .animation(.spring(response: 0.55, dampingFraction: 0.78), value: isLow)
+            .animation(.snappy, value: remaining)
+        }
+        .buttonStyle(.plain)
+        .onAppear(perform: startBreathing)
+        // .task auto-cancels on view disappear, so the heartbeat loop
+        // exits cleanly when the user navigates away — no leaked
+        // timers, no zombie animations against a defunct chip.
+        .task { await runHeartbeatLoop() }
+        .onChange(of: isOut) { _, nowOut in
+            if nowOut { runOutWiggle() }
+        }
+        .accessibilityLabel(accessibilityText)
+        .accessibilityHint(isOut ? "Opens the Pro upgrade screen" : "")
+    }
+
+    // MARK: - Inner pieces
+
+    // Icon morphs between three glyphs via SF Symbols' replace effect
+    // (iOS 17+): camera → progress ring (pro) → crown (out). Bounce on
+    // out so the swap reads as a tiny celebration of "go pro" rather
+    // than a dead-end.
+    @ViewBuilder
+    private var iconView: some View {
+        if isPro && !isOut {
+            ProgressRingMini(
+                progress: Double(limit - remaining) / Double(max(limit, 1))
+            )
+            .frame(width: 14, height: 14)
+            .transition(.scale.combined(with: .opacity))
+        } else {
+            Image(systemName: isOut ? "crown.fill" : "camera.fill")
+                .font(.system(size: 11, weight: .heavy))
+                .contentTransition(.symbolEffect(.replace.downUp))
+                .symbolEffect(.bounce, value: isOut)
+                .transition(.scale.combined(with: .opacity))
+        }
+    }
+
+    // Label is two states behind one Group so the whole chunk
+    // crossfades cleanly when the chip flips to out. Inside each
+    // state the number uses .contentTransition(.numericText) so the
+    // digit rolls when a scan is consumed.
+    @ViewBuilder
+    private var labelView: some View {
+        Group {
+            if isOut {
+                Text(isPro ? "Maxed today" : "Out · Go Pro")
+                    .appFont(.captionStrong)
+                    .lineLimit(1)
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+            } else if isPro {
+                HStack(spacing: 3) {
+                    Text("\(remaining)")
+                        .appFont(.captionStrong)
+                        .monospacedDigit()
+                        .contentTransition(.numericText(countsDown: true))
+                    Text("/ \(limit) today")
+                        .appFont(.captionStrong)
+                        .lineLimit(1)
+                }
+                .transition(.opacity)
+            } else {
+                HStack(spacing: 3) {
+                    Text("\(remaining)")
+                        .appFont(.captionStrong)
+                        .monospacedDigit()
+                        .contentTransition(.numericText(countsDown: true))
+                    Text(remaining == 1 ? "left!" : "left today")
+                        .appFont(.captionStrong)
+                        .lineLimit(1)
+                }
+                .transition(.opacity)
+            }
+        }
+    }
+
+    // MARK: - Style tokens
+
+    private var foreground: Color {
+        if isOut { return .orangeCancel }
+        if isLow { return .orangeBadge }
+        return .brandDeep
+    }
+
+    private var fillBackground: some View {
+        Capsule().fill(
+            isOut
+                ? Color.catDrawbacks                // soft peach
+                : (isLow ? Color.brandCream : Color.brandSoft)
+        )
+    }
+
+    private var rimStroke: some View {
+        Capsule().strokeBorder(
+            isOut
+                ? Color.orangeCancel.opacity(0.35)
+                : (isLow
+                    ? Color.orangeBadge.opacity(0.40)
+                    : Color.brand.opacity(0.25)),
+            lineWidth: 1
+        )
+    }
+
+    // Soft warm halo that only appears in the out state. Slowly
+    // breathes scale + opacity so the chip feels alive — the same
+    // trick the pro badge uses, tuned warmer so it reads as
+    // "attention, friendly" instead of "alarm".
+    @ViewBuilder
+    private var outerHalo: some View {
+        if isOut {
+            Capsule()
+                .fill(Color.orangeBadge.opacity(0.45))
+                .blur(radius: 9)
+                .scaleEffect(haloBreathe ? 1.22 : 1.05)
+                .opacity(haloBreathe ? 0.95 : 0.55)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
+    // MARK: - Animations
+
+    private func startBreathing() {
+        guard !reduceMotion else { return }
+        withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+            haloBreathe = true
+        }
+    }
+
+    /// Lub-dub-rest heartbeat that draws the eye to the chip without
+    /// being constant. Three-phase scale: quick lub (1.22), quick dub
+    /// (0.94 — undershoot reads as the recoil after a heartbeat),
+    /// then a settle back to 1.0 followed by a long rest.
+    ///
+    /// Runs in every state — including out — so the chip stays
+    /// noticeable when the user has nothing left and needs to tap to
+    /// upgrade. The out-state halo breathes behind the chip; the
+    /// heartbeat scales the chip itself; the two layers reinforce
+    /// "tap me" rather than compete.
+    ///
+    /// Killed only under Reduce Motion. `.task` cancels the loop when
+    /// the chip leaves the view tree.
+    private func runHeartbeatLoop() async {
+        guard !reduceMotion else { return }
+        while !Task.isCancelled {
+            // Lub — fast contraction outward.
+            await MainActor.run {
+                withAnimation(.spring(response: 0.18, dampingFraction: 0.55)) {
+                    heartbeatScale = 1.22
+                }
+            }
+            try? await Task.sleep(nanoseconds: 180_000_000)
+
+            // Dub — quick rebound below 1.0 so it reads as a real
+            // double-beat instead of a single pop.
+            await MainActor.run {
+                withAnimation(.spring(response: 0.18, dampingFraction: 0.55)) {
+                    heartbeatScale = 0.94
+                }
+            }
+            try? await Task.sleep(nanoseconds: 160_000_000)
+
+            // Settle back to rest.
+            await MainActor.run {
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.72)) {
+                    heartbeatScale = 1.0
+                }
+            }
+
+            // Long pause between beats — keeps the motion noticeable
+            // when it lands rather than blending into ambient noise.
+            try? await Task.sleep(nanoseconds: 1_900_000_000)
+        }
+    }
+
+    // One-shot wobble: -7° → 7° → -3° → 0. Fires only the moment the
+    // chip flips into the out state so the user notices; subsequent
+    // re-renders of the out chip don't wiggle again.
+    private func runOutWiggle() {
+        guard !reduceMotion else { return }
+        Haptics.tap()
+        withAnimation(.spring(response: 0.18, dampingFraction: 0.45)) {
+            wiggle = -7
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+            withAnimation(.spring(response: 0.18, dampingFraction: 0.45)) {
+                wiggle = 7
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.5)) {
+                wiggle = -3
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.55)) {
+                wiggle = 0
+            }
+        }
+    }
+
+    // MARK: - Accessibility
+
+    private var accessibilityText: String {
+        if isOut {
+            return isPro
+                ? "You have used all 10 scans today"
+                : "Out of scans today. Tap to upgrade to Pro."
+        }
+        if isPro { return "\(remaining) of \(limit) scans today" }
+        return remaining == 1
+            ? "1 free scan left today"
+            : "\(remaining) free scans left today"
+    }
+}
+
+/// Minimal depletion ring used inside the Pro-state chip. Trims from
+/// a full circle as scans are consumed (progress 0 → full ring,
+/// progress 1 → just the track). A tiny embedded camera sells what
+/// the ring is counting without needing a separate label.
+private struct ProgressRingMini: View {
+    let progress: Double  // 0.0 (full) → 1.0 (depleted)
+
+    var body: some View {
+        let p = min(max(progress, 0), 1)
+        ZStack {
+            Circle()
+                .stroke(Color.brand.opacity(0.25), lineWidth: 2)
+            Circle()
+                .trim(from: 0, to: max(1.0 - p, 0.01))
+                .stroke(
+                    Color.brandDeep,
+                    style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+                .animation(.snappy, value: p)
+            Image(systemName: "camera.fill")
+                .font(.system(size: 6, weight: .heavy))
+                .foregroundStyle(Color.brandDeep)
+        }
+    }
+}
+
+// MARK: - Scan limits explainer
+
+/// Modal that explains the scan budget in one screen so users
+/// understand "why N today" without leaving Home. Surfaces:
+///   • Today's usage (X of Y, with the remaining count up top so
+///     the user's actual state is the first thing they read).
+///   • Free policy spelled out — 4/day for the first week, then 2/day
+///     forever. Bonus framing rather than "your cap will drop".
+///   • Pro policy — 10/day, every day, cancel anytime.
+///   • Action row: free users get a gold "Try Pro" pill that opens
+///     the existing `PaywallView`; pro users get a quiet "You're on
+///     Pro" confirmation + Close.
+///
+/// Entrance choreography (the "alive" feel): inner content stays
+/// invisible until the sheet finishes its native slide-up, then
+/// each block reveals in turn with a small offset + spring. Total
+/// reveal ~0.55s; total perceived presentation ~1s including the
+/// sheet itself.
+///
+/// Lives inline in CaptureView.swift to avoid manual pbxproj file
+/// adds (project doesn't use synchronized folders).
+private struct ScanLimitsExplainerSheet: View {
+    let used: Int
+    let limit: Int
+    let isPro: Bool
+    let onTryPro: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Master reveal flag. Flipped via `.task` after a short delay so
+    /// inner content lands *after* the system sheet slide; staggered
+    /// per-block delays do the rest.
+    @State private var revealed = false
+
+    private var remaining: Int { max(0, limit - used) }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            ScrollView {
+                VStack(spacing: AppSpacing.lg) {
+                    heroBlock                      // delay 0.00
+                        .reveal(revealed, delay: 0.00)
+                    todayCard                      // delay 0.08
+                        .reveal(revealed, delay: 0.08)
+                    freeCard                       // delay 0.16
+                        .reveal(revealed, delay: 0.16)
+                    proCard                        // delay 0.24
+                        .reveal(revealed, delay: 0.24)
+                    Spacer(minLength: AppSpacing.md)
+                    actionRow                      // delay 0.34
+                        .reveal(revealed, delay: 0.34)
+                    footerNote
+                        .reveal(revealed, delay: 0.40)
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.xl3)
+                .padding(.bottom, AppSpacing.xl)
+            }
+
+            // Close X. Sits above the drag indicator so the chrome
+            // doesn't fight the eye for the same corner.
+            Button {
+                Haptics.tap()
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .heavy))
+                    .foregroundStyle(Color.ink)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(Color.bgSurface))
+                    .appShadow(.shadowCard)
+            }
+            .padding(AppSpacing.md)
+            .accessibilityLabel("Close")
+        }
+        .background(Color.bgCanvas)
+        .task {
+            // Wait a beat so the inner reveal doesn't race the
+            // sheet's slide-up. ~0.18s lands the first item just as
+            // the sheet settles, which reads as a continuous motion
+            // chain rather than two separate animations.
+            if reduceMotion {
+                revealed = true
+            } else {
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                revealed = true
+            }
+        }
+    }
+
+    // MARK: - Hero
+
+    private var heroBlock: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            // Stacked camera + sparkle glyph — reads as "scan magic"
+            // without needing illustration. Gold tint nods to Pro
+            // even on free, since both tiers are explained inside.
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                ProGold.cream.opacity(0.7),
+                                ProGold.rose.opacity(0.0),
+                            ],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 60
+                        )
+                    )
+                    .frame(width: 96, height: 96)
+                Image(systemName: "camera.aperture")
+                    .font(.system(size: 44, weight: .regular))
+                    .foregroundStyle(Color.brandDeep)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            Text("Your scan budget")
+                .appFont(.display2)
+                .foregroundStyle(Color.ink)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            Text("Simple, no surprises.")
+                .appFont(.bodyV2)
+                .foregroundStyle(Color.inkMute)
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .padding(.top, AppSpacing.sm)
+    }
+
+    // MARK: - Today
+
+    /// Today's usage strip. Keeps the user's actual state visible
+    /// throughout the explanation so the abstract policy below maps
+    /// to something concrete ("I have N left right now").
+    private var todayCard: some View {
+        HStack(spacing: AppSpacing.md) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("TODAY")
+                    .appFont(.labelEyebrow)
+                    .foregroundStyle(Color.inkMute)
+                Text(todayLine)
+                    .appFont(.title2)
+                    .foregroundStyle(Color.ink)
+                    .monospacedDigit()
+            }
+            Spacer()
+            // Mini pip strip — one circle per scan in today's limit,
+            // filled = used, empty = remaining. Capped at 10 so pro
+            // doesn't get an unreadable row.
+            HStack(spacing: 4) {
+                ForEach(0..<min(limit, 10), id: \.self) { i in
+                    Circle()
+                        .fill(i < used ? Color.brandDeep : Color.brand.opacity(0.25))
+                        .frame(width: 7, height: 7)
+                }
+            }
+        }
+        .padding(AppSpacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.brandSoft.opacity(0.65))
+        )
+    }
+
+    private var todayLine: String {
+        if remaining == 0 { return "Out for today" }
+        if remaining == 1 { return "1 scan left" }
+        return "\(remaining) scans left"
+    }
+
+    // MARK: - Free card
+
+    private var freeCard: some View {
+        tierCard(
+            label: "FREE",
+            labelColor: Color.inkMute,
+            accent: Color.brand,
+            border: Color.borderHairline,
+            bigNumber: "4 → 2",
+            bigSuffix: "per day",
+            lines: [
+                "First week: 4 scans/day to help you get the hang of it.",
+                "After: 2 scans/day, every day.",
+            ],
+            crown: false
+        )
+    }
+
+    // MARK: - Pro card
+
+    private var proCard: some View {
+        tierCard(
+            label: "PRO",
+            labelColor: ProGold.deep,
+            accent: ProGold.warm,
+            border: ProGold.warm.opacity(0.45),
+            bigNumber: "10",
+            bigSuffix: "per day",
+            lines: [
+                "Ten photo scans every single day.",
+                "Cancel anytime in Settings.",
+            ],
+            crown: true
+        )
+    }
+
+    /// Shared card shape so the two tiers read as a pair. The Pro
+    /// variant gets a warm gold border + crown badge to feel earned
+    /// rather than just "the other option".
+    private func tierCard(
+        label: String,
+        labelColor: Color,
+        accent: Color,
+        border: Color,
+        bigNumber: String,
+        bigSuffix: String,
+        lines: [String],
+        crown: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 5) {
+                    if crown {
+                        Image(systemName: "crown.fill")
+                            .font(.system(size: 10, weight: .heavy))
+                    }
+                    Text(label)
+                        .appFont(.labelEyebrow)
+                }
+                .foregroundStyle(labelColor)
+
+                ForEach(lines.indices, id: \.self) { i in
+                    Text(lines[i])
+                        .appFont(.bodyV2)
+                        .foregroundStyle(Color.inkMute)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(bigNumber)
+                    .font(.custom(AppFont.PS.mplusBlack, size: 30))
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                Text(bigSuffix)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+            }
+            .frame(width: 96, alignment: .trailing)
+        }
+        .padding(AppSpacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .fill(Color.bgSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg)
+                .strokeBorder(border, lineWidth: crown ? 1.5 : 1)
+        )
+        // Pro card gets a soft gold shadow so it visually lifts off
+        // the page — the cue is geometric, not just colored.
+        .shadow(
+            color: crown ? ProGold.warm.opacity(0.25) : .black.opacity(0.04),
+            radius: crown ? 12 : 4,
+            x: 0,
+            y: crown ? 6 : 2
+        )
+    }
+
+    // MARK: - Action row
+
+    @ViewBuilder
+    private var actionRow: some View {
+        if isPro {
+            // Already paying. Don't ask again — just confirm the
+            // status and let them dismiss.
+            VStack(spacing: AppSpacing.sm) {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 16, weight: .heavy))
+                    Text("You're on Pro")
+                        .appFont(.title2)
+                }
+                .foregroundStyle(ProGold.deep)
+                .frame(maxWidth: .infinity, minHeight: 56)
+                .background(
+                    Capsule().fill(ProGold.cream.opacity(0.45))
+                )
+                .overlay(
+                    Capsule().strokeBorder(ProGold.warm.opacity(0.45), lineWidth: 1)
+                )
+
+                Button {
+                    Haptics.tap()
+                    dismiss()
+                } label: {
+                    Text("Done")
+                        .appFont(.bodyEmphasis)
+                        .foregroundStyle(Color.inkMute)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            VStack(spacing: AppSpacing.sm) {
+                Button {
+                    Haptics.tap()
+                    onTryPro()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "crown.fill")
+                            .font(.system(size: 16, weight: .heavy))
+                        Text("Try Pro")
+                            .appFont(.title2)
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: 60)
+                    .background(
+                        Capsule().fill(
+                            LinearGradient(
+                                colors: [ProGold.warm, ProGold.edgeDark],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    )
+                    .overlay(
+                        Capsule().strokeBorder(ProGold.cream.opacity(0.6), lineWidth: 0.8)
+                    )
+                    .shadow(color: ProGold.warm.opacity(0.45), radius: 10, x: 0, y: 4)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    Haptics.tap()
+                    dismiss()
+                } label: {
+                    Text("Maybe later")
+                        .appFont(.bodyEmphasis)
+                        .foregroundStyle(Color.inkMute)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var footerNote: some View {
+        Text("Manual logging is unlimited on both tiers.")
+            .appFont(.caption)
+            .foregroundStyle(Color.inkLight)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+/// Reveal modifier for the explainer sheet — opacity + small upward
+/// offset + tiny scale, driven by a single boolean flipped after the
+/// sheet's slide-up so the inner content reads as continuous motion.
+private struct RevealModifier: ViewModifier {
+    let revealed: Bool
+    let delay: Double
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(revealed ? 1 : 0)
+            .scaleEffect(revealed ? 1.0 : 0.96)
+            .offset(y: revealed ? 0 : 14)
+            .animation(
+                .spring(response: 0.55, dampingFraction: 0.78).delay(delay),
+                value: revealed
+            )
+    }
+}
+
+private extension View {
+    func reveal(_ revealed: Bool, delay: Double) -> some View {
+        modifier(RevealModifier(revealed: revealed, delay: delay))
+    }
+}
+
 #if DEBUG
 #Preview("CaptureView — idle") {
     CaptureView()
+}
+
+#Preview("Scan counter — states") {
+    VStack(spacing: 16) {
+        ScanCounterChip(remaining: 3, limit: 4, isPro: false, onTap: {})
+        ScanCounterChip(remaining: 1, limit: 4, isPro: false, onTap: {})
+        ScanCounterChip(remaining: 0, limit: 4, isPro: false, onTap: {})
+        ScanCounterChip(remaining: 7, limit: 10, isPro: true, onTap: {})
+        ScanCounterChip(remaining: 0, limit: 10, isPro: true, onTap: {})
+    }
+    .padding(40)
+    .background(Color.bgCanvas)
+}
+
+#Preview("Scan limits explainer — free") {
+    ScanLimitsExplainerSheet(
+        used: 1, limit: 4, isPro: false, onTryPro: {}
+    )
+}
+
+#Preview("Scan limits explainer — pro") {
+    ScanLimitsExplainerSheet(
+        used: 7, limit: 10, isPro: true, onTryPro: {}
+    )
 }
 #endif

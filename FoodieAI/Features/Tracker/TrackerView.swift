@@ -16,6 +16,8 @@ import SwiftUI
 /// leading) under `.appSegmentSwitch`. Selection-change haptic fires once
 /// per user-driven change.
 struct TrackerView: View {
+    let isActive: Bool
+
     @StateObject private var todayVM = TrackerViewModel()
     @StateObject private var weekVM  = WeekViewModel()
     @StateObject private var monthVM = MonthViewModel()
@@ -24,6 +26,10 @@ struct TrackerView: View {
     /// Tracks the segment we're transitioning *from*, for asymmetric
     /// directional intelligence.
     @State private var previousSegment: TrackerSegment = .today
+
+    init(isActive: Bool = true) {
+        self.isActive = isActive
+    }
 
     var body: some View {
         ZStack {
@@ -54,9 +60,9 @@ struct TrackerView: View {
     private var content: some View {
         Group {
             switch segment {
-            case .today: TodayView(viewModel: todayVM)
-            case .week:  WeekView(viewModel: weekVM)
-            case .month: MonthView(viewModel: monthVM)
+            case .today: TodayView(viewModel: todayVM, isActive: isActive)
+            case .week:  WeekView(viewModel: weekVM, isActive: isActive)
+            case .month: MonthView(viewModel: monthVM, isActive: isActive)
             }
         }
         .id(segment)

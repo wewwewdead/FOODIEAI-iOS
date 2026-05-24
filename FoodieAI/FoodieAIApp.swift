@@ -374,9 +374,161 @@ struct LaunchView: View {
     }
 }
 
-/// Three-tab host. Phase 13 customizes the tab bar appearance via
-/// `UITabBarAppearance` (the UIKit appearance proxy bridges into
-/// SwiftUI's `TabView`) and fires a tap haptic on selection change.
+enum AppTab: Int, CaseIterable, Hashable {
+    case home = 0
+    case tracker
+    case mirror
+    case profile
+
+    var title: String {
+        switch self {
+        case .home:    return "Home"
+        case .tracker: return "Tracker"
+        case .mirror:  return "Mirror"
+        case .profile: return "Profile"
+        }
+    }
+}
+
+struct PersistentTabLoadState: Equatable {
+    private(set) var loadedTabs: Set<AppTab> = [.home]
+
+    mutating func markLoaded(_ tab: AppTab) {
+        loadedTabs.insert(tab)
+    }
+
+    func isLoaded(_ tab: AppTab) -> Bool {
+        loadedTabs.contains(tab)
+    }
+}
+
+enum RefreshReason: Equatable {
+    case initialAppear
+    case tabBecameActive
+    case foodLogChanged
+    case pullToRefresh
+    case retry
+
+    var isUserInitiated: Bool {
+        switch self {
+        case .pullToRefresh, .retry: return true
+        case .initialAppear, .tabBecameActive, .foodLogChanged: return false
+        }
+    }
+}
+
+private struct ActiveTabKey: EnvironmentKey {
+    static let defaultValue: AppTab = .home
+}
+
+extension EnvironmentValues {
+    var activeTab: AppTab {
+        get { self[ActiveTabKey.self] }
+        set { self[ActiveTabKey.self] = newValue }
+    }
+}
+
+enum TabPerformanceProbe {
+    @MainActor
+    static func tap(from old: AppTab, to new: AppTab) {
+        #if DEBUG
+        samples[new] = Sample(from: old, to: new, tapAt: Date())
+        NSLog("[TabPerf] tap %@ -> %@", old.title, new.title)
+        #endif
+    }
+
+    @MainActor
+    static func selectionChanged(from old: AppTab, to new: AppTab) {
+        #if DEBUG
+        let now = Date()
+        if samples[new] == nil {
+            samples[new] = Sample(from: old, to: new, tapAt: now)
+        }
+        samples[new]?.selectionAt = now
+        NSLog("[TabPerf] selection changed %@ -> %@ in %.0fms",
+              old.title, new.title, elapsedMS(from: samples[new]?.tapAt, to: now))
+        NSLog("[TabPerf] %@ visible/active", new.title)
+        #endif
+    }
+
+    @MainActor
+    static func appeared(_ tab: AppTab) {
+        #if DEBUG
+        let now = Date()
+        ensureSample(for: tab, at: now)
+        samples[tab]?.appearedAt = now
+        NSLog("[TabPerf] %@ appeared in %.0fms",
+              tab.title, elapsedMS(from: samples[tab]?.tapAt, to: now))
+        #endif
+    }
+
+    @MainActor
+    static func firstFrameYielded(_ tab: AppTab) {
+        #if DEBUG
+        let now = Date()
+        ensureSample(for: tab, at: now)
+        samples[tab]?.firstFrameAt = now
+        NSLog("[TabPerf] %@ first frame yielded in %.0fms",
+              tab.title, elapsedMS(from: samples[tab]?.tapAt, to: now))
+        #endif
+    }
+
+    @MainActor
+    static func refreshStarted(_ tab: AppTab) {
+        #if DEBUG
+        let now = Date()
+        ensureSample(for: tab, at: now)
+        samples[tab]?.refreshStartAt = now
+        let ordering = samples[tab]?.firstFrameAt == nil ? "before first frame" : "after first frame"
+        NSLog("[TabPerf] %@ refresh started %@", tab.title, ordering)
+        #endif
+    }
+
+    @MainActor
+    static func refreshEnded(_ tab: AppTab) {
+        #if DEBUG
+        let now = Date()
+        guard var sample = samples[tab] else { return }
+        let refreshMS = elapsedMS(from: sample.refreshStartAt, to: now)
+        let totalMS = elapsedMS(from: sample.tapAt, to: now)
+        sample.refreshEndAt = now
+        samples[tab] = sample
+        NSLog("[TabPerf] %@ refresh finished in %.0fms; tap -> refresh completed %.0fms",
+              tab.title, refreshMS, totalMS)
+        #endif
+    }
+
+    #if DEBUG
+    private struct Sample {
+        let from: AppTab
+        let to: AppTab
+        let tapAt: Date
+        var selectionAt: Date?
+        var appearedAt: Date?
+        var firstFrameAt: Date?
+        var refreshStartAt: Date?
+        var refreshEndAt: Date?
+    }
+
+    @MainActor private static var samples: [AppTab: Sample] = [:]
+
+    @MainActor
+    private static func ensureSample(for tab: AppTab, at now: Date) {
+        if samples[tab] == nil {
+            samples[tab] = Sample(from: tab, to: tab, tapAt: now)
+        }
+    }
+
+    private static func elapsedMS(from start: Date?, to end: Date) -> Double {
+        guard let start else { return 0 }
+        return end.timeIntervalSince(start) * 1000
+    }
+    #endif
+}
+
+/// Four-tab host. The tab roots are hosted persistently in a ZStack so
+/// switching tabs only changes layer visibility instead of asking
+/// SwiftUI's TabView host to swap heavyweight root views.
 ///
 /// Icon choices (decisions log):
 ///   - Home    = `camera.fill` (kept; it's the literal action the tab
@@ -386,6 +538,7 @@ struct LaunchView: View {
 ///   - Profile = `person.crop.circle` (kept; standard profile glyph).
 struct MainTabView: View {
     @State private var selection: Int = 0
+    @State private var tabLoadState = PersistentTabLoadState()
     /// Phase 19: ProfileStore was lifted to App-level (FoodieAIApp) so
     /// RootView can read `onboardingCompletedAt` for routing. We pull
     /// the same instance via `@EnvironmentObject`. Tracker / Profile /
@@ -400,7 +553,7 @@ struct MainTabView: View {
     }
 
     /// Premium-polish wave: tab specs for the floating glass tab bar
-    /// that overlays the hidden system TabView below.
+    /// that overlays the persistent content host below.
     private var floatingTabSpecs: [FloatingTabBar.TabSpec] {
         [
             .init(title: "Home", systemImage: "camera", selectedSystemImage: "camera.fill"),
@@ -410,25 +563,40 @@ struct MainTabView: View {
         ]
     }
 
+    private var selectedTab: AppTab {
+        AppTab(rawValue: selection) ?? .home
+    }
+
+    private var selectionBinding: Binding<Int> {
+        Binding(
+            get: { selection },
+            set: { newValue in selectTab(newValue) }
+        )
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
-            TabView(selection: $selection) {
-                CaptureView()
-                    .tag(0)
-                    .tabItem { Label("Home", systemImage: "camera.fill") }
-                    .hideSystemTabBar()
-                TrackerView()
-                    .tag(1)
-                    .tabItem { Label("Tracker", systemImage: "list.bullet.rectangle") }
-                    .hideSystemTabBar()
-                FoodMirrorView()
-                    .tag(2)
-                    .tabItem { Label("Mirror", systemImage: "sparkles") }
-                    .hideSystemTabBar()
-                ProfileView()
-                    .tag(3)
-                    .tabItem { Label("Profile", systemImage: "person.crop.circle") }
-                    .hideSystemTabBar()
+            ZStack {
+                if tabLoadState.isLoaded(.home) {
+                    CaptureView(isActive: selectedTab == .home)
+                        .persistentTabLayer(.home, selected: selectedTab)
+                        .hideSystemTabBar()
+                }
+                if tabLoadState.isLoaded(.tracker) {
+                    TrackerView(isActive: selectedTab == .tracker)
+                        .persistentTabLayer(.tracker, selected: selectedTab)
+                        .hideSystemTabBar()
+                }
+                if tabLoadState.isLoaded(.mirror) {
+                    FoodMirrorView(isActive: selectedTab == .mirror)
+                        .persistentTabLayer(.mirror, selected: selectedTab)
+                        .hideSystemTabBar()
+                }
+                if tabLoadState.isLoaded(.profile) {
+                    ProfileView(isActive: selectedTab == .profile)
+                        .persistentTabLayer(.profile, selected: selectedTab)
+                        .hideSystemTabBar()
+                }
             }
             // brandDeep, not brand: SwiftUI's `.tint` cascades into system
             // controls (confirmation dialogs, alerts, default Buttons) where
@@ -436,16 +604,26 @@ struct MainTabView: View {
             // material backdrop. brandDeep (#4A5713, dark olive) keeps brand
             // identity while passing WCAG AAA contrast against white.
             // The tab bar's selected color is set independently by
-            // `TabBarAppearance.configure()` (UITabBarAppearance) so this
-            // change doesn't dim the tab bar icons.
+            // `FloatingTabBar` itself so this change doesn't dim the tab
+            // bar icons.
             .tint(Color.brandDeep)
+            .animation(nil, value: selection)
+            .environment(\.activeTab, selectedTab)
 
             // Floating glass tab bar — visual overlay only. Space
             // reservation happens per-tab inside `.hideSystemTabBar()`
             // via safeAreaInset, since `.toolbar(.hidden, for: .tabBar)`
             // doesn't reliably release the system bar's allocated space
-            // when safeAreaInset is applied at the TabView level.
-            FloatingTabBar(selection: $selection, tabs: floatingTabSpecs)
+            // when safeAreaInset is applied only at the host level.
+            FloatingTabBar(
+                selection: selectionBinding,
+                tabs: floatingTabSpecs,
+                onTabTap: { old, new in
+                    guard let oldTab = AppTab(rawValue: old),
+                          let newTab = AppTab(rawValue: new) else { return }
+                    TabPerformanceProbe.tap(from: oldTab, to: newTab)
+                }
+            )
         }
         .task {
             // Pre-warm goals before the user navigates to Tracker, so the
@@ -458,13 +636,34 @@ struct MainTabView: View {
             // tabs. Recap presentation is owned by the Tracker view
             // via `requestedRecap`; here we just route the tab.
             if let requested {
-                selection = requested
+                selectTab(requested)
                 notifRouter.clearTabRequest()
             }
         }
-        .onChange(of: selection) { _, _ in
+        .onChange(of: selection) { oldValue, newValue in
+            if let oldTab = AppTab(rawValue: oldValue),
+               let newTab = AppTab(rawValue: newValue) {
+                TabPerformanceProbe.selectionChanged(from: oldTab, to: newTab)
+            }
             Haptics.tap()
         }
+    }
+
+    private func selectTab(_ rawValue: Int) {
+        guard let tab = AppTab(rawValue: rawValue) else { return }
+        tabLoadState.markLoaded(tab)
+        selection = rawValue
+    }
+}
+
+private extension View {
+    func persistentTabLayer(_ tab: AppTab, selected: AppTab) -> some View {
+        let isSelected = tab == selected
+        return self
+            .opacity(isSelected ? 1 : 0)
+            .zIndex(isSelected ? 1 : 0)
+            .allowsHitTesting(isSelected)
+            .accessibilityHidden(!isSelected)
     }
 }
 

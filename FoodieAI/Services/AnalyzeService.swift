@@ -35,6 +35,20 @@ actor AnalyzeService {
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+    private static let localDateFormatterLock = NSLock()
+    private static let localDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+    private static let resetDateFormatterLock = NSLock()
+    private static let resetDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
 
     init(baseURL: URL = AppConfig.analyzeBaseURL,
          session: URLSession = .shared,
@@ -356,11 +370,10 @@ actor AnalyzeService {
     /// zone, locale pinned to POSIX so the format is stable regardless
     /// of the user's locale.
     static func localDateString(now: Date = Date()) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone.current
-        return f.string(from: now)
+        localDateFormatterLock.lock()
+        defer { localDateFormatterLock.unlock() }
+        localDateFormatter.timeZone = TimeZone.current
+        return localDateFormatter.string(from: now)
     }
 
     /// Phase 22 — decode the structured 429 body the server emits when
@@ -378,11 +391,10 @@ actor AnalyzeService {
             return nil
         }
         let resetsAt: Date? = wire.resetsAt.flatMap { raw in
-            let f = DateFormatter()
-            f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-            f.locale = Locale(identifier: "en_US_POSIX")
-            f.timeZone = TimeZone.current
-            return f.date(from: raw)
+            resetDateFormatterLock.lock()
+            defer { resetDateFormatterLock.unlock() }
+            resetDateFormatter.timeZone = TimeZone.current
+            return resetDateFormatter.date(from: raw)
         }
         return ScanLimitInfo(limit: wire.limit, tier: wire.tier, resetsAt: resetsAt)
     }
@@ -429,13 +441,18 @@ struct ScanLimitInfo: Equatable, Identifiable {
     let limit: Int
     let tier: String
     let resetsAt: Date?
+    private static let idFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     // Sheet presentation via `.sheet(item:)` requires Identifiable. The
     // payload is purely informational so any stable id works; reuse
     // `resetsAt` (or a fallback) so a new 429 with a different reset
     // time forces the sheet to re-render.
     var id: String {
-        (resetsAt.map(ISO8601DateFormatter().string(from:)) ?? "no-reset") + "-\(limit)-\(tier)"
+        (resetsAt.map(Self.idFormatter.string(from:)) ?? "no-reset") + "-\(limit)-\(tier)"
     }
 }
 

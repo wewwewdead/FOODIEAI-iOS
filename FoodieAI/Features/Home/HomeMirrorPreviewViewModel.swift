@@ -279,6 +279,10 @@ final class HomeMirrorPreviewViewModel: ObservableObject {
     /// bails on commit if a newer refresh has overtaken it — older,
     /// slower fetches can't overwrite the newer, fresher result.
     private var refreshToken: UInt64 = 0
+    private var debounceTask: Task<Void, Never>?
+    private var lastSuccessfulRefreshAt: Date?
+    private var isDirty: Bool = true
+    private let automaticRefreshFreshness: TimeInterval = 25
 
     init(foodLogs: any FoodLogsFetching = FoodLogService()) {
         self.foodLogs = foodLogs
@@ -287,8 +291,30 @@ final class HomeMirrorPreviewViewModel: ObservableObject {
     /// Refresh the preview. Two narrow PostgREST queries; quietly
     /// keeps the previous card on transient failure so a network
     /// blip never blanks the Home surface.
-    func refresh(now: Date = Date(),
-                 timeZone: TimeZone = .current) async {
+    @discardableResult
+    func refresh(reason: RefreshReason = .pullToRefresh,
+                 now: Date = Date(),
+                 timeZone: TimeZone = .current,
+                 tab: AppTab? = nil) async -> Bool {
+        guard shouldRefresh(reason: reason, now: now) else { return false }
+
+        if let tab {
+            TabPerformanceProbe.refreshStarted(tab)
+        }
+        defer {
+            if let tab {
+                TabPerformanceProbe.refreshEnded(tab)
+            }
+        }
+
+        #if DEBUG
+        let refreshStart = Date()
+        defer {
+            NSLog("[Perf] HomeMirrorPreview refresh %.2fms",
+                  Date().timeIntervalSince(refreshStart) * 1000)
+        }
+        #endif
+
         refreshToken &+= 1
         let myToken = refreshToken
 
@@ -309,7 +335,7 @@ final class HomeMirrorPreviewViewModel: ObservableObject {
             // A newer refresh started while we were waiting on the
             // network — let it win, even if our payload is fine. The
             // newer fetch saw a strictly newer database state.
-            guard myToken == refreshToken else { return }
+            guard myToken == refreshToken else { return true }
 
             let prevSevenLogs = thirtyLogs.filter {
                 $0.eatenAt >= prevSevenStart && $0.eatenAt < prevSevenEnd
@@ -323,10 +349,13 @@ final class HomeMirrorPreviewViewModel: ObservableObject {
                 timeZone:             timeZone
             )
             cardModel = HomeMirrorPreview.cardModel(for: summary)
+            lastSuccessfulRefreshAt = now
+            isDirty = false
+            return true
         } catch is CancellationError {
             // Swallow silently — cancellation is normal (tab switch,
             // view disappear) and doesn't deserve a log entry.
-            return
+            return true
         } catch {
             #if DEBUG
             NSLog("[HomeMirrorPreview] refresh failed: %@", "\(error)")
@@ -337,6 +366,43 @@ final class HomeMirrorPreviewViewModel: ObservableObject {
             if cardModel == nil {
                 cardModel = nil
             }
+            return true
         }
+    }
+
+    func markDirty() {
+        isDirty = true
+    }
+
+    /// Coalesce bursts of `.foodLogDidChange` notifications into a
+    /// single preview refresh, matching the full Mirror tab's event
+    /// handling while keeping initial loads immediate.
+    func scheduleDebouncedRefresh(
+        reason: RefreshReason = .foodLogChanged,
+        delay: Duration = .milliseconds(300)
+    ) {
+        debounceTask?.cancel()
+        debounceTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await self?.refresh(reason: reason, tab: .home)
+        }
+    }
+
+    func cancelPendingRefresh() {
+        debounceTask?.cancel()
+        debounceTask = nil
+    }
+
+    private func shouldRefresh(reason: RefreshReason, now: Date) -> Bool {
+        if reason.isUserInitiated || reason == .foodLogChanged || isDirty {
+            return true
+        }
+        guard let lastSuccessfulRefreshAt else { return true }
+        return now.timeIntervalSince(lastSuccessfulRefreshAt) >= automaticRefreshFreshness
     }
 }

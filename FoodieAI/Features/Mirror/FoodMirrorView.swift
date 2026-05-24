@@ -6,6 +6,8 @@ import SwiftUI
 /// Renders only the cards that have meaningful content; everything
 /// else stays hidden.
 struct FoodMirrorView: View {
+    let isActive: Bool
+
     @StateObject private var viewModel = FoodMirrorViewModel()
 
     @EnvironmentObject private var notifRouter: NotificationRouter
@@ -45,6 +47,11 @@ struct FoodMirrorView: View {
     /// `FoodMirrorStoryView`), which renders reliably because the
     /// container around it is stable.
     @State private var showingStory = false
+    @State private var automaticRefreshTask: Task<Void, Never>? = nil
+
+    init(isActive: Bool = true) {
+        self.isActive = isActive
+    }
 
     var body: some View {
         ZStack {
@@ -69,7 +76,7 @@ struct FoodMirrorView: View {
                 )
             }
             .refreshable {
-                await viewModel.refresh()
+                await viewModel.refresh(reason: .pullToRefresh, tab: .mirror)
             }
 
             if celebrate {
@@ -79,8 +86,17 @@ struct FoodMirrorView: View {
             }
         }
         .task {
-            await viewModel.refresh()
-            checkForFirstReady()
+            guard isActive else { return }
+            scheduleAutomaticRefresh(reason: .initialAppear)
+        }
+        .onChange(of: isActive) { _, active in
+            if active {
+                scheduleAutomaticRefresh(reason: .tabBecameActive)
+            } else {
+                automaticRefreshTask?.cancel()
+                automaticRefreshTask = nil
+                viewModel.cancelPendingRefresh()
+            }
         }
         .onChange(of: viewModel.state) { _, _ in
             checkForFirstReady()
@@ -91,16 +107,33 @@ struct FoodMirrorView: View {
             // Coalesce rapid bursts (save → mood pulse → re-log) so
             // we issue one refresh per gesture, not three overlapping
             // Supabase fetches racing each other to commit.
-            viewModel.scheduleDebouncedRefresh()
+            viewModel.markDirty()
+            if isActive {
+                viewModel.scheduleDebouncedRefresh(reason: .foodLogChanged)
+            }
         }
         .onReceive(Self.freshnessTicker) { now in
-            freshnessNow = now
+            if isActive {
+                freshnessNow = now
+            }
         }
         .onDisappear {
             viewModel.cancelPendingRefresh()
         }
         .fullScreenCover(isPresented: $showingStory) {
             storyCover
+        }
+    }
+
+    private func scheduleAutomaticRefresh(reason: RefreshReason) {
+        automaticRefreshTask?.cancel()
+        automaticRefreshTask = Task { @MainActor in
+            TabPerformanceProbe.appeared(.mirror)
+            await Task.yield()
+            guard !Task.isCancelled, isActive else { return }
+            TabPerformanceProbe.firstFrameYielded(.mirror)
+            await viewModel.refresh(reason: reason, tab: .mirror)
+            checkForFirstReady()
         }
     }
 
