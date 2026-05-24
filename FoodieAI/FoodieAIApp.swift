@@ -399,30 +399,54 @@ struct MainTabView: View {
         TabBarAppearance.configure()
     }
 
+    /// Premium-polish wave: tab specs for the floating glass tab bar
+    /// that overlays the hidden system TabView below.
+    private var floatingTabSpecs: [FloatingTabBar.TabSpec] {
+        [
+            .init(title: "Home", systemImage: "camera", selectedSystemImage: "camera.fill"),
+            .init(title: "Tracker", systemImage: "list.bullet.rectangle", selectedSystemImage: "list.bullet.rectangle.fill"),
+            .init(title: "Mirror", systemImage: "sparkles"),
+            .init(title: "Profile", systemImage: "person.crop.circle", selectedSystemImage: "person.crop.circle.fill")
+        ]
+    }
+
     var body: some View {
-        TabView(selection: $selection) {
-            CaptureView()
-                .tag(0)
-                .tabItem { Label("Home", systemImage: "camera.fill") }
-            TrackerView()
-                .tag(1)
-                .tabItem { Label("Tracker", systemImage: "list.bullet.rectangle") }
-            FoodMirrorView()
-                .tag(2)
-                .tabItem { Label("Mirror", systemImage: "sparkles") }
-            ProfileView()
-                .tag(3)
-                .tabItem { Label("Profile", systemImage: "person.crop.circle") }
+        ZStack(alignment: .bottom) {
+            TabView(selection: $selection) {
+                CaptureView()
+                    .tag(0)
+                    .tabItem { Label("Home", systemImage: "camera.fill") }
+                    .hideSystemTabBar()
+                TrackerView()
+                    .tag(1)
+                    .tabItem { Label("Tracker", systemImage: "list.bullet.rectangle") }
+                    .hideSystemTabBar()
+                FoodMirrorView()
+                    .tag(2)
+                    .tabItem { Label("Mirror", systemImage: "sparkles") }
+                    .hideSystemTabBar()
+                ProfileView()
+                    .tag(3)
+                    .tabItem { Label("Profile", systemImage: "person.crop.circle") }
+                    .hideSystemTabBar()
+            }
+            // brandDeep, not brand: SwiftUI's `.tint` cascades into system
+            // controls (confirmation dialogs, alerts, default Buttons) where
+            // brand (#B8CA38, lime) is too light to read on the translucent
+            // material backdrop. brandDeep (#4A5713, dark olive) keeps brand
+            // identity while passing WCAG AAA contrast against white.
+            // The tab bar's selected color is set independently by
+            // `TabBarAppearance.configure()` (UITabBarAppearance) so this
+            // change doesn't dim the tab bar icons.
+            .tint(Color.brandDeep)
+
+            // Floating glass tab bar — visual overlay only. Space
+            // reservation happens per-tab inside `.hideSystemTabBar()`
+            // via safeAreaInset, since `.toolbar(.hidden, for: .tabBar)`
+            // doesn't reliably release the system bar's allocated space
+            // when safeAreaInset is applied at the TabView level.
+            FloatingTabBar(selection: $selection, tabs: floatingTabSpecs)
         }
-        // brandDeep, not brand: SwiftUI's `.tint` cascades into system
-        // controls (confirmation dialogs, alerts, default Buttons) where
-        // brand (#B8CA38, lime) is too light to read on the translucent
-        // material backdrop. brandDeep (#4A5713, dark olive) keeps brand
-        // identity while passing WCAG AAA contrast against white.
-        // The tab bar's selected color is set independently by
-        // `TabBarAppearance.configure()` (UITabBarAppearance) so this
-        // change doesn't dim the tab bar icons.
-        .tint(Color.brandDeep)
         .task {
             // Pre-warm goals before the user navigates to Tracker, so the
             // ring/bar denominators reflect the latest profile on first paint.

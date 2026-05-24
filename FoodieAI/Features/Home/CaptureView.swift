@@ -34,6 +34,10 @@ struct CaptureView: View {
     /// Phase 21.12 — read for the Healthy Choice toggle so the daily
     /// quest card can hide when the user has opted out in Profile.
     @EnvironmentObject private var profileStore: ProfileStore
+    /// Phase 22 — observed so the scan counter chip in the top bar
+    /// updates live as `scansUsedToday` / `dailyLimit` change. The
+    /// manager is injected at app scope (FoodieAIApp.body).
+    @EnvironmentObject private var subscriptions: SubscriptionManager
 
     @State private var pickerSheet: PickerSheet? = nil
     @State private var showingSourceDialog = false
@@ -179,6 +183,20 @@ struct CaptureView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             Color.bgCanvas.ignoresSafeArea()
+
+            // Premium-polish wave: ambient liveness behind the hero.
+            // Anchored to the top so blobs drift around the headline copy
+            // and photo card without bleeding past the CTA bar. Fixed
+            // height (520pt) so the composition stays put when the user
+            // scrolls — the scroll content moves over the floater, not
+            // with it.
+            VStack {
+                AmbientFloater(intensity: 0.45)
+                    .frame(height: 520)
+                Spacer(minLength: 0)
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -397,7 +415,7 @@ struct CaptureView: View {
                 onNextStepAction: handleNextStepAction
             )
             .presentationDetents([.fraction(0.7), .large])
-            .presentationDragIndicator(.visible)
+            .premiumSheet(tint: .brand)
         }
         // Phase 18 — mood pulse, presented after `.saved` auto-
         // transitions (1.2s) or the user closes the success sheet.
@@ -787,6 +805,13 @@ struct CaptureView: View {
 
             Spacer()
 
+            // Phase 22 — scan counter chip. Updates live via the
+            // @EnvironmentObject SubscriptionManager. Tapping when
+            // 0 remaining routes to the paywall; otherwise non-tap
+            // (decorative) so the user isn't sent away mid-flow.
+            scanCounterChip
+                .padding(.trailing, AppSpacing.sm)
+
             // Tap the avatar to jump to the Profile tab. Uses the
             // notification router so the switch happens at the TabView
             // host (MainTabView) instead of pushing a navigation stack
@@ -815,6 +840,68 @@ struct CaptureView: View {
             .accessibilityHint("Opens your profile")
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Phase 22 — small "scans left today" chip lives on the top bar.
+    /// Reads the live `SubscriptionManager` so the count decrements
+    /// the moment a scan succeeds. At 0 remaining the chip mutes and
+    /// becomes a tap target → paywall. Free users see "N free scans
+    /// left"; Pro users see "N of 10 scans today" so the higher cap is
+    /// visible (and worth what they paid for).
+    @ViewBuilder
+    private var scanCounterChip: some View {
+        let remaining = subscriptions.scansRemainingToday
+        let limit = subscriptions.dailyLimit
+        let isPro = subscriptions.tier == .pro
+        let isOut = remaining == 0
+
+        Button {
+            // No-op when scans remain — chip is informational.
+            // When out, route to the paywall (gentle, optional upgrade).
+            guard isOut else { return }
+            Haptics.tap()
+            showingPaywall = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isPro ? "infinity" : "camera.fill")
+                    .font(.system(size: 11, weight: .heavy))
+                Text(scanCounterText(remaining: remaining, limit: limit, isPro: isPro))
+                    .appFont(.captionStrong)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(isOut ? Color.inkMute : Color.brandDeep)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(
+                Capsule().fill(
+                    isOut
+                        ? Color.bgSurfaceSoft
+                        : Color.brandSoft
+                )
+            )
+            .overlay(
+                Capsule().strokeBorder(
+                    isOut ? Color.borderHairline : Color.brand.opacity(0.25),
+                    lineWidth: 1
+                )
+            )
+        }
+        .buttonStyle(.plain)
+        .allowsHitTesting(isOut)
+        .accessibilityLabel(scanCounterText(remaining: remaining, limit: limit, isPro: isPro))
+        .accessibilityHint(isOut ? "Opens the Pro upgrade screen" : "")
+    }
+
+    private func scanCounterText(remaining: Int, limit: Int, isPro: Bool) -> String {
+        if isPro {
+            return "\(remaining) of \(limit) today"
+        }
+        if remaining == 0 {
+            return "No scans left today"
+        }
+        return remaining == 1
+            ? "1 free scan left today"
+            : "\(remaining) free scans left today"
     }
 
     // MARK: - Empty / picked flow

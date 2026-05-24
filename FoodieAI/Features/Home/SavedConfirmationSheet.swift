@@ -110,6 +110,13 @@ struct SavedConfirmationSheet: View {
             // Phase 14 delight: confetti burst behind the checkmark.
             ConfettiBurst(active: confettiActive, count: 22, spread: 130)
 
+            // Premium-polish wave: cutesy brand-glyph confetti
+            // (hearts, leaves, sparkles in brand colors) layered on
+            // top of the square-particle burst — the square burst
+            // does the "explosion" weight, this adds the on-brand
+            // personality.
+            BrandConfetti(active: confettiActive)
+
             // Radial burst — a hollow brand ring that scales out and fades.
             Circle()
                 .strokeBorder(Color.brand, lineWidth: 4)
@@ -122,6 +129,7 @@ struct SavedConfirmationSheet: View {
                 .foregroundStyle(Color.brand)
                 .scaleEffect(checkmarkScale)
                 .opacity(checkmarkOpacity)
+                .shadow(color: Color.brand.opacity(0.55), radius: checkmarkScale > 0.5 ? 18 : 0, x: 0, y: 4)
         }
         .frame(height: 140)
         .accessibilityElement(children: .ignore)

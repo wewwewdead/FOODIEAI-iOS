@@ -54,14 +54,19 @@ struct CategoryAccordion: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            collapsedHeader
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    Haptics.soft()
-                    withAnimation(.appBouncy) {
-                        isExpanded.toggle()
-                    }
+            // Premium-polish wave: wrap the header in a Button + the
+            // shared MorphingPressStyle so the row gets the same
+            // tactile scale + tint wash as the rest of the app. The
+            // soft haptic is owned by the press style; the action just
+            // toggles the accordion.
+            Button {
+                withAnimation(.appBouncy) {
+                    isExpanded.toggle()
                 }
+            } label: {
+                collapsedHeader
+            }
+            .buttonStyle(.morphingTight)
 
             if isExpanded {
                 expandedItems

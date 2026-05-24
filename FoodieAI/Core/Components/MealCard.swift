@@ -35,6 +35,11 @@ struct MealCard: View {
     /// the row AND the expansion content. Standalone callers
     /// (`RecentMealsSheet`, ComponentGallery) keep the default false.
     var hideChrome: Bool = false
+    /// Premium-polish wave: when the parent (ExpandableMealCard) is
+    /// expanded, rotate the trailing chevron 90° to point down. Tiny
+    /// touch, but closes a "the chevron lied" gap — users had to look
+    /// at the expansion below to know whether the card was open.
+    var isExpanded: Bool = false
 
     @State private var imageURL: URL?
     @State private var failed: Bool = false
@@ -81,7 +86,9 @@ struct MealCard: View {
 
                     Image(systemName: "chevron.right")
                         .font(.system(size: 13, weight: .heavy))
-                        .foregroundStyle(Color.inkLight)
+                        .foregroundStyle(isExpanded ? Color.brandDeep : Color.inkLight)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .animation(reduceMotion ? .appReduced : .appBouncy, value: isExpanded)
                 }
                 .contentShape(Rectangle())
             }
@@ -170,7 +177,7 @@ struct MealCard: View {
             } label: {
                 thumbnailFrame
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.morphingQuiet)
             .accessibilityLabel("View full image")
         } else {
             thumbnailFrame

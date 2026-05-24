@@ -312,21 +312,28 @@ struct FoodMirrorView: View {
     /// blobs are static even without Reduce Motion since the scroll
     /// itself already supplies parallax via the layered content.
     private var backgroundBlobs: some View {
+        // Perf: previously each Circle had its own `.blur(radius: 60)`,
+        // which is two separate offscreen blur passes per frame.
+        // Wrapping the inner ZStack with a single `.blur(radius: 50)`
+        // collapses the work into one blur pass that composites both
+        // circles together — visually equivalent at this scale, ~2x
+        // cheaper. Circles' fill opacities were bumped slightly to
+        // preserve the same perceived intensity after the single-pass
+        // blur softens them less aggressively than two stacked passes.
         GeometryReader { geo in
             ZStack {
                 Circle()
-                    .fill(Color.brandSoft.opacity(0.55))
+                    .fill(Color.brandSoft.opacity(0.65))
                     .frame(width: geo.size.width * 0.9)
-                    .blur(radius: 60)
                     .offset(x: -geo.size.width * 0.25,
                             y: -geo.size.height * 0.15)
                 Circle()
-                    .fill(Color.catBenefits.opacity(0.35))
+                    .fill(Color.catBenefits.opacity(0.42))
                     .frame(width: geo.size.width * 0.7)
-                    .blur(radius: 60)
                     .offset(x: geo.size.width * 0.35,
                             y: geo.size.height * 0.25)
             }
+            .blur(radius: 50)
         }
         .ignoresSafeArea()
         .accessibilityHidden(true)

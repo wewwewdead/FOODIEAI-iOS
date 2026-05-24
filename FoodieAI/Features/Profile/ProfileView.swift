@@ -17,9 +17,14 @@ struct ProfileView: View {
     /// In the normal user flow (RootView → MainTabView), the store is
     /// always present and changes propagate to Tracker.
     @EnvironmentObject private var profileStore: ProfileStore
+    /// Phase 22 — observed so the tier badge + upgrade row redraw
+    /// the moment a purchase or status refresh changes the user's tier.
+    @EnvironmentObject private var subscriptions: SubscriptionManager
     @StateObject private var viewModel: ProfileViewModel
     @State private var showingAbout = false
     @State private var showingDeleteAccount = false
+    /// Phase 22 — comparison/upsell sheet entry from the PLAN section.
+    @State private var showingSubscriptionInfo = false
     @State private var hasAppeared = false
     @FocusState private var nameFieldFocused: Bool
 
@@ -60,6 +65,14 @@ struct ProfileView: View {
         .sheet(isPresented: $showingDeleteAccount) {
             DeleteAccountSheet()
         }
+        // Phase 22 — comparison page. Owns its own dismiss; the
+        // "Continue to Upgrade" action inside it presents the existing
+        // PaywallView for the actual purchase, so this sheet stays
+        // marketing-only.
+        .sheet(isPresented: $showingSubscriptionInfo) {
+            SubscriptionInfoView()
+                .environmentObject(subscriptions)
+        }
     }
 
     /// Soft atmospheric wash: bgCanvas tinted with two large radial
@@ -69,8 +82,23 @@ struct ProfileView: View {
     /// adopts 560pt as its intrinsic width and shoves the entire
     /// ScrollView past the screen edges on phone form factors.
     /// `.clipped()` keeps the blurred edges inside the canvas bounds.
+    ///
+    /// Premium-polish wave: an AuroraWash + AmbientFloater are layered
+    /// on top of the existing radial-glow composition so the page
+    /// breathes the same alive feel as Home and Today — drifting brand
+    /// blobs behind the hero card, slow gradient rotation across the
+    /// whole canvas. Both hit-test-disabled and Reduce-Motion-aware
+    /// inside their own implementations.
     private var profileBackground: some View {
         Color.bgCanvas
+            .overlay {
+                AuroraWash(intensity: 0.30).ignoresSafeArea()
+            }
+            .overlay(alignment: .top) {
+                AmbientFloater(intensity: 0.40)
+                    .frame(height: 460)
+                    .allowsHitTesting(false)
+            }
             .overlay(alignment: .topTrailing) {
                 Circle()
                     .fill(
@@ -135,10 +163,19 @@ struct ProfileView: View {
                 heroCard(profile: profile)
                     .staggered(0, appeared: hasAppeared)
 
+                // Phase 22 — PLAN section. Placed right after the hero
+                // so tier visibility is immediate; the upgrade row sits
+                // in the same band so users who want to compare plans
+                // don't have to scroll to find it.
+                sectionGroup(title: "PLAN", icon: "crown.fill") {
+                    planSection
+                }
+                .staggered(1, appeared: hasAppeared)
+
                 sectionGroup(title: "ABOUT YOU", icon: "person.fill") {
                     displayNameSection
                 }
-                .staggered(1, appeared: hasAppeared)
+                .staggered(2, appeared: hasAppeared)
 
                 sectionGroup(title: "DAILY TARGETS", icon: "target") {
                     VStack(spacing: AppSpacing.md) {
@@ -147,7 +184,7 @@ struct ProfileView: View {
                         goalsSection
                     }
                 }
-                .staggered(2, appeared: hasAppeared)
+                .staggered(3, appeared: hasAppeared)
 
                 sectionGroup(title: "GUIDANCE", icon: "sparkles") {
                     VStack(spacing: AppSpacing.sm) {
@@ -155,7 +192,7 @@ struct ProfileView: View {
                         moodLogSection
                     }
                 }
-                .staggered(3, appeared: hasAppeared)
+                .staggered(4, appeared: hasAppeared)
 
                 sectionGroup(title: "PREFERENCES", icon: "slider.horizontal.3") {
                     VStack(spacing: AppSpacing.sm) {
@@ -163,7 +200,7 @@ struct ProfileView: View {
                         healthyChoicesSection
                     }
                 }
-                .staggered(4, appeared: hasAppeared)
+                .staggered(5, appeared: hasAppeared)
 
                 VStack(spacing: AppSpacing.sm) {
                     saveButton
@@ -171,16 +208,16 @@ struct ProfileView: View {
                         errorBanner(saveError)
                     }
                 }
-                .staggered(5, appeared: hasAppeared)
+                .staggered(6, appeared: hasAppeared)
 
                 signOutSection
-                    .staggered(6, appeared: hasAppeared)
+                    .staggered(7, appeared: hasAppeared)
 
                 // App Store Review Guideline 5.1.1(v): user-initiated
                 // account deletion. Placed last, low-visual-weight —
                 // present when needed, not encouraging.
                 accountDeletionSection
-                    .staggered(7, appeared: hasAppeared)
+                    .staggered(8, appeared: hasAppeared)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.top, AppSpacing.lg)
@@ -331,6 +368,145 @@ struct ProfileView: View {
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Plan section (Phase 22)
+
+    /// Free users see a prominent Upgrade row that opens the
+    /// SubscriptionInfoView comparison; pro users see a quieter Manage
+    /// row that deep-links into iOS Settings → Subscriptions and shows
+    /// expiry. The tier badge sits on top in both cases so the user
+    /// can confirm at a glance what plan they're on.
+    @ViewBuilder
+    private var planSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            HStack {
+                TierBadge(tier: subscriptions.tier)
+                Spacer()
+                // Show today's usage so the upgrade nudge sits next to
+                // the reason for it. Pro users still see "X of 10
+                // today" — they paid for the higher cap; visibility is
+                // a feature, not a punishment.
+                Text(planUsageLabel)
+                    .appFont(.caption)
+                    .foregroundStyle(Color.inkMute)
+                    .monospacedDigit()
+            }
+
+            switch subscriptions.tier {
+            case .free:  freeUpgradeRow
+            case .pro:   proManageRow
+            }
+        }
+    }
+
+    private var planUsageLabel: String {
+        let used = subscriptions.scansUsedToday
+        let limit = subscriptions.dailyLimit
+        return "\(used) of \(limit) scans today"
+    }
+
+    private var freeUpgradeRow: some View {
+        Button {
+            Haptics.tap()
+            showingSubscriptionInfo = true
+        } label: {
+            HStack(spacing: AppSpacing.md) {
+                ZStack {
+                    Circle()
+                        .fill(Color.brandSoft)
+                        .frame(width: 40, height: 40)
+                    Image(systemName: "crown.fill")
+                        .font(.system(size: 16, weight: .heavy))
+                        .foregroundStyle(Color.brandDeep)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Upgrade to Pro")
+                        .appFont(.bodyEmphasis)
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
+                    Text("\(SubscriptionManager.proDailyLimit) scans a day")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .black))
+                    .foregroundStyle(Color.inkLight)
+            }
+            .padding(AppSpacing.md)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .fill(Color.bgSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .strokeBorder(Color.brand.opacity(0.35), lineWidth: 1.5)
+            )
+            .appShadow(.shadowCard)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableRowStyle())
+        .accessibilityLabel("Upgrade to Pro")
+        .accessibilityHint("Opens the Pro plan comparison")
+    }
+
+    private var proManageRow: some View {
+        Button {
+            Haptics.tap()
+            showingSubscriptionInfo = true
+        } label: {
+            HStack(spacing: AppSpacing.md) {
+                ZStack {
+                    Circle()
+                        .fill(Color.brandSoft)
+                        .frame(width: 40, height: 40)
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 16, weight: .heavy))
+                        .foregroundStyle(Color.brandDeep)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Manage subscription")
+                        .appFont(.bodyEmphasis)
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
+                    Text(proStatusSubtitle)
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkMute)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .black))
+                    .foregroundStyle(Color.inkLight)
+            }
+            .padding(AppSpacing.md)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .fill(Color.bgSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .strokeBorder(Color.borderHairline, lineWidth: 1.5)
+            )
+            .appShadow(.shadowCard)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableRowStyle())
+        .accessibilityLabel("Manage Pro subscription")
+    }
+
+    private var proStatusSubtitle: String {
+        guard let expiry = subscriptions.proExpiresAt else {
+            return "Active"
+        }
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .none
+        return "Renews \(f.string(from: expiry))"
     }
 
     // MARK: - Display name field

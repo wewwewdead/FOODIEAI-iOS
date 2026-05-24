@@ -48,6 +48,12 @@ struct TodayView: View {
     /// recomputes visibility from the current totals + time, so a
     /// genuine refresh re-surfaces the card if conditions still hold.
     @State private var underCalorieReminderDismissed: Bool = false
+    /// Perf: prevents `.task` from re-firing `viewModel.refresh()`
+    /// on every tab return. The view model already holds today's
+    /// state in memory between tab switches; only the first appear
+    /// needs the network round-trip. Pull-to-refresh and observed
+    /// `.foodLogDidChange` notifications still trigger fresh fetches.
+    @State private var hasLoadedOnce: Bool = false
 
     var body: some View {
         ScrollView {
@@ -65,7 +71,22 @@ struct TodayView: View {
             .padding(.top, AppSpacing.lg)
             .padding(.bottom, AppSpacing.xl3)
         }
-        .background(Color.bgCanvas)
+        .background(
+            // Premium-polish wave: canvas + slow aurora wash + ambient
+            // floater anchored behind the ring. Painted as the
+            // ScrollView background so it stays put when the user
+            // scrolls; content slides over it for a parallax-lite feel.
+            ZStack {
+                Color.bgCanvas
+                AuroraWash(intensity: 0.32)
+                VStack {
+                    AmbientFloater(intensity: 0.35)
+                        .frame(height: 480)
+                    Spacer(minLength: 0)
+                }
+            }
+            .ignoresSafeArea()
+        )
         .refreshable {
             // Explicit refresh re-arms the inline reminder so a user
             // who pulled the screen down genuinely *wants* to see the
@@ -74,6 +95,12 @@ struct TodayView: View {
             await viewModel.refresh()
         }
         .task {
+            // Perf: only refresh on the first tab visit. Subsequent
+            // returns to the Tracker tab reuse the in-memory state;
+            // pull-to-refresh re-arms a real network call. This was
+            // a major contributor to laggy tab switches into Tracker.
+            guard !hasLoadedOnce else { return }
+            hasLoadedOnce = true
             await viewModel.refresh()
         }
         .onChange(of: notifRouter.requestedRecap) { _, requested in

@@ -59,7 +59,8 @@ struct ExpandableMealCard: View {
                     }
                 },
                 expandsName: isExpanded,
-                hideChrome: true
+                hideChrome: true,
+                isExpanded: isExpanded
             )
             .contextMenu {
                 if onDelete != nil {
