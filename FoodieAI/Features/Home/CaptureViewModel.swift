@@ -104,6 +104,19 @@ final class CaptureViewModel: ObservableObject {
     /// leaving `.idle`, and we don't want to wedge the main capture flow.
     @Published var relogToast: RelogToast? = nil
 
+    /// Phase 22 — set when /analyze returns a structured 429
+    /// scan_limit_reached. The view presents the limit sheet
+    /// (Upgrade + Log Manually) keyed on this value; clear with
+    /// `clearScanLimit()` after the sheet dismisses. Independent of
+    /// `state` because we keep the photo on the canvas (state stays
+    /// `.picked`) so the user can immediately fall through to manual
+    /// logging without losing context.
+    @Published var scanLimitHit: ScanLimitInfo? = nil
+
+    func clearScanLimit() {
+        scanLimitHit = nil
+    }
+
     /// Phase 21.5 — today's daily quest, displayed as a tappable card
     /// on Home above the photo card. `nil` until loaded; the card
     /// hides itself in that state rather than rendering a placeholder.
@@ -291,6 +304,10 @@ final class CaptureViewModel: ObservableObject {
                 recentMoods: context.recentMoods
             )
             guard case .analyzing = state, !Task.isCancelled else { return }
+            // Phase 22 — server incremented its counter on success, so
+            // bump the local mirror to keep the UI's "scans left" view
+            // honest without a /subscription/status round-trip.
+            await SubscriptionManager.shared.noteSuccessfulScanLocally()
             // Server emits empty-string `fallback` on success (Gemini fills the
             // structured-output field with ""); only a *non-empty* fallback
             // means "no food detected".
@@ -323,6 +340,21 @@ final class CaptureViewModel: ObservableObject {
             // wrong" — the user didn't fail anything.
             state = .picked(image)
         } catch let err as AnalyzeError {
+            // Phase 22 — over the daily scan cap. Keep the photo on the
+            // canvas (state back to `.picked`) and surface the limit
+            // info to the view so it can present the Upgrade /
+            // Log Manually sheet. This is NOT a generic failure.
+            if case .scanLimitReached(let info) = err {
+                Haptics.warning()
+                await SubscriptionManager.shared.applyServerLimitReached(
+                    limit: info.limit,
+                    tier: SubscriptionManager.Tier(rawValue: info.tier) ?? .free,
+                    resetsAt: info.resetsAt
+                )
+                scanLimitHit = info
+                state = .picked(image)
+                return
+            }
             Haptics.error()
             state = .failed(image, err)
         } catch {

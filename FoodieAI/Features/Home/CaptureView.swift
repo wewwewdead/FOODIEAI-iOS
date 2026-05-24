@@ -107,6 +107,10 @@ struct CaptureView: View {
 
     /// Phase 21 — manual log sheet presentation flag.
     @State private var showingManualLog: Bool = false
+    /// Phase 22 — Paywall presentation. Driven from two surfaces: the
+    /// limit-reached sheet's Upgrade button and any future explicit
+    /// upgrade affordance.
+    @State private var showingPaywall: Bool = false
     /// Phase 21.5 — action sheet for the daily quest card. Tap on the
     /// card flips this; user picks between Scan or Manual Log paths,
     /// both of which already exist on this view.
@@ -554,13 +558,14 @@ struct CaptureView: View {
         .modifier(ManualLogToastModifier(
             toast: $manualLogToast,
             onScanAction: {
-                if FreeTierLimits.scansRemainingToday > 0 {
+                if SubscriptionManager.shared.scansRemainingToday > 0 {
                     manualLogToast = nil
                     requestScan()
                 } else {
-                    // Future paywall hook — for now this is a no-op
-                    // (placeholder until Phase 22 ships the paywall).
+                    // Phase 22 — over the daily cap: route to the
+                    // paywall instead of swallowing the tap silently.
                     manualLogToast = nil
+                    showingPaywall = true
                 }
             },
             onTrackerAction: {
@@ -568,6 +573,32 @@ struct CaptureView: View {
                 notifRouter.requestTab(1)
             }
         ))
+        // Phase 22 — scan-limit sheet. Driven by the CaptureViewModel's
+        // `scanLimitHit`, which is set when /analyze responds with the
+        // structured 429. The sheet keeps the user moving: Upgrade to
+        // Pro (opens PaywallView) OR Log Manually (opens ManualLogSheet).
+        .sheet(item: $viewModel.scanLimitHit) { info in
+            ScanLimitSheet(
+                info: info,
+                onUpgrade: {
+                    viewModel.clearScanLimit()
+                    showingPaywall = true
+                },
+                onManualLog: {
+                    viewModel.clearScanLimit()
+                    showingManualLog = true
+                },
+                onDismiss: {
+                    viewModel.clearScanLimit()
+                }
+            )
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showingPaywall) {
+            PaywallView()
+                .environmentObject(SubscriptionManager.shared)
+        }
         // Phase 21.5 — quest card → action sheet routing. Both options
         // hand off to the existing scan + manual-log paths. The
         // completion state is used only to swap the title copy so the
@@ -716,7 +747,7 @@ struct CaptureView: View {
             manualLogToast = ManualLogToast(
                 foodName: inserted.foodName,
                 questRewardCopy: evaluation?.rewardCopy,
-                scansRemaining: FreeTierLimits.scansRemainingToday
+                scansRemaining: SubscriptionManager.shared.scansRemainingToday
             )
         }
     }
@@ -3030,7 +3061,7 @@ private struct ManualLogToastView: View {
                 } label: {
                     Text(toast.scansRemaining > 0
                          ? "Try a photo scan? \(toast.scansRemaining) left today"
-                         : "Upgrade for \(FreeTierLimits.scansPerDayPro) photo scans/day")
+                         : "Upgrade for \(SubscriptionManager.proDailyLimit) photo scans/day")
                         .appFont(.caption)
                         .foregroundStyle(Color.brandDeep)
                     Image(systemName: "arrow.right")

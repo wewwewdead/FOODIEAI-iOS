@@ -12,6 +12,11 @@ struct FoodieAIApp: App {
     /// freshly-personalized goals don't require a re-fetch in
     /// MainTabView's first render.
     @StateObject private var profileStore = ProfileStore()
+    /// Phase 22 — StoreKit 2 manager + server-mirrored entitlement.
+    /// App-scope so the count survives tab changes and a single launch
+    /// bootstrap covers product loading + Transaction.updates listening
+    /// for the whole session.
+    @StateObject private var subscriptions = SubscriptionManager.shared
 
     init() {
         // Phase 17: register the UNUserNotificationCenter delegate before
@@ -52,7 +57,9 @@ struct FoodieAIApp: App {
                 .environmentObject(profileStore)
                 .environmentObject(NotificationRouter.shared)
                 .environmentObject(FavoritesStore.shared)
+                .environmentObject(subscriptions)
                 .task { await auth.bootstrap() }
+                .task { await subscriptions.bootstrap() }
                 .onChange(of: auth.isSignedIn) { _, signedIn in
                     // Phase 17: kick the foreground orchestrator the
                     // first time we observe a signed-in user. Subsequent
@@ -65,6 +72,10 @@ struct FoodieAIApp: App {
                             // is idempotent — repeated calls no-op once
                             // hydrated.
                             await profileStore.loadIfNeeded()
+                            // Phase 22 — pull the user's tier + today's
+                            // scan count from the server now that we
+                            // have a JWT. Idempotent.
+                            await subscriptions.refreshStatusFromServer()
                             await AppForegroundOrchestrator.shared
                                 .runOnForeground(caller: "auth.isSignedIn→true")
                         }
@@ -79,6 +90,11 @@ struct FoodieAIApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active, auth.isSignedIn else { return }
                     Task {
+                        // Phase 22 — re-sync entitlement on every
+                        // foreground so a server-side state change
+                        // (renewal, lapse, scan delta from another
+                        // device) shows up before the next /analyze.
+                        await subscriptions.refreshStatusFromServer()
                         await AppForegroundOrchestrator.shared
                             .runOnForeground(caller: "scenePhase→active")
                     }

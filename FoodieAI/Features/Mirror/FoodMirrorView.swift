@@ -2038,23 +2038,15 @@ fileprivate struct FoodMirrorStoryView: View {
                 }
             }
         }
-        .onChange(of: index) { _, _ in
-            // Reset the entrance flag so the new card runs the
-            // per-element fly-in. The async hop ensures SwiftUI
-            // registers the false → true transition as an
-            // animatable change instead of collapsing them into a
-            // single frame.
-            contentAppeared = false
-            DispatchQueue.main.async {
-                withAnimation(
-                    reduceMotion
-                        ? .none
-                        : .spring(response: 0.5, dampingFraction: 0.7)
-                ) {
-                    contentAppeared = true
-                }
-            }
-        }
+        // Note: the per-card fly-in reset used to live in an
+        // `.onChange(of: index)` block here, but that fired AFTER
+        // the new card had already mounted via the `.id()` change
+        // in `cardArea` — so the new view read `contentAppeared`
+        // at its initial value and FlyIn never saw an animatable
+        // false→true transition on the live view. The ordering
+        // now lives inside `advance()` (false BEFORE the index
+        // mutation so the new view mounts hidden, true AFTER a
+        // short delay so FlyIn animates on the mounted view).
     }
 
     // MARK: - Background
@@ -2453,11 +2445,35 @@ fileprivate struct FoodMirrorStoryView: View {
             onClose()
             return
         }
+        // Step 1: hide content of the upcoming card BEFORE it
+        // mounts. Because `cardArea` recreates the card view on
+        // every index change (via `.id("card-…")`), the new view
+        // reads `contentAppeared` at mount time — so it must be
+        // false at this moment for FlyIn to have a hidden start
+        // state to animate from.
+        contentAppeared = false
+
         if reduceMotion {
             index = next
-        } else {
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
-                index = next
+            contentAppeared = true
+            return
+        }
+
+        // Step 2: change the index. The new card mounts with
+        // `contentAppeared == false`, so its FlyIn elements are
+        // hidden (opacity 0, offset 24) while the slide plays.
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
+            index = next
+        }
+
+        // Step 3: after the new card has mounted (and the slide
+        // is settling), flip the flag on the now-live view. This
+        // is the false→true transition FlyIn's `.animation(value:
+        // appeared)` actually animates — element by element, with
+        // the per-order delay cascade.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
+                contentAppeared = true
             }
         }
     }
@@ -2507,6 +2523,19 @@ private struct CountingNumber: View {
                 return
             }
             if reduceMotion { shown = target; return }
+            runCount()
+        }
+        .onChange(of: target) { _, newTarget in
+            // The owning moment can recompute while this card is
+            // still mounted (refresh tick, new logs landing). The
+            // parent re-renders with fresh `reveal.before/after`,
+            // but `shown` is @State so it keeps the previous
+            // moment's settled value — leaving the bar NUMBER
+            // stale while the title, bar heights, and delta pill
+            // already reflect the new moment. Re-drive `shown` so
+            // all three stay in sync.
+            guard appeared else { return }
+            if reduceMotion { shown = newTarget; return }
             runCount()
         }
     }

@@ -1,4 +1,5 @@
 import Foundation
+import Supabase
 
 /// Posts a JPEG to the Express `/analyze` proxy and decodes the Gemini
 /// response. The Gemini API key never leaves the server — iOS only knows
@@ -13,6 +14,10 @@ import Foundation
 actor AnalyzeService {
     private let baseURL: URL
     private let session: URLSession
+    /// Phase 22 — used to lift the Bearer token for the scan-limit gate.
+    /// Injectable for tests; production callers fall through to
+    /// `FoodieClient.shared.auth.session`.
+    private let client: SupabaseClient
 
     /// Maximum compressed JPEG size we'll send. Gemini's vision endpoint
     /// rejects payloads above ~20MB, and the Express proxy uses
@@ -32,9 +37,11 @@ actor AnalyzeService {
     }()
 
     init(baseURL: URL = AppConfig.analyzeBaseURL,
-         session: URLSession = .shared) {
+         session: URLSession = .shared,
+         client: SupabaseClient = FoodieClient.shared) {
         self.baseURL = baseURL
         self.session = session
+        self.client = client
     }
 
     /// Phase 16. `recentMeals` and `preferredCoaches` are optional
@@ -66,11 +73,24 @@ actor AnalyzeService {
         let url = baseURL.appendingPathComponent("analyze")
         let boundary = "Boundary-\(UUID().uuidString)"
 
+        // Phase 22 — JWT is mandatory now (server uses it to enforce
+        // the scan-limit gate). If we can't get one we're either not
+        // signed in or the session lapsed; surface a clean error
+        // rather than letting the server return a generic 401.
+        let accessToken: String
+        do {
+            accessToken = try await client.auth.session.accessToken
+        } catch {
+            throw AnalyzeError.notAuthenticated
+        }
+        let localDate = Self.localDateString()
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("multipart/form-data; boundary=\(boundary)",
                          forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
         // Build the multipart body. Image part is mandatory; the
         // context fields are appended only when populated.
@@ -92,6 +112,7 @@ actor AnalyzeService {
         request.httpBody = Self.multipartBody(
             boundary: boundary,
             imagePayload: jpegData,
+            localDate: localDate,
             recentMealsJSON: recentMealsJSON,
             preferredCoachesJSON: preferredCoachesJSON,
             recentMoodsJSON: recentMoodsJSON,
@@ -132,6 +153,13 @@ actor AnalyzeService {
             #if DEBUG
             NSLog("[Analyze] HTTP %d body=%@", http.statusCode, body)
             #endif
+            // Phase 22 — structured 429 maps to a distinct typed error
+            // so the capture VM can route to the limit sheet instead
+            // of the generic "something went wrong" UI.
+            if http.statusCode == 429,
+               let info = Self.decodeLimitReached(from: data) {
+                throw AnalyzeError.scanLimitReached(info)
+            }
             throw AnalyzeError.serverError(status: http.statusCode, body: body)
         }
 
@@ -181,6 +209,7 @@ actor AnalyzeService {
     /// behavior.
     private static func multipartBody(boundary: String,
                                       imagePayload: Data,
+                                      localDate: String,
                                       recentMealsJSON: String?,
                                       preferredCoachesJSON: String?,
                                       recentMoodsJSON: String?,
@@ -197,6 +226,12 @@ actor AnalyzeService {
         body.append("Content-Type: image/jpeg\(crlf)\(crlf)".data(using: .utf8)!)
         body.append(imagePayload)
         body.append(crlf.data(using: .utf8)!)
+
+        // Phase 22 — the user's local YYYY-MM-DD. Server buckets the
+        // scan count by this date so the reset boundary lines up with
+        // the user's midnight, not UTC's.
+        appendTextPart(to: &body, boundary: boundary,
+                       name: "localDate", value: localDate)
 
         // Optional text parts
         if let recentMealsJSON {
@@ -317,6 +352,41 @@ actor AnalyzeService {
         }
     }
 
+    /// Phase 22 — local YYYY-MM-DD string. Time zone = device's current
+    /// zone, locale pinned to POSIX so the format is stable regardless
+    /// of the user's locale.
+    static func localDateString(now: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        return f.string(from: now)
+    }
+
+    /// Phase 22 — decode the structured 429 body the server emits when
+    /// the user is over the daily scan limit. Falls back to nil for any
+    /// non-conforming body so the caller can surface a generic error.
+    private static func decodeLimitReached(from data: Data) -> ScanLimitInfo? {
+        struct Wire: Decodable {
+            let error: String
+            let limit: Int
+            let tier: String
+            let resetsAt: String?
+        }
+        guard let wire = try? JSONDecoder().decode(Wire.self, from: data),
+              wire.error == "scan_limit_reached" else {
+            return nil
+        }
+        let resetsAt: Date? = wire.resetsAt.flatMap { raw in
+            let f = DateFormatter()
+            f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.timeZone = TimeZone.current
+            return f.date(from: raw)
+        }
+        return ScanLimitInfo(limit: wire.limit, tier: wire.tier, resetsAt: resetsAt)
+    }
+
     /// Phase 18 — JSON-encode `recent_moods` as
     /// `[{food_name, mood, eaten_at}]`. Caller is expected to filter
     /// to non-null moods before calling, but we defensively skip
@@ -352,6 +422,23 @@ actor AnalyzeService {
     }
 }
 
+/// Phase 22 — server's structured 429 body for the daily scan-limit
+/// gate. The capture VM unwraps this from `AnalyzeError.scanLimitReached`
+/// to drive the limit sheet (Upgrade vs. Log Manually).
+struct ScanLimitInfo: Equatable, Identifiable {
+    let limit: Int
+    let tier: String
+    let resetsAt: Date?
+
+    // Sheet presentation via `.sheet(item:)` requires Identifiable. The
+    // payload is purely informational so any stable id works; reuse
+    // `resetsAt` (or a fallback) so a new 429 with a different reset
+    // time forces the sheet to re-render.
+    var id: String {
+        (resetsAt.map(ISO8601DateFormatter().string(from:)) ?? "no-reset") + "-\(limit)-\(tier)"
+    }
+}
+
 enum AnalyzeError: LocalizedError, Equatable {
     case serverError(status: Int, body: String)
     case offline
@@ -359,6 +446,13 @@ enum AnalyzeError: LocalizedError, Equatable {
     case decodingFailed(underlying: Error)
     case imageTooLarge
     case timeout
+    /// Phase 22 — user hit the daily AI-scan cap. Distinct case so the
+    /// capture flow can route to the limit sheet (Upgrade + Log Manually)
+    /// instead of the generic failure UI.
+    case scanLimitReached(ScanLimitInfo)
+    /// Phase 22 — couldn't obtain a Supabase Bearer token. Practically
+    /// only happens if the session was invalidated mid-flight.
+    case notAuthenticated
 
     var errorDescription: String? {
         switch self {
@@ -374,6 +468,10 @@ enum AnalyzeError: LocalizedError, Equatable {
             return "That photo is too large. Try a smaller one."
         case .timeout:
             return "The analyzer took too long to respond. Try again."
+        case .scanLimitReached:
+            return "You've used today's photo scans."
+        case .notAuthenticated:
+            return "Sign in again to keep scanning."
         }
     }
 
@@ -382,12 +480,15 @@ enum AnalyzeError: LocalizedError, Equatable {
         case (.offline, .offline),
              (.networkUnavailable, .networkUnavailable),
              (.imageTooLarge, .imageTooLarge),
-             (.timeout, .timeout):
+             (.timeout, .timeout),
+             (.notAuthenticated, .notAuthenticated):
             return true
         case (.serverError(let ls, _), .serverError(let rs, _)):
             return ls == rs
         case (.decodingFailed, .decodingFailed):
             return true
+        case (.scanLimitReached(let l), .scanLimitReached(let r)):
+            return l == r
         default:
             return false
         }
