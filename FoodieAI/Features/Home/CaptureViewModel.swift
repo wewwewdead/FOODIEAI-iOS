@@ -516,6 +516,96 @@ final class CaptureViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Uncertainty-aware naming
+
+    /// User picked a name suggestion (or typed a custom one) from the
+    /// uncertainty UI on the `.ready` screen. Re-run `/analyze` with
+    /// `corrected_food_name` so calories/macros recompute for the
+    /// corrected dish. The server treats this as a refinement and does
+    /// NOT count it against the daily scan limit (mirrors the
+    /// quantity-refinement path).
+    ///
+    /// On success: stay in `.ready` with the recomputed response. We
+    /// also stamp `editedFoodName` with the corrected name so the
+    /// rest of the flow (save, display) treats it as authoritative —
+    /// matching what the user picked even if Gemini's `food` echoes
+    /// back slightly different copy.
+    ///
+    /// On failure: fall back to the original response — don't punish
+    /// the user for a network blip when correcting a name.
+    func reanalyzeWithCorrectedName(_ correctedName: String) async {
+        let trimmed = correctedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        // Accept from `.ready` (the typical entry point) and also from
+        // a transient `.analyzing` if a rapid follow-up tap lands while
+        // a previous correction is in flight — the user's intent is the
+        // same: the dish is `trimmed`.
+        let image: UIImage
+        let originalResponse: AnalyzeResponse
+        switch state {
+        case .ready(let i, let r):
+            image = i
+            originalResponse = r
+        default:
+            #if DEBUG
+            NSLog("[NameFix] reanalyzeWithCorrectedName ignored — state=%@",
+                  Self.stateName(state))
+            #endif
+            return
+        }
+
+        editedFoodName = trimmed
+        state = .analyzing(image)
+
+        let jpeg = await Task.detached(priority: .userInitiated) {
+            ImagePreparation.compressMain(image)
+        }.value
+        guard case .analyzing = state, !Task.isCancelled else { return }
+
+        guard let jpeg else {
+            #if DEBUG
+            NSLog("[NameFix] compression FAILED; falling back to original response")
+            #endif
+            patternInsight = patternInsightService.insight(for: originalResponse)
+            state = .ready(image, originalResponse)
+            return
+        }
+
+        let context = await fetchContextForAnalyze()
+
+        do {
+            let refined = try await analyzer.analyze(
+                jpegData: jpeg,
+                recentMeals: context.recentMeals,
+                preferredCoaches: context.preferredCoaches,
+                recentMoods: context.recentMoods,
+                correctedFoodName: trimmed
+            )
+            guard case .analyzing = state, !Task.isCancelled else { return }
+            #if DEBUG
+            NSLog("[NameFix] succeeded — corrected='%@' refined food=%@ calories=%@ (orig calories=%@)",
+                  trimmed,
+                  refined.analysis.food ?? "<nil>",
+                  refined.analysis.calories.map { "\($0)" } ?? "<nil>",
+                  originalResponse.analysis.calories.map { "\($0)" } ?? "<nil>")
+            #endif
+            Haptics.prepare()
+            // Prefer the refined response only when it still detected
+            // food; otherwise keep the original so the user doesn't
+            // lose their result over a flaky re-pass.
+            let resolved = refined.analysis.hasFood ? refined : originalResponse
+            patternInsight = patternInsightService.insight(for: resolved)
+            state = .ready(image, resolved)
+        } catch {
+            #if DEBUG
+            NSLog("[NameFix] reanalyze FAILED, falling back to original: %@", "\(error)")
+            #endif
+            patternInsight = patternInsightService.insight(for: originalResponse)
+            state = .ready(image, originalResponse)
+        }
+    }
+
     /// User dismissed the clarification sheet without adjusting —
     /// keep the first-pass analysis. Also called when the sheet is
     /// drag-dismissed.

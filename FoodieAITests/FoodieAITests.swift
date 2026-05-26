@@ -814,7 +814,9 @@ final class FoodPatternInsightServiceTests: XCTestCase {
                 protein: protein, fat: fat, fiber: fiber,
                 benefits: nil, drawbacks: nil, nutrients: nil,
                 coachAdvice: nil,
-                portionAmbiguousItems: nil
+                portionAmbiguousItems: nil,
+                nameConfidence: nil,
+                nameAlternatives: nil
             ),
             coach: nil
         )
@@ -1099,7 +1101,9 @@ final class SaveFlowMacroPreservationTests: XCTestCase {
                 drawbacks: [],
                 nutrients: [],
                 coachAdvice: nil,
-                portionAmbiguousItems: nil
+                portionAmbiguousItems: nil,
+                nameConfidence: nil,
+                nameAlternatives: nil
             ),
             coach: nil
         )

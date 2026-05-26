@@ -64,6 +64,12 @@ struct AnalysisResultView: View {
     /// flows into `save()` (pre-save) or a `food_logs` row patch
     /// (post-save).
     var onFoodNameEdited: ((String) -> Void)? = nil
+    /// Uncertainty-aware naming. Fired when the user picks an alternative
+    /// chip OR submits a custom name from the "Something else…" field.
+    /// Triggers a server re-analysis anchored on the corrected dish
+    /// (calories/macros recompute). Server treats this as a refinement
+    /// and does NOT charge it against the daily scan limit.
+    var onFoodNameCorrected: ((String) -> Void)? = nil
     let onSave: () -> Void
     let onCancel: () -> Void
 
@@ -74,6 +80,15 @@ struct AnalysisResultView: View {
     @State private var isEditingName: Bool = false
     @State private var editedNameDraft: String = ""
     @FocusState private var foodNameFieldFocused: Bool
+    /// Uncertainty UI — shown when the model returned low/medium
+    /// `nameConfidence` or a non-empty `nameAlternatives`. We surface
+    /// the suggestions only until the user has committed a correction
+    /// (then they trust their pick and don't need to be re-prompted).
+    @State private var hasAcceptedNameCorrection: Bool = false
+    /// Drives the inline "Something else…" custom-name TextField.
+    @State private var isEnteringCustomName: Bool = false
+    @State private var customNameDraft: String = ""
+    @FocusState private var customNameFieldFocused: Bool
     /// One-shot bounce trigger for the "Edit name" pill's pencil glyph.
     /// Flips 0 → 1 once after the cascade reveal so the symbolEffect
     /// plays exactly once per result-view lifetime.
@@ -353,8 +368,197 @@ struct AnalysisResultView: View {
                 Spacer(minLength: 0)
             }
             editableFoodName
+            nameSuggestionsBlock
             repeatChip
         }
+    }
+
+    // MARK: - Uncertainty-aware naming suggestions
+
+    /// True when the model expressed name uncertainty AND the user
+    /// hasn't already committed a correction this session. Suppressed
+    /// during inline edit to avoid competing affordances.
+    private var shouldShowNameSuggestions: Bool {
+        guard !hasAcceptedNameCorrection else { return false }
+        guard !isEditingName else { return false }
+        guard onFoodNameCorrected != nil else { return false }
+        return analysis.isNameUncertain
+    }
+
+    /// "Is this right?" prompt + tappable alternatives + custom-entry
+    /// affordance. Rendered only when `shouldShowNameSuggestions`. The
+    /// chips are wrapped via a simple FlowLayout so longer dish names
+    /// (e.g. "Ppyeo-haejangguk (pork bone soup)") flow to a second row
+    /// without clipping.
+    @ViewBuilder
+    private var nameSuggestionsBlock: some View {
+        if shouldShowNameSuggestions {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                Text("Is this right?")
+                    .appFont(.captionStrong)
+                    .foregroundStyle(Color.brandDeep)
+
+                NameSuggestionFlow(spacing: 8, runSpacing: 8) {
+                    ForEach(uniqueAlternatives, id: \.self) { alt in
+                        suggestionChip(label: alt) {
+                            commitNameCorrection(alt)
+                        }
+                    }
+                    suggestionChip(
+                        label: "Something else…",
+                        systemImage: "pencil",
+                        emphasized: false
+                    ) {
+                        beginCustomNameEntry()
+                    }
+                }
+
+                if isEnteringCustomName {
+                    customNameField
+                        .transition(.opacity.combined(
+                            with: .move(edge: .top)
+                        ))
+                }
+            }
+            .padding(.top, 2)
+            .transition(.opacity)
+        }
+    }
+
+    /// Dedupe + drop any alternative that equals the displayed name
+    /// (case-insensitive, whitespace-trimmed) so we never offer the
+    /// user a chip that re-asserts what's already on screen.
+    private var uniqueAlternatives: [String] {
+        let raw = analysis.nameAlternatives ?? []
+        let currentKey = displayedFoodName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        var seen = Set<String>()
+        seen.insert(currentKey)
+        var out: [String] = []
+        out.reserveCapacity(raw.count)
+        for s in raw {
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted {
+                out.append(trimmed)
+            }
+        }
+        return Array(out.prefix(3))
+    }
+
+    private func suggestionChip(label: String,
+                                systemImage: String? = nil,
+                                emphasized: Bool = true,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 12, weight: .bold))
+                }
+                Text(label)
+                    .appFont(.captionStrong)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+            }
+            .foregroundStyle(emphasized ? Color.brandDeep : Color.inkMute)
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, 8)
+            .background(
+                Capsule().fill(emphasized ? Color.brandSoft : Color.bgSurface)
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(
+                        emphasized
+                            ? Color.brand.opacity(0.55)
+                            : Color.borderHairline,
+                        lineWidth: 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            emphasized ? "Use suggestion \(label)" : label
+        )
+    }
+
+    private var customNameField: some View {
+        HStack(spacing: AppSpacing.sm) {
+            TextField("Type the dish name",
+                      text: $customNameDraft)
+                .font(AppFont.font(.bodyEmphasis))
+                .foregroundStyle(Color.ink)
+                .tint(Color.brand)
+                .textFieldStyle(.plain)
+                .submitLabel(.done)
+                .autocorrectionDisabled(false)
+                .textInputAutocapitalization(.sentences)
+                .focused($customNameFieldFocused)
+                .onSubmit { commitCustomNameEntry() }
+                .padding(.horizontal, AppSpacing.md)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: AppRadius.md)
+                        .fill(Color.bgSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppRadius.md)
+                        .strokeBorder(Color.brand.opacity(0.55), lineWidth: 1)
+                )
+
+            Button(action: { commitCustomNameEntry() }) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 14, weight: .heavy))
+                    .foregroundStyle(Color.white)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        Circle().fill(
+                            customNameDraft
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                .isEmpty
+                                ? Color.brand.opacity(0.45)
+                                : Color.brand
+                        )
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(
+                customNameDraft
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+            )
+            .accessibilityLabel("Use this name")
+        }
+    }
+
+    private func beginCustomNameEntry() {
+        Haptics.tap()
+        customNameDraft = ""
+        isEnteringCustomName = true
+        customNameFieldFocused = true
+    }
+
+    private func commitCustomNameEntry() {
+        let trimmed = customNameDraft
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        customNameFieldFocused = false
+        isEnteringCustomName = false
+        commitNameCorrection(trimmed)
+    }
+
+    /// Shared commit path for both chip taps and custom-name entry.
+    /// Records that the user has accepted a correction (hides the
+    /// uncertainty UI for the rest of this session), then hands the
+    /// name to the parent for re-analysis. The parent's view model
+    /// is what stamps `editedFoodName` and re-runs `/analyze`.
+    private func commitNameCorrection(_ name: String) {
+        Haptics.soft()
+        hasAcceptedNameCorrection = true
+        onFoodNameCorrected?(name)
     }
 
     // MARK: - Your Pattern zone
@@ -1597,6 +1801,70 @@ private struct CoachReactionBubble: View {
     }
 }
 
+/// Minimal flow layout for the uncertainty-aware name suggestion chips.
+/// SwiftUI's HStack would clip on iPhone widths when alternatives are
+/// long ("Ppyeo-haejangguk (pork bone soup)"); this wraps onto a second
+/// row instead. iOS 17+ `Layout` protocol — no third-party dep.
+fileprivate struct NameSuggestionFlow: Layout {
+    var spacing: CGFloat = 8
+    var runSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize,
+                      subviews: Subviews,
+                      cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var rowWidth: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var totalHeight: CGFloat = 0
+        var totalWidth: CGFloat = 0
+
+        for v in subviews {
+            let size = v.sizeThatFits(.unspecified)
+            let wouldFit = (rowWidth == 0)
+                || (rowWidth + spacing + size.width <= maxWidth)
+            if wouldFit {
+                rowWidth += (rowWidth == 0 ? 0 : spacing) + size.width
+                rowHeight = max(rowHeight, size.height)
+            } else {
+                totalHeight += rowHeight + runSpacing
+                totalWidth = max(totalWidth, rowWidth)
+                rowWidth = size.width
+                rowHeight = size.height
+            }
+        }
+        totalHeight += rowHeight
+        totalWidth = max(totalWidth, rowWidth)
+        return CGSize(
+            width: maxWidth.isFinite ? maxWidth : totalWidth,
+            height: totalHeight
+        )
+    }
+
+    func placeSubviews(in bounds: CGRect,
+                       proposal: ProposedViewSize,
+                       subviews: Subviews,
+                       cache: inout ()) {
+        let maxWidth = bounds.width
+        var x: CGFloat = bounds.minX
+        var y: CGFloat = bounds.minY
+        var rowHeight: CGFloat = 0
+
+        for v in subviews {
+            let size = v.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.minX + maxWidth {
+                x = bounds.minX
+                y += rowHeight + runSpacing
+                rowHeight = 0
+            }
+            v.place(at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+
 #if DEBUG
 #Preview("AnalysisResultView — full") {
     let sample = AnalyzeResponse(
@@ -1625,7 +1893,9 @@ private struct CoachReactionBubble: View {
                 "Protein: muscle synthesis"
             ],
             coachAdvice: "E = mc²… and a slice of pizza ≈ 285 kcal. Pace thyself.",
-            portionAmbiguousItems: nil
+            portionAmbiguousItems: nil,
+            nameConfidence: nil,
+            nameAlternatives: nil
         ),
         coach: "Albert Einstein"
     )

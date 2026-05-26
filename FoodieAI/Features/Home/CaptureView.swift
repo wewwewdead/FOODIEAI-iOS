@@ -214,9 +214,6 @@ struct CaptureView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        topBar
-                            .padding(.top, AppSpacing.md)
-
                         // Idle state: hero copy + photo card.
                         // Non-idle state: result rendering takes over below.
                         // Both branches carry transitions so the cross-
@@ -261,6 +258,16 @@ struct CaptureView: View {
                     }
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, 120) // breathing room above the pinned CTA
+                }
+                // Pin the wordmark + scan chip + avatar as a fixed top
+                // strip so the hero copy can't scroll up into them.
+                // The opaque bgCanvas backdrop hides any rubber-band
+                // bleed from scroll content beneath.
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    topBar
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.vertical, AppSpacing.sm)
+                        .background(Color.bgCanvas)
                 }
                 // Dragging the scroll content interactively pulls the
                 // keyboard down with the finger. AnalysisResultView's
@@ -1359,6 +1366,9 @@ struct CaptureView: View {
                     patternInsight: viewModel.patternInsight,
                     onFoodNameEdited: { name in
                         viewModel.applyFoodNameEdit(name)
+                    },
+                    onFoodNameCorrected: { name in
+                        Task { await viewModel.reanalyzeWithCorrectedName(name) }
                     },
                     onSave:   { handleSaveTapped() },
                     onCancel: { handleCancelTapped() }

@@ -79,7 +79,8 @@ actor AnalyzeService {
                  recentMeals: [FoodLog] = [],
                  preferredCoaches: [String] = [],
                  recentMoods: [FoodLog] = [],
-                 userQuantities: [(name: String, quantity: String)] = []) async throws -> AnalyzeResponse {
+                 userQuantities: [(name: String, quantity: String)] = [],
+                 correctedFoodName: String? = nil) async throws -> AnalyzeResponse {
         guard jpegData.count <= Self.maxJPEGBytes else {
             throw AnalyzeError.imageTooLarge
         }
@@ -122,6 +123,17 @@ actor AnalyzeService {
         let recentMoodsJSON = Self.encodeRecentMoods(boundedMoods)
         let boundedQuantities = Array(userQuantities.prefix(8))
         let userQuantitiesJSON = Self.encodeUserQuantities(boundedQuantities)
+        // Uncertainty-aware naming — when the user picked an alternative
+        // or typed a custom name, we send it so the server re-runs the
+        // analysis anchored on the corrected dish. Empty/nil → omit the
+        // multipart part entirely so the body shape stays identical to
+        // the pre-feature client.
+        let trimmedCorrectedName: String? = {
+            guard let raw = correctedFoodName else { return nil }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return String(trimmed.prefix(120))
+        }()
 
         request.httpBody = Self.multipartBody(
             boundary: boundary,
@@ -130,14 +142,16 @@ actor AnalyzeService {
             recentMealsJSON: recentMealsJSON,
             preferredCoachesJSON: preferredCoachesJSON,
             recentMoodsJSON: recentMoodsJSON,
-            userQuantitiesJSON: userQuantitiesJSON
+            userQuantitiesJSON: userQuantitiesJSON,
+            correctedFoodName: trimmedCorrectedName
         )
 
         #if DEBUG
-        NSLog("[Analyze] POST %@ bytes=%d recentMeals=%d prefs=%d recentMoods=%d userQuantities=%d",
+        NSLog("[Analyze] POST %@ bytes=%d recentMeals=%d prefs=%d recentMoods=%d userQuantities=%d correctedName=%@",
               url.absoluteString, jpegData.count,
               boundedMeals.count, cleanedCoaches.count,
-              boundedMoods.count, boundedQuantities.count)
+              boundedMoods.count, boundedQuantities.count,
+              trimmedCorrectedName ?? "<nil>")
         #endif
 
         let data: Data
@@ -227,7 +241,8 @@ actor AnalyzeService {
                                       recentMealsJSON: String?,
                                       preferredCoachesJSON: String?,
                                       recentMoodsJSON: String?,
-                                      userQuantitiesJSON: String?) -> Data {
+                                      userQuantitiesJSON: String?,
+                                      correctedFoodName: String?) -> Data {
         var body = Data()
         let crlf = "\r\n"
 
@@ -263,6 +278,10 @@ actor AnalyzeService {
         if let userQuantitiesJSON {
             appendTextPart(to: &body, boundary: boundary,
                            name: "user_quantities", value: userQuantitiesJSON)
+        }
+        if let correctedFoodName {
+            appendTextPart(to: &body, boundary: boundary,
+                           name: "corrected_food_name", value: correctedFoodName)
         }
 
         body.append("--\(boundary)--\(crlf)".data(using: .utf8)!)

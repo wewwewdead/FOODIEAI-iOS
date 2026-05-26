@@ -8,11 +8,10 @@ import SwiftUI
 /// work unchanged.
 ///
 /// Design:
-///   - 64pt capsule that floats 16pt above the bottom safe area
+///   - 56pt capsule that floats above the bottom safe area
 ///   - Liquid Glass background (iOS 26) / ultraThinMaterial (iOS 17–25)
 ///   - 4 tab buttons, brand-tinted active state
-///   - A morphing brand pill that slides between tabs via
-///     `matchedGeometryEffect` — the visual signature of the bar
+///   - A brand pill that slides between fixed-width tab slots
 ///   - Scale-stamp on tap, soft haptic, brand spring
 ///   - Auto-hides behind a subtle bottom fade so content scrolling under
 ///     it dissolves smoothly
@@ -21,60 +20,62 @@ struct FloatingTabBar: View {
     let tabs: [TabSpec]
     var onTabTap: ((Int, Int) -> Void)? = nil
 
-    @Namespace private var indicator
     @State private var indicatorSelection: Int = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(Array(tabs.enumerated()), id: \.offset) { index, spec in
-                TabButton(
-                    spec: spec,
-                    isSelected: selection == index,
-                    showsIndicator: indicatorSelection == index,
-                    namespace: indicator,
-                    reduceMotion: reduceMotion,
-                    onTap: {
-                        guard selection != index else {
-                            // Tap on already-selected tab → soft haptic
-                            // only.
-                            Haptics.soft()
-                            return
-                        }
-                        onTabTap?(selection, index)
-                        Haptics.tap()
-                        // CRITICAL perf fix: do NOT wrap this in
-                        // `withAnimation`. A withAnimation here would
-                        // propagate the spring curve through the
-                        // `$selection` binding into the root content
-                        // host. The indicator animation is driven by
-                        // private `indicatorSelection` state below.
-                        selection = index
+        GeometryReader { geo in
+            let slotWidth = geo.size.width / CGFloat(max(tabs.count, 1))
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.brand)
+                    .frame(width: max(44, slotWidth - 8), height: 44)
+                    .offset(x: CGFloat(indicatorSelection) * slotWidth + 4)
+
+                HStack(spacing: 0) {
+                    ForEach(Array(tabs.enumerated()), id: \.offset) { index, spec in
+                        TabButton(
+                            spec: spec,
+                            isSelected: selection == index,
+                            reduceMotion: reduceMotion,
+                            onTap: {
+                                guard selection != index else {
+                                    // Tap on already-selected tab → soft haptic
+                                    // only.
+                                    Haptics.soft()
+                                    return
+                                }
+                                onTabTap?(selection, index)
+                                Haptics.tap()
+                                moveIndicator(to: index)
+                                // Keep the root content host out of the
+                                // indicator spring; this binding may load and
+                                // reveal a persistent tab layer.
+                                selection = index
+                            }
+                        )
+                        .frame(width: slotWidth, height: 44)
                     }
-                )
+                }
             }
+            // GeometryReader places content top-leading by default; fill
+            // its frame so the ZStack's 44pt children sit centered inside
+            // the 56pt bar instead of pinned to the top.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(height: 56)
         .onAppear {
             indicatorSelection = selection
         }
         .onChange(of: selection) { _, newValue in
-            if reduceMotion {
-                indicatorSelection = newValue
-            } else {
-                // Keep the pill motion local to the tab bar. The parent
-                // content host sees a plain selection mutation, while
-                // this internal state drives the matchedGeometryEffect
-                // spring.
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                    indicatorSelection = newValue
-                }
+            if indicatorSelection != newValue {
+                moveIndicator(to: newValue)
             }
         }
-        .padding(6)
         .liquidGlass(in: Capsule(), tint: .brand, strokeOpacity: 0.22)
-        // One combined shadow instead of two — each .shadow() forces
-        // an additional render pass, so collapsing them is a free
-        // perf win without changing the look meaningfully.
+        // Keep shadow work static on the bar instead of attaching it
+        // to the moving indicator.
         .shadow(color: Color.brand.opacity(0.20), radius: 20, x: 0, y: 10)
         .padding(.horizontal, AppSpacing.lg)
         .padding(.bottom, 8)
@@ -83,6 +84,21 @@ struct FloatingTabBar: View {
         // instead of re-rasterizing the capsule + shadow stack.
         .compositingGroup()
         .accessibilityElement(children: .contain)
+    }
+
+    private func moveIndicator(to index: Int) {
+        let oldIndex = indicatorSelection
+        #if DEBUG
+        NSLog("[TabPerf] indicator move %d -> %d", oldIndex, index)
+        #endif
+
+        if reduceMotion {
+            indicatorSelection = index
+        } else {
+            withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.88, blendDuration: 0.08)) {
+                indicatorSelection = index
+            }
+        }
     }
 
     struct TabSpec {
@@ -100,8 +116,6 @@ struct FloatingTabBar: View {
     private struct TabButton: View {
         let spec: TabSpec
         let isSelected: Bool
-        let showsIndicator: Bool
-        let namespace: Namespace.ID
         let reduceMotion: Bool
         let onTap: () -> Void
 
@@ -118,13 +132,7 @@ struct FloatingTabBar: View {
                 onTap()
             }) {
                 ZStack {
-                    if showsIndicator {
-                        Capsule()
-                            .fill(Color.brand)
-                            .matchedGeometryEffect(id: "tabIndicator", in: namespace)
-                            .shadow(color: Color.brand.opacity(0.42), radius: 10, x: 0, y: 4)
-                    }
-                    Image(systemName: resolvedSymbol)
+                    Image(systemName: spec.systemImage)
                         .font(.system(size: 15, weight: .heavy))
                         .symbolRenderingMode(.hierarchical)
                         .scaleEffect(pressStamp ? 1.18 : 1.0)
@@ -132,7 +140,7 @@ struct FloatingTabBar: View {
                         .opacity(isSelected ? 0 : 1)
 
                     HStack(spacing: 6) {
-                        Image(systemName: resolvedSymbol)
+                        Image(systemName: selectedSymbol)
                             .font(.system(size: 15, weight: .heavy))
                             .symbolRenderingMode(.hierarchical)
                             .scaleEffect(pressStamp ? 1.18 : 1.0)
@@ -143,8 +151,7 @@ struct FloatingTabBar: View {
                     .foregroundStyle(Color.brandDeep)
                     .opacity(isSelected ? 1 : 0)
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
@@ -152,9 +159,8 @@ struct FloatingTabBar: View {
             .accessibilityAddTraits(isSelected ? .isSelected : [])
         }
 
-        private var resolvedSymbol: String {
-            if isSelected, let sel = spec.selectedSystemImage { return sel }
-            return spec.systemImage
+        private var selectedSymbol: String {
+            spec.selectedSystemImage ?? spec.systemImage
         }
     }
 }

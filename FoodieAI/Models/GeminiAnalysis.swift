@@ -29,6 +29,14 @@ struct GeminiAnalysis: Codable, Hashable {
     /// means "all portions are visually determinable" — no follow-up
     /// needed.
     let portionAmbiguousItems: [AmbiguousItem]?
+    /// Uncertainty-aware naming. "high" | "medium" | "low". Nullable
+    /// so older server builds (and partial Gemini outputs) decode
+    /// cleanly — treat nil/unknown as effectively "high" (no friction).
+    let nameConfidence: String?
+    /// Alternative dish names the model considered when confidence is
+    /// "low" or "medium". Empty/nil on high-confidence scans. Most
+    /// likely first — the UI renders them as tappable chips.
+    let nameAlternatives: [String]?
 
     /// Quantity Clarification — one row in `portionAmbiguousItems`.
     /// Hashable + Identifiable so the clarification sheet can iterate
@@ -49,6 +57,17 @@ struct GeminiAnalysis: Codable, Hashable {
     var hasFood: Bool {
         let fb = fallback ?? ""
         return fb.isEmpty && food != nil
+    }
+
+    /// Surface the suggestion UI when the model expressed uncertainty
+    /// — either an explicit low/medium confidence label, or simply by
+    /// returning a non-empty alternatives list. Treats nil/unknown
+    /// confidence as confident so pre-feature servers stay friction-free.
+    var isNameUncertain: Bool {
+        let label = (nameConfidence ?? "").lowercased()
+        if label == "low" || label == "medium" { return true }
+        if let alts = nameAlternatives, !alts.isEmpty { return true }
+        return false
     }
 }
 

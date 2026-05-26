@@ -449,7 +449,9 @@ private enum SamplePayload {
                 "Protein: muscle synthesis"
             ],
             coachAdvice: "E = mc²… and a slice of pizza ≈ 285 kcal. Pace thyself.",
-            portionAmbiguousItems: nil
+            portionAmbiguousItems: nil,
+            nameConfidence: nil,
+            nameAlternatives: nil
         ),
         coach: "Albert Einstein"
     )
