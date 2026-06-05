@@ -415,9 +415,9 @@ struct ProfileView: View {
                 TierBadge(tier: subscriptions.tier)
                 Spacer()
                 // Show today's usage so the upgrade nudge sits next to
-                // the reason for it. Pro users still see "X of 10
-                // today" — they paid for the higher cap; visibility is
-                // a feature, not a punishment.
+                // the reason for it. Free users see "X of Y scans
+                // today"; Pro reads as "Unlimited" — the silent safety
+                // cap is never surfaced as a number.
                 Text(planUsageLabel)
                     .appFont(.caption)
                     .foregroundStyle(Color.inkMute)
@@ -468,6 +468,11 @@ struct ProfileView: View {
     }
 
     private var planUsageLabel: String {
+        // Pro is presented as unlimited — drop the counter entirely so
+        // the silent safety cap never shows. Free keeps "X of Y today".
+        if subscriptions.isUnlimited {
+            return "Unlimited"
+        }
         let used = subscriptions.scansUsedToday
         let limit = subscriptions.dailyLimit
         return "\(used) of \(limit) scans today"
@@ -492,7 +497,7 @@ struct ProfileView: View {
                         .appFont(.bodyEmphasis)
                         .foregroundStyle(Color.textPrimary)
                         .lineLimit(1)
-                    Text("\(SubscriptionManager.proDailyLimit) scans a day")
+                    Text("Unlimited photo scans")
                         .appFont(.caption)
                         .foregroundStyle(Color.inkMute)
                         .lineLimit(1)

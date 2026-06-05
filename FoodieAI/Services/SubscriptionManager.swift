@@ -32,12 +32,6 @@ final class SubscriptionManager: ObservableObject {
     static let yearlyProductID  = "com.thefoodieai.pro.yearly"
     static let allProductIDs    = [monthlyProductID, yearlyProductID]
 
-    /// Pro-tier daily scan quota — mirrored from the server's
-    /// `computeEntitlement` so UI copy stays in sync. Used by call sites
-    /// that need to render the upgrade nudge before the manager has
-    /// learned the user's actual entitlement.
-    static let proDailyLimit: Int = 10
-
     // MARK: - Published state
 
     @Published private(set) var tier: Tier = .free
@@ -50,6 +44,13 @@ final class SubscriptionManager: ObservableObject {
     // 4 for one round-trip before sync corrects to 2.
     @Published private(set) var dailyLimit: Int = 4
     @Published private(set) var scansUsedToday: Int = 0
+    /// Server signal that the Pro tier is presented as "unlimited". When
+    /// true, every scan-count surface hides the number and renders
+    /// "Unlimited" / "Pro" instead of "X of Y" — the server still keeps a
+    /// silent safety cap (`dailyLimit`) but it is never shown. Defaults
+    /// to false and only flips true when the server says so, so free
+    /// users (and pre-flag server responses) keep the counter UI.
+    @Published private(set) var isUnlimited: Bool = false
     @Published private(set) var resetsAt: Date?
     @Published private(set) var proExpiresAt: Date?
     @Published private(set) var products: [Product] = []
@@ -260,6 +261,12 @@ final class SubscriptionManager: ObservableObject {
         }
         if let limit = body["limit"] as? Int {
             self.dailyLimit = limit
+        }
+        // Pro entitlements carry `unlimited: true` so the UI hides the
+        // counter. Absent (older server) → leave the conservative default
+        // of false and the count UI renders normally.
+        if let unlimited = body["unlimited"] as? Bool {
+            self.isUnlimited = unlimited
         }
         if let used = body["scansUsedToday"] as? Int {
             self.scansUsedToday = used

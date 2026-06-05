@@ -155,6 +155,9 @@ struct CaptureView: View {
         let foodName: String
         let questRewardCopy: String?
         let scansRemaining: Int
+        /// Pro users are marketed as unlimited — the toast's scan nudge
+        /// must not show a remaining-count number for them.
+        var isUnlimited: Bool = false
     }
 
     enum ScanWarningKind: Identifiable {
@@ -678,6 +681,7 @@ struct CaptureView: View {
                 used: subscriptions.scansUsedToday,
                 limit: subscriptions.dailyLimit,
                 isPro: subscriptions.tier == .pro,
+                isUnlimited: subscriptions.isUnlimited,
                 onTryPro: {
                     // Dismiss this sheet first, then present the
                     // paywall on the next runloop tick. SwiftUI can
@@ -855,7 +859,8 @@ struct CaptureView: View {
             manualLogToast = ManualLogToast(
                 foodName: inserted.foodName,
                 questRewardCopy: evaluation?.rewardCopy,
-                scansRemaining: SubscriptionManager.shared.scansRemainingToday
+                scansRemaining: SubscriptionManager.shared.scansRemainingToday,
+                isUnlimited: SubscriptionManager.shared.isUnlimited
             )
         }
     }
@@ -941,8 +946,8 @@ struct CaptureView: View {
     /// the moment a scan succeeds. At 0 remaining the chip morphs into
     /// a soft peach "Out · Go Pro" warning state with a pulsing halo
     /// and a one-shot wiggle, and becomes the tap target → paywall.
-    /// Free users see "N left"; Pro users get a mini progress ring
-    /// showing N / 10 today so the higher cap reads as earned.
+    /// Free users see "N left"; Pro users read "Unlimited" with a crown
+    /// and no number — the silent safety cap is never surfaced.
     ///
     /// Visuals & motion are owned by `ScanCounterChip` so it can hold
     /// its own animation state without forcing every CaptureView
@@ -952,7 +957,8 @@ struct CaptureView: View {
         ScanCounterChip(
             remaining: subscriptions.scansRemainingToday,
             limit: subscriptions.dailyLimit,
-            isPro: subscriptions.tier == .pro
+            isPro: subscriptions.tier == .pro,
+            isUnlimited: subscriptions.isUnlimited
         ) {
             // Any state → explainer modal. The modal carries the
             // "Try Pro" CTA itself so out-of-scans users still have a
@@ -3288,6 +3294,19 @@ private struct ManualLogToastView: View {
     let onScanAction: () -> Void
     let onTrackerAction: () -> Void
 
+    /// Scan-nudge line under the manual-log toast. Pro reads as
+    /// unlimited (no remaining-count number, ever); free users see the
+    /// count and, when out, an "unlimited" upsell — never a cap number.
+    private var scanNudgeCopy: String {
+        if toast.isUnlimited {
+            return "Try a photo scan?"
+        }
+        if toast.scansRemaining > 0 {
+            return "Try a photo scan? \(toast.scansRemaining) left today"
+        }
+        return "Upgrade for unlimited photo scans"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: AppSpacing.sm) {
@@ -3329,9 +3348,7 @@ private struct ManualLogToastView: View {
                     Haptics.tap()
                     onScanAction()
                 } label: {
-                    Text(toast.scansRemaining > 0
-                         ? "Try a photo scan? \(toast.scansRemaining) left today"
-                         : "Upgrade for \(SubscriptionManager.proDailyLimit) photo scans/day")
+                    Text(scanNudgeCopy)
                         .appFont(.caption)
                         .foregroundStyle(Color.brandDeep)
                     Image(systemName: "arrow.right")
@@ -3380,6 +3397,10 @@ private struct ScanCounterChip: View {
     let remaining: Int
     let limit: Int
     let isPro: Bool
+    /// When true (Pro), the chip drops the counter entirely and just
+    /// reads "Unlimited" — no number, no depletion ring, and it never
+    /// enters the out/warning state (the silent safety cap is invisible).
+    var isUnlimited: Bool = false
     /// Fires on every tap regardless of state. The parent decides
     /// what to present — historically out-state went straight to
     /// the paywall, but the chip now always opens the explainer
@@ -3396,7 +3417,10 @@ private struct ScanCounterChip: View {
     /// attention budget there) and under Reduce Motion.
     @State private var heartbeatScale: CGFloat = 1.0
 
-    private var isOut: Bool { remaining == 0 }
+    // Unlimited Pro never reads as "out" — the silent safety cap stays
+    // invisible, so even if `remaining` hits 0 the chip keeps saying
+    // "Unlimited" rather than flipping to the warning state.
+    private var isOut: Bool { !isUnlimited && remaining == 0 }
     private var isLow: Bool { !isPro && remaining == 1 }
 
     var body: some View {
@@ -3444,7 +3468,13 @@ private struct ScanCounterChip: View {
     // than a dead-end.
     @ViewBuilder
     private var iconView: some View {
-        if isPro && !isOut {
+        if isUnlimited {
+            // Crown, not a depletion ring — a ring would encode a
+            // proportion of the hidden cap. The crown reads as "Pro".
+            Image(systemName: "crown.fill")
+                .font(.system(size: 11, weight: .heavy))
+                .transition(.scale.combined(with: .opacity))
+        } else if isPro && !isOut {
             ProgressRingMini(
                 progress: Double(limit - remaining) / Double(max(limit, 1))
             )
@@ -3466,7 +3496,12 @@ private struct ScanCounterChip: View {
     @ViewBuilder
     private var labelView: some View {
         Group {
-            if isOut {
+            if isUnlimited {
+                Text("Unlimited")
+                    .appFont(.captionStrong)
+                    .lineLimit(1)
+                    .transition(.opacity)
+            } else if isOut {
                 Text(isPro ? "Maxed today" : "Out · Go Pro")
                     .appFont(.captionStrong)
                     .lineLimit(1)
@@ -3625,9 +3660,10 @@ private struct ScanCounterChip: View {
     // MARK: - Accessibility
 
     private var accessibilityText: String {
+        if isUnlimited { return "Unlimited photo scans with Pro" }
         if isOut {
             return isPro
-                ? "You have used all 10 scans today"
+                ? "You've reached today's scan limit"
                 : "Out of scans today. Tap to upgrade to Pro."
         }
         if isPro { return "\(remaining) of \(limit) scans today" }
@@ -3672,7 +3708,7 @@ private struct ProgressRingMini: View {
 ///     the user's actual state is the first thing they read).
 ///   • Free policy spelled out — 4/day for the first week, then 2/day
 ///     forever. Bonus framing rather than "your cap will drop".
-///   • Pro policy — 10/day, every day, cancel anytime.
+///   • Pro policy — unlimited photo scans, every day, cancel anytime.
 ///   • Action row: free users get a gold "Try Pro" pill that opens
 ///     the existing `PaywallView`; pro users get a quiet "You're on
 ///     Pro" confirmation + Close.
@@ -3689,6 +3725,9 @@ private struct ScanLimitsExplainerSheet: View {
     let used: Int
     let limit: Int
     let isPro: Bool
+    /// Pro is presented as unlimited — the today strip and the Pro card
+    /// render "Unlimited" with no number when this is set.
+    var isUnlimited: Bool = false
     let onTryPro: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -3814,13 +3853,20 @@ private struct ScanLimitsExplainerSheet: View {
             Spacer()
             // Mini pip strip — one circle per scan in today's limit,
             // filled = used, empty = remaining. Capped at 10 so pro
-            // doesn't get an unreadable row.
-            HStack(spacing: 4) {
-                ForEach(0..<min(limit, 10), id: \.self) { i in
-                    Circle()
-                        .fill(i < used ? Color.brandDeep : Color.brand.opacity(0.25))
-                        .frame(width: 7, height: 7)
+            // doesn't get an unreadable row. Hidden for unlimited Pro:
+            // a finite pip count would imply a cap.
+            if !isUnlimited {
+                HStack(spacing: 4) {
+                    ForEach(0..<min(limit, 10), id: \.self) { i in
+                        Circle()
+                            .fill(i < used ? Color.brandDeep : Color.brand.opacity(0.25))
+                            .frame(width: 7, height: 7)
+                    }
                 }
+            } else {
+                Image(systemName: "infinity")
+                    .font(.system(size: 16, weight: .heavy))
+                    .foregroundStyle(Color.brandDeep)
             }
         }
         .padding(AppSpacing.md)
@@ -3831,6 +3877,7 @@ private struct ScanLimitsExplainerSheet: View {
     }
 
     private var todayLine: String {
+        if isUnlimited { return "Unlimited scans" }
         if remaining == 0 { return "Out for today" }
         if remaining == 1 { return "1 scan left" }
         return "\(remaining) scans left"
@@ -3862,10 +3909,10 @@ private struct ScanLimitsExplainerSheet: View {
             labelColor: ProGold.deep,
             accent: ProGold.warm,
             border: ProGold.warm.opacity(0.45),
-            bigNumber: "10",
+            bigNumber: "∞",
             bigSuffix: "per day",
             lines: [
-                "Ten photo scans every single day.",
+                "Unlimited photo scans, every single day.",
                 "Cancel anytime in Settings.",
             ],
             crown: true
@@ -4059,8 +4106,7 @@ private extension View {
         ScanCounterChip(remaining: 3, limit: 4, isPro: false, onTap: {})
         ScanCounterChip(remaining: 1, limit: 4, isPro: false, onTap: {})
         ScanCounterChip(remaining: 0, limit: 4, isPro: false, onTap: {})
-        ScanCounterChip(remaining: 7, limit: 10, isPro: true, onTap: {})
-        ScanCounterChip(remaining: 0, limit: 10, isPro: true, onTap: {})
+        ScanCounterChip(remaining: 100, limit: 100, isPro: true, isUnlimited: true, onTap: {})
     }
     .padding(40)
     .background(Color.bgCanvas)
@@ -4074,7 +4120,7 @@ private extension View {
 
 #Preview("Scan limits explainer — pro") {
     ScanLimitsExplainerSheet(
-        used: 7, limit: 10, isPro: true, onTryPro: {}
+        used: 7, limit: 100, isPro: true, isUnlimited: true, onTryPro: {}
     )
 }
 #endif

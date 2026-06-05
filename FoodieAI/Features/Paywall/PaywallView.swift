@@ -103,7 +103,7 @@ struct PaywallView: View {
     private var valueProps: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             valueRow(icon: "camera.fill",
-                     title: "10 photo scans a day",
+                     title: "Unlimited photo scans",
                      detail: "Snap every meal without rationing your scans.")
             valueRow(icon: "sparkles",
                      title: "Smarter coach moments",

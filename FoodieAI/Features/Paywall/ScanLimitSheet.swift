@@ -104,12 +104,18 @@ struct ScanLimitSheet: View {
     private var isPro: Bool { info.tier == "pro" }
 
     private var headlineCopy: String {
+        // Pro is marketed as unlimited — if a Pro user somehow trips the
+        // silent server-side safety cap, the message must NOT reveal the
+        // number. Frame it as a gentle "you've done a lot today" instead.
         isPro
-            ? "That's all \(info.limit) scans for today."
+            ? "You've scanned a lot today — take a break?"
             : "You've used today's \(info.limit) photo scans."
     }
 
     private var resetsCopy: String {
+        if isPro {
+            return "We'll reset your scans at midnight."
+        }
         if let when = info.resetsAt {
             let f = DateFormatter()
             f.dateStyle = .none
@@ -133,7 +139,7 @@ struct ScanLimitSheet: View {
 
 #Preview("ScanLimitSheet — pro") {
     ScanLimitSheet(
-        info: ScanLimitInfo(limit: 10, tier: "pro",
+        info: ScanLimitInfo(limit: 100, tier: "pro",
                             resetsAt: Calendar.current.startOfDay(for: Date().addingTimeInterval(86400))),
         onUpgrade: {},
         onManualLog: {},

@@ -14,8 +14,9 @@ import SwiftUI
 /// cancellation / billing management — Apple's required path.
 ///
 /// Honest copy: the only feature gated by tier in v1 is the daily AI
-/// scan cap (2/day free, 4/day in the first week, 10/day pro). The
-/// comparison table reflects exactly that. No invented perks.
+/// scan cap (2/day free, 4/day in the first week; Pro is unlimited).
+/// The comparison table reflects exactly that. No invented perks.
+/// (Server keeps a silent abuse cap on Pro that users never see.)
 struct SubscriptionInfoView: View {
     @EnvironmentObject private var subscriptions: SubscriptionManager
     @Environment(\.dismiss) private var dismiss
@@ -93,7 +94,7 @@ struct SubscriptionInfoView: View {
             comparisonRow(
                 label: "Photo scans per day",
                 free: "2  (4 for your first week)",
-                pro: "10"
+                pro: "Unlimited"
             )
             comparisonRow(
                 label: "Manual logging",
@@ -172,7 +173,7 @@ struct SubscriptionInfoView: View {
             Text("Most people never hit the free limit.")
                 .appFont(.title1)
                 .foregroundStyle(Color.ink)
-            Text("Pro is for the days you scan every meal — the cap goes from 2 to 10 so you can keep going without rationing photos. The rest of the app (insights, recaps, FoodOS) is the same.")
+            Text("Pro is for the days you scan every meal — you get unlimited photo scans so you can keep going without rationing photos. The rest of the app (insights, recaps, FoodOS) is the same.")
                 .appFont(.bodyV2)
                 .foregroundStyle(Color.inkMute)
         }
@@ -189,7 +190,13 @@ struct SubscriptionInfoView: View {
     private var proStatusBlock: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             statusRow(label: "Plan", value: "Pro")
-            statusRow(label: "Today", value: "\(subscriptions.scansUsedToday) of \(subscriptions.dailyLimit) scans")
+            // Pro reads as unlimited — never expose the silent safety cap
+            // as "X of N". Fall back to the count only if the server
+            // hasn't reported the unlimited flag (older build / offline).
+            statusRow(label: "Today",
+                      value: subscriptions.isUnlimited
+                          ? "Unlimited"
+                          : "\(subscriptions.scansUsedToday) of \(subscriptions.dailyLimit) scans")
             if let expiry = subscriptions.proExpiresAt {
                 statusRow(label: "Renews", value: Self.expiryFormatter.string(from: expiry))
             }
