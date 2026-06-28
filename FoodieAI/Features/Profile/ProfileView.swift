@@ -821,7 +821,7 @@ struct ProfileView: View {
 
     private func persistHealthyChoices(_ enabled: Bool) async {
         do {
-            let updated = try await ProfileService().setHealthyChoicesEnabled(enabled)
+            let updated = try await ProfileService.shared.setHealthyChoicesEnabled(enabled)
             profileStore.apply(updated)
         } catch {
             #if DEBUG

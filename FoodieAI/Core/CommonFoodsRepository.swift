@@ -27,8 +27,16 @@ struct CommonFood: Codable, Hashable, Identifiable {
 final class CommonFoodsRepository: ObservableObject {
     static let shared = CommonFoodsRepository()
     private(set) var all: [CommonFood] = []
+    private var didLoad = false
 
-    init() {
+    init() {}
+
+    /// Decode the bundled JSON lazily, on the first `search()` — keeps the
+    /// file read off the `.shared` init path (which may be touched during view
+    /// construction) so it never hitches a frame at an unexpected moment.
+    private func loadIfNeeded() {
+        guard !didLoad else { return }
+        didLoad = true
         load()
     }
 
@@ -54,6 +62,7 @@ final class CommonFoodsRepository: ObservableObject {
     /// above substring matches so "ban" surfaces "Banana" before
     /// anything that merely contains "ban" elsewhere in the name.
     func search(_ query: String, limit: Int = 12) -> [CommonFood] {
+        loadIfNeeded()
         let q = query.lowercased().trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return Array(all.prefix(limit)) }
 

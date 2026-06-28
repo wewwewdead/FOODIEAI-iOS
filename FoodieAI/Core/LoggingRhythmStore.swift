@@ -186,3 +186,126 @@ final class LoggingRhythmStore: ObservableObject {
         let totalLoggedDays: Int
     }
 }
+
+// MARK: - Weekly challenge (Strava-style adaptive goal)
+
+/// A time-boxed weekly logging goal: "log meals N days this week", where the
+/// target adapts to *beat last week*. Derived purely from the local
+/// `LoggingRhythmStore` logged-day set — no fetch, no Supabase, zero egress.
+struct WeeklyChallenge: Equatable {
+    /// Days to log this ISO week to complete the challenge (clamped 3...7).
+    let target: Int
+    /// Days already logged this ISO week.
+    let progress: Int
+    /// Days logged last ISO week — powers the "beat last week" framing.
+    let lastWeekCount: Int
+    /// Calendar days remaining in the week, including today.
+    let daysLeftInWeek: Int
+    /// ISO `yyyy-Www` key, for badge de-duplication.
+    let weekKey: String
+
+    var isComplete: Bool { progress >= target }
+    var remaining: Int { max(0, target - progress) }
+}
+
+/// Main-actor isolated because it reads `LoggingRhythmStore.dayKey` (whose
+/// cached formatter is main-actor state); it's only ever called from the
+/// main-actor Today view, so this costs nothing in practice.
+@MainActor
+enum WeeklyChallengeEngine {
+    /// Floor keeps a brand-new user's first goal gentle; cap is a full week.
+    static let minTarget = 3
+    static let maxTarget = 7
+
+    /// Compute the current week's challenge from the logged-day set. The ISO
+    /// week (Mon–Sun) is pinned to `calendar`'s time zone so the window
+    /// doesn't drift on locale defaults; day-keys are produced with the same
+    /// formatter `markToday` used, so set-membership is byte-exact.
+    static func compute(loggedDays: Set<String>,
+                        now: Date,
+                        calendar: Calendar = .current) -> WeeklyChallenge {
+        var iso = Calendar(identifier: .iso8601)
+        iso.timeZone = calendar.timeZone
+
+        let thisWeek = iso.dateInterval(of: .weekOfYear, for: now)
+        let lastWeekRef = iso.date(byAdding: .day, value: -7, to: now) ?? now
+        let lastWeek = iso.dateInterval(of: .weekOfYear, for: lastWeekRef)
+
+        func countLogged(in interval: DateInterval?) -> Int {
+            guard let interval else { return 0 }
+            var count = 0
+            var cursor = interval.start
+            while cursor < interval.end {
+                if loggedDays.contains(
+                    LoggingRhythmStore.dayKey(for: cursor, calendar: calendar)
+                ) { count += 1 }
+                guard let next = iso.date(byAdding: .day, value: 1, to: cursor) else { break }
+                cursor = next
+            }
+            return count
+        }
+
+        let progress = countLogged(in: thisWeek)
+        let lastWeekCount = countLogged(in: lastWeek)
+        let target = min(maxTarget, max(minTarget, lastWeekCount + 1))
+
+        var daysLeft = 0
+        if let thisWeek {
+            var cursor = iso.startOfDay(for: now)
+            while cursor < thisWeek.end {
+                daysLeft += 1
+                guard let next = iso.date(byAdding: .day, value: 1, to: cursor) else { break }
+                cursor = next
+            }
+        }
+
+        return WeeklyChallenge(
+            target: target,
+            progress: progress,
+            lastWeekCount: lastWeekCount,
+            daysLeftInWeek: daysLeft,
+            weekKey: weekKey(for: now, calendar: iso)
+        )
+    }
+
+    static func weekKey(for date: Date, calendar iso: Calendar) -> String {
+        let comps = iso.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
+        return String(format: "%04d-W%02d",
+                      comps.yearForWeekOfYear ?? 0, comps.weekOfYear ?? 0)
+    }
+}
+
+/// Local store of completed weekly challenges (ISO week keys) for the badge
+/// count + a one-time completion celebration. Mirrors the LoggingRhythmStore
+/// persistence pattern; no network.
+@MainActor
+final class WeeklyChallengeStore {
+    static let shared = WeeklyChallengeStore()
+
+    private let defaults: UserDefaults
+    private let storageKey = "foodie.weeklyChallenge.v1.completedWeeks"
+
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+
+    var completedWeeks: Set<String> {
+        Set(defaults.array(forKey: storageKey) as? [String] ?? [])
+    }
+    var completedCount: Int { completedWeeks.count }
+
+    func isCompleted(weekKey: String) -> Bool { completedWeeks.contains(weekKey) }
+
+    /// Record the week as complete. Returns true only the FIRST time, so the
+    /// caller fires a one-time celebration; false if already recorded.
+    @discardableResult
+    func markCompleted(weekKey: String) -> Bool {
+        var weeks = completedWeeks
+        guard !weeks.contains(weekKey) else { return false }
+        weeks.insert(weekKey)
+        defaults.set(Array(weeks), forKey: storageKey)
+        return true
+    }
+
+    #if DEBUG
+    func reset() { defaults.removeObject(forKey: storageKey) }
+    #endif
+}

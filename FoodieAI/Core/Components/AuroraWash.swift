@@ -55,6 +55,11 @@ struct AuroraWash: View {
             angle: .radians(0)
         )
         .blur(radius: 32)
+        // Flatten the blurred gradient to a single Metal texture so the
+        // rotation loop transforms a *cached* layer instead of re-running a
+        // full-screen Gaussian blur every frame (the optimization this file's
+        // header always claimed but never applied).
+        .drawingGroup()
         .rotationEffect(rotation)
         .opacity(intensity)
         .allowsHitTesting(false)

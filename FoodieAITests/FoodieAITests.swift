@@ -5307,3 +5307,818 @@ final class FoodOSValueRevelationTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Eat-to-goal meal suggestion engine
+
+/// Covers the inverse of the burn-off nudge: the time-/meal-/budget-aware
+/// "what to eat" suggestion. All times are pinned to UTC so the hour the
+/// engine reads from `eatenAt` matches the hour we set here.
+final class MealSuggestionEngineTests: XCTestCase {
+    private let utc = TimeZone(identifier: "UTC")!
+
+    private func date(hour: Int) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = utc
+        let base = cal.startOfDay(for: Date())
+        return cal.date(bySettingHour: hour, minute: 0, second: 0, of: base)!
+    }
+
+    private func log(hour: Int, calories: Double = 400) -> FoodLog {
+        FoodLog(
+            id: UUID(), userId: UUID(), foodName: "Test meal",
+            imagePath: nil, imageThumbPath: nil,
+            calories: calories, carbsG: 40, sugarG: 5,
+            proteinG: 20, fatG: 10, fiberG: 3,
+            benefits: [], drawbacks: [], nutrients: [],
+            coachName: nil, coachAdvice: nil,
+            eatenAt: date(hour: hour), createdAt: date(hour: hour),
+            origin: .analyzed, sourceLogId: nil, mood: nil
+        )
+    }
+
+    private func suggest(logs: [FoodLog], remaining: Double,
+                         protein: Double = 0,
+                         direction: CalorieGoalCalculator.GoalDirection? = .maintain,
+                         hour: Int) -> MealSuggestionEngine.Suggestion? {
+        MealSuggestionEngine.suggestion(
+            todaysLogs: logs, remaining: remaining, proteinRemaining: protein,
+            goalDirection: direction, now: date(hour: hour), timeZone: utc)
+    }
+
+    func test_overnight_returnsNil() {
+        XCTAssertNil(suggest(logs: [], remaining: 1500, hour: 2))
+    }
+
+    func test_belowRemainingFloor_returnsNil() {
+        XCTAssertNil(suggest(logs: [log(hour: 19)], remaining: 80, hour: 19))
+    }
+
+    func test_dinnerTime_noDinnerLogged_suggestsDinner() {
+        let s = suggest(logs: [log(hour: 8), log(hour: 12)],
+                        remaining: 700, hour: 19)
+        XCTAssertEqual(s?.slot, .dinner)
+        XCTAssertTrue(s?.headline.lowercased().contains("dinner") ?? false)
+        XCTAssertFalse(s?.ideas.isEmpty ?? true)
+    }
+
+    func test_dinnerTime_allMealsLogged_suggestsSnackTopUp() {
+        let s = suggest(logs: [log(hour: 8), log(hour: 12), log(hour: 18)],
+                        remaining: 250, hour: 20)
+        XCTAssertEqual(s?.slot, .snack)
+        XCTAssertFalse(s?.ideas.isEmpty ?? true)
+    }
+
+    func test_earlierMealLogged_moreMealsAhead_returnsNil() {
+        // Breakfast + lunch in, it's lunchtime, dinner still ahead -> quiet.
+        XCTAssertNil(suggest(logs: [log(hour: 8), log(hour: 12)],
+                             remaining: 900, hour: 13))
+    }
+
+    func test_openMeal_smallBudget_downgradesToSnack() {
+        let s = suggest(logs: [log(hour: 8), log(hour: 12)],
+                        remaining: 200, hour: 19)
+        XCTAssertEqual(s?.slot, .snack)
+    }
+
+    func test_proteinShortfall_addsProteinNote() {
+        let s = suggest(logs: [log(hour: 8), log(hour: 12)],
+                        remaining: 600, protein: 40, direction: .gain, hour: 19)
+        XCTAssertNotNil(s?.proteinNote)
+    }
+
+    func test_smallGap_doesNotSurfaceOversizedDinner() {
+        let s = suggest(logs: [log(hour: 8), log(hour: 12), log(hour: 18)],
+                        remaining: 180, hour: 21)
+        XCTAssertEqual(s?.slot, .snack)
+        XCTAssertFalse(s?.ideas.isEmpty ?? true)
+    }
+}
+
+// MARK: - Record celebration store (PR moments)
+
+/// Each test uses an isolated UserDefaults suite so the high-water mark
+/// from one case can't leak into another (or touch the real app store).
+@MainActor
+final class RecordCelebrationStoreTests: XCTestCase {
+    private func freshStore() -> RecordCelebrationStore {
+        let suite = UserDefaults(suiteName: "test.records.\(UUID().uuidString)")!
+        return RecordCelebrationStore(defaults: suite)
+    }
+
+    func test_firstObservation_adoptsSilently_noCelebration() {
+        let store = freshStore()
+        // Existing user opens the app with a 6-day longest already on record.
+        XCTAssertNil(store.consumePendingStreakRecord(longestStreak: 6))
+    }
+
+    func test_crossingMilestone_returnsThatMilestone() {
+        let store = freshStore()
+        _ = store.consumePendingStreakRecord(longestStreak: 6) // adopt
+        XCTAssertEqual(store.consumePendingStreakRecord(longestStreak: 7), 7)
+    }
+
+    func test_sameRecord_doesNotRefire() {
+        let store = freshStore()
+        _ = store.consumePendingStreakRecord(longestStreak: 6)
+        _ = store.consumePendingStreakRecord(longestStreak: 7)
+        XCTAssertNil(store.consumePendingStreakRecord(longestStreak: 7))
+    }
+
+    func test_jumpAcrossMultipleMilestones_returnsHighest() {
+        let store = freshStore()
+        _ = store.consumePendingStreakRecord(longestStreak: 7) // adopt at 7
+        // Jumps to 30 → crossed 14, 21, 30 → celebrate the highest.
+        XCTAssertEqual(store.consumePendingStreakRecord(longestStreak: 30), 30)
+    }
+
+    func test_existingHighStreak_neverRetroactivelyCelebrated() {
+        let store = freshStore()
+        // First ever call carries a 45-day longest — adopt, no celebration.
+        XCTAssertNil(store.consumePendingStreakRecord(longestStreak: 45))
+        // The next genuine record (50) does celebrate.
+        XCTAssertEqual(store.consumePendingStreakRecord(longestStreak: 50), 50)
+    }
+
+    func test_growthBelowNextMilestone_returnsNil() {
+        let store = freshStore()
+        _ = store.consumePendingStreakRecord(longestStreak: 7) // adopt
+        // 7 -> 10: advanced, but no milestone in (7, 10].
+        XCTAssertNil(store.consumePendingStreakRecord(longestStreak: 10))
+        // ...then 14 lands the next one.
+        XCTAssertEqual(store.consumePendingStreakRecord(longestStreak: 14), 14)
+    }
+
+    func test_brandNewUser_firstMilestone() {
+        let store = freshStore()
+        XCTAssertNil(store.consumePendingStreakRecord(longestStreak: 0)) // adopt 0
+        XCTAssertNil(store.consumePendingStreakRecord(longestStreak: 2)) // below first
+        XCTAssertEqual(store.consumePendingStreakRecord(longestStreak: 3), 3)
+    }
+}
+
+// MARK: - Weekly challenge engine
+
+/// Pinned to UTC and a fixed "now" so ISO-week math is deterministic.
+@MainActor
+final class WeeklyChallengeEngineTests: XCTestCase {
+    private var cal: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }()
+
+    /// Wednesday 2026-06-24 12:00 UTC (ISO week 2026-W26, Mon 22nd–Sun 28th).
+    private func wednesday() -> Date {
+        var c = DateComponents()
+        c.year = 2026; c.month = 6; c.day = 24; c.hour = 12
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return Calendar(identifier: .gregorian).date(from: c)!
+    }
+
+    private func key(_ y: Int, _ m: Int, _ d: Int) -> String {
+        var c = DateComponents()
+        c.year = y; c.month = m; c.day = d; c.hour = 12
+        c.timeZone = TimeZone(identifier: "UTC")!
+        let date = Calendar(identifier: .gregorian).date(from: c)!
+        return LoggingRhythmStore.dayKey(for: date, calendar: cal)
+    }
+
+    func test_noHistory_targetIsFloor_progressZero() {
+        let ch = WeeklyChallengeEngine.compute(loggedDays: [], now: wednesday(), calendar: cal)
+        XCTAssertEqual(ch.target, 3)        // floor
+        XCTAssertEqual(ch.progress, 0)
+        XCTAssertFalse(ch.isComplete)
+    }
+
+    func test_progressCountsThisWeekDays() {
+        // Mon, Tue, Wed of week 26 logged → progress 3.
+        let logged: Set<String> = [key(2026, 6, 22), key(2026, 6, 23), key(2026, 6, 24)]
+        let ch = WeeklyChallengeEngine.compute(loggedDays: logged, now: wednesday(), calendar: cal)
+        XCTAssertEqual(ch.progress, 3)
+    }
+
+    func test_targetBeatsLastWeek() {
+        // Last week (W25: Jun 15–21) had 4 logged days → target = 5.
+        let lastWeek: Set<String> = [key(2026, 6, 15), key(2026, 6, 16),
+                                     key(2026, 6, 17), key(2026, 6, 18)]
+        let ch = WeeklyChallengeEngine.compute(loggedDays: lastWeek, now: wednesday(), calendar: cal)
+        XCTAssertEqual(ch.lastWeekCount, 4)
+        XCTAssertEqual(ch.target, 5)
+    }
+
+    func test_targetCapsAtSeven() {
+        // A full last week (7 days) keeps the target at 7, not 8.
+        let lastWeek = Set((15...21).map { key(2026, 6, $0) })
+        let ch = WeeklyChallengeEngine.compute(loggedDays: lastWeek, now: wednesday(), calendar: cal)
+        XCTAssertEqual(ch.lastWeekCount, 7)
+        XCTAssertEqual(ch.target, 7)
+    }
+
+    func test_completeWhenProgressMeetsTarget() {
+        // No last week → target 3; log Mon/Tue/Wed → complete.
+        let logged: Set<String> = [key(2026, 6, 22), key(2026, 6, 23), key(2026, 6, 24)]
+        let ch = WeeklyChallengeEngine.compute(loggedDays: logged, now: wednesday(), calendar: cal)
+        XCTAssertTrue(ch.isComplete)
+    }
+
+    func test_daysLeftIncludesToday() {
+        // Wednesday → Wed,Thu,Fri,Sat,Sun remain = 5.
+        let ch = WeeklyChallengeEngine.compute(loggedDays: [], now: wednesday(), calendar: cal)
+        XCTAssertEqual(ch.daysLeftInWeek, 5)
+    }
+
+    func test_lastWeekDaysDoNotCountAsProgress() {
+        let lastWeek: Set<String> = [key(2026, 6, 15), key(2026, 6, 16)]
+        let ch = WeeklyChallengeEngine.compute(loggedDays: lastWeek, now: wednesday(), calendar: cal)
+        XCTAssertEqual(ch.progress, 0)
+    }
+}
+
+// MARK: - Weekly challenge store
+
+@MainActor
+final class WeeklyChallengeStoreTests: XCTestCase {
+    private func freshStore() -> WeeklyChallengeStore {
+        let suite = UserDefaults(suiteName: "test.weekly.\(UUID().uuidString)")!
+        return WeeklyChallengeStore(defaults: suite)
+    }
+
+    func test_markCompleted_firstTimeReturnsTrue_thenFalse() {
+        let store = freshStore()
+        XCTAssertTrue(store.markCompleted(weekKey: "2026-W26"))
+        XCTAssertFalse(store.markCompleted(weekKey: "2026-W26"))
+    }
+
+    func test_completedCountAndMembership() {
+        let store = freshStore()
+        _ = store.markCompleted(weekKey: "2026-W25")
+        _ = store.markCompleted(weekKey: "2026-W26")
+        XCTAssertEqual(store.completedCount, 2)
+        XCTAssertTrue(store.isCompleted(weekKey: "2026-W25"))
+        XCTAssertFalse(store.isCompleted(weekKey: "2026-W27"))
+    }
+}
+
+// MARK: - Day calorie standing (per-day over/under + recommendation)
+
+final class DayCalorieStandingTests: XCTestCase {
+    private func standing(_ cals: Double, _ goal: Double,
+                          _ dir: CalorieGoalCalculator.GoalDirection?,
+                          weight: Double? = 70) -> DayCalorieStanding.Result? {
+        DayCalorieStanding.compute(dayCalories: cals, goal: goal,
+                                   direction: dir, bodyWeightKg: weight)
+    }
+
+    func test_invalidGoal_returnsNil() {
+        XCTAssertNil(standing(2000, 0, .maintain))
+    }
+
+    func test_maintain_under_showsAmountAndFoodRec() {
+        let r = standing(2000, 2300, .maintain)
+        XCTAssertEqual(r?.kind, .under)
+        XCTAssertEqual(r?.amount, 300)
+        XCTAssertTrue(r?.headline.contains("300") ?? false)
+        XCTAssertTrue(r?.headline.contains("under") ?? false)
+        XCTAssertTrue(r?.headline.contains("goal") ?? false)
+        XCTAssertTrue(r?.recommendation?.contains("Room for") ?? false)
+        XCTAssertEqual(r?.isWarning, false)
+    }
+
+    func test_maintain_over_showsBurnOff() {
+        let r = standing(2600, 2300, .maintain)
+        XCTAssertEqual(r?.kind, .over)
+        XCTAssertEqual(r?.amount, 300)
+        XCTAssertTrue(r?.headline.contains("over") ?? false)
+        let rec = r?.recommendation ?? ""
+        XCTAssertTrue(rec.contains("walk"))
+        XCTAssertTrue(rec.contains("jog"))
+        XCTAssertEqual(r?.isWarning, true)
+    }
+
+    func test_nilDirection_treatedAsMaintain_burnOffWhenOver() {
+        let r = standing(2600, 2300, nil)
+        XCTAssertEqual(r?.kind, .over)
+        XCTAssertEqual(r?.isWarning, true)
+    }
+
+    func test_gain_over_isPositive_noBurnOff() {
+        let r = standing(2600, 2300, .gain)
+        XCTAssertEqual(r?.kind, .over)
+        XCTAssertEqual(r?.isWarning, false)
+        XCTAssertTrue(r?.headline.contains("target") ?? false)
+        XCTAssertFalse((r?.recommendation ?? "").contains("walk"))
+    }
+
+    func test_gain_under_usesTargetWording() {
+        let r = standing(2000, 2300, .gain)
+        XCTAssertEqual(r?.kind, .under)
+        XCTAssertTrue(r?.headline.contains("target") ?? false)
+    }
+
+    func test_exactlyOnGoal_isOnGoal() {
+        XCTAssertEqual(standing(2300, 2300, .maintain)?.kind, .onGoal)
+    }
+
+    func test_withinTolerance_countsAsOnGoal() {
+        XCTAssertEqual(standing(2350, 2300, .maintain)?.kind, .onGoal) // 50 over
+        XCTAssertEqual(standing(2250, 2300, .maintain)?.kind, .onGoal) // 50 under
+    }
+}
+
+// MARK: - Movement / step goal ↔ energy balance
+
+final class StepGoalCalculatorTests: XCTestCase {
+    typealias Dir = CalorieGoalCalculator.GoalDirection
+
+    func test_defaultsByDirection_underSixty() {
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: .lose, ageYears: 30), 10_000)
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: .maintain, ageYears: 30), 8_000)
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: .gain, ageYears: 30), 7_000)
+        // No direction set → the general mortality-benefit plateau default.
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: nil, ageYears: nil), 8_000)
+    }
+
+    func test_olderAdultsTrimmedButFloored() {
+        // 60+ plateaus lower: knock off 2k, never below 6k.
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: .lose, ageYears: 65), 8_000)
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: .maintain, ageYears: 70), 6_000)
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: .gain, ageYears: 80), 6_000) // floored
+    }
+
+    func test_ageBoundaryAtSixty() {
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: .maintain, ageYears: 59), 8_000)
+        XCTAssertEqual(StepGoalCalculator.dailyStepGoal(direction: .maintain, ageYears: 60), 6_000)
+    }
+}
+
+final class MovementEnergyTests: XCTestCase {
+
+    // Step → NET active kcal: 0.0004 × kg × steps, scaling linearly with weight.
+    func test_activeKcalFromSteps() {
+        XCTAssertEqual(MovementEnergy.activeKcalFromSteps(8_000, weightKg: 70), 224, accuracy: 0.001)
+        XCTAssertEqual(MovementEnergy.activeKcalFromSteps(10_000, weightKg: 90), 360, accuracy: 0.001)
+    }
+
+    func test_activeKcalFromSteps_guards() {
+        XCTAssertEqual(MovementEnergy.activeKcalFromSteps(8_000, weightKg: nil), 0)
+        XCTAssertEqual(MovementEnergy.activeKcalFromSteps(0, weightKg: 70), 0)
+        XCTAssertEqual(MovementEnergy.activeKcalFromSteps(8_000, weightKg: 0), 0)
+    }
+
+    // A goal at multiplier m already assumes BMR × (m − 1) of active energy.
+    func test_assumedActiveKcal() {
+        XCTAssertEqual(MovementEnergy.assumedActiveKcal(bmr: 1600, multiplier: 1.375), 600, accuracy: 0.001)
+        XCTAssertEqual(MovementEnergy.assumedActiveKcal(bmr: 1600, multiplier: 1.2), 320, accuracy: 0.001)
+        // Multiplier ≤ 1 assumes no activity.
+        XCTAssertEqual(MovementEnergy.assumedActiveKcal(bmr: 1600, multiplier: 1.0), 0)
+    }
+
+    // credit = max(0, active − assumed) × 0.5 — the no-double-count rule.
+    func test_budgetCredit_creditsOnlyAboveBaseline() {
+        // 800 active, assumes 600 → (200) × 0.5 = 100.
+        XCTAssertEqual(
+            MovementEnergy.budgetCredit(activeEnergyKcal: 800, bmr: 1600, multiplier: 1.375),
+            100, accuracy: 0.001)
+    }
+
+    func test_budgetCredit_zeroWhenBelowAssumed() {
+        // 500 active < 600 assumed → no credit (the goal already counted it).
+        XCTAssertEqual(
+            MovementEnergy.budgetCredit(activeEnergyKcal: 500, bmr: 1600, multiplier: 1.375), 0)
+    }
+
+    func test_budgetCredit_honorsHaircut() {
+        XCTAssertEqual(
+            MovementEnergy.budgetCredit(activeEnergyKcal: 800, bmr: 1600, multiplier: 1.375, haircut: 1.0),
+            200, accuracy: 0.001)
+    }
+
+    // Profile-gated entry: needs full physiology, else 0 (never guesses).
+    func test_budgetCredit_fromPhysiology_requiresAllFields() {
+        // Full physiology, sedentary goal, measured active energy above floor.
+        // BMR(male,30,175,75) = 1698.75; assumes 1.2 → 339.75; (500−339.75)×0.5.
+        let credit = MovementEnergy.budgetCredit(
+            activeEnergyKcal: 500, steps: 8_000,
+            weightKg: 75, heightCm: 175, ageYears: 30,
+            sex: .male, activity: .sedentary)
+        XCTAssertEqual(credit, (500 - 339.75) * 0.5, accuracy: 0.001)
+
+        // Missing any required field → 0 (can't know the goal's assumption).
+        XCTAssertEqual(MovementEnergy.budgetCredit(
+            activeEnergyKcal: 500, steps: 8_000,
+            weightKg: nil, heightCm: 175, ageYears: 30,
+            sex: .male, activity: .sedentary), 0)
+        XCTAssertEqual(MovementEnergy.budgetCredit(
+            activeEnergyKcal: 500, steps: 8_000,
+            weightKg: 75, heightCm: 175, ageYears: 30,
+            sex: .male, activity: nil), 0)
+    }
+
+    // When measured active energy is absent (<1), fall back to a step estimate.
+    func test_budgetCredit_fallsBackToStepEstimate() {
+        // No measured energy; 20k steps @ 75kg → estimate 600; assumes 339.75.
+        let estimate = MovementEnergy.activeKcalFromSteps(20_000, weightKg: 75) // 600
+        let credit = MovementEnergy.budgetCredit(
+            activeEnergyKcal: 0, steps: 20_000,
+            weightKg: 75, heightCm: 175, ageYears: 30,
+            sex: .male, activity: .sedentary)
+        XCTAssertEqual(credit, (estimate - 339.75) * 0.5, accuracy: 0.001)
+        XCTAssertGreaterThan(credit, 0)
+    }
+}
+
+final class MovementGoalNarratorTests: XCTestCase {
+
+    func test_meaningLine_isDirectionAndWeightAware() {
+        // Lose @ 70kg: 10k steps ≈ 280 kcal ≈ ~half of a 500 deficit.
+        let lose = MovementGoalNarrator.meaningLine(direction: .lose, goalSteps: 10_000, weightKg: 70)
+        XCTAssertTrue(lose.contains("280 kcal"))
+        XCTAssertTrue(lose.contains("deficit"))
+
+        let maintain = MovementGoalNarrator.meaningLine(direction: .maintain, goalSteps: 8_000, weightKg: 70)
+        XCTAssertTrue(maintain.contains("224 kcal"))
+        XCTAssertTrue(maintain.lowercased().contains("maintenance"))
+
+        let gain = MovementGoalNarrator.meaningLine(direction: .gain, goalSteps: 7_000, weightKg: 70)
+        XCTAssertTrue(gain.lowercased().contains("heart"))
+    }
+
+    func test_meaningLine_fallsBackWithoutWeight() {
+        // No bodyweight → kcal-free phrasing, still mentions the step count.
+        let line = MovementGoalNarrator.meaningLine(direction: .maintain, goalSteps: 8_000, weightKg: nil)
+        XCTAssertFalse(line.contains("kcal"))
+        XCTAssertTrue(line.contains("8,000"))
+    }
+
+    func test_walkMinutes_roundsToFivesAtModeratePace() {
+        // ~110 steps/min, rounded to nearest 5, floor 5.
+        XCTAssertEqual(MovementGoalNarrator.walkMinutes(forSteps: 0), 5)
+        XCTAssertEqual(MovementGoalNarrator.walkMinutes(forSteps: 100), 5)
+        XCTAssertEqual(MovementGoalNarrator.walkMinutes(forSteps: 3_000), 25)  // 27.3 → 25
+        XCTAssertEqual(MovementGoalNarrator.walkMinutes(forSteps: 10_000), 90) // 90.9 → 90
+    }
+
+    func test_goalSuggestion_underGoal_isActionableAndDirectionAware() {
+        // Lose: walking is framed as deepening the deficit, with a kcal figure.
+        let lose = MovementGoalNarrator.goalSuggestion(
+            direction: .lose, currentSteps: 7_000, goalSteps: 10_000, weightKg: 70)
+        XCTAssertTrue(lose.contains("3,000 steps"))   // remaining
+        XCTAssertTrue(lose.contains("walk"))
+        XCTAssertTrue(lose.lowercased().contains("deficit"))
+        XCTAssertTrue(lose.contains("kcal"))
+
+        // Maintain: framed as keeping today balanced.
+        let maintain = MovementGoalNarrator.goalSuggestion(
+            direction: .maintain, currentSteps: 5_000, goalSteps: 8_000, weightKg: 70)
+        XCTAssertTrue(maintain.lowercased().contains("balanced"))
+    }
+
+    func test_goalSuggestion_gain_neverTellsUserToBurnMore() {
+        // For a surplus goal, walking fights the goal: the copy must NOT urge
+        // more cardio, and must say to eat back what's walked.
+        let gain = MovementGoalNarrator.goalSuggestion(
+            direction: .gain, currentSteps: 3_000, goalSteps: 7_000, weightKg: 70)
+        XCTAssertTrue(gain.lowercased().contains("eat back"))
+        XCTAssertFalse(gain.lowercased().contains("deficit"))
+        XCTAssertTrue(gain.lowercased().contains("floor"))
+    }
+
+    func test_goalSuggestion_atGoal_affirmsWithoutPushing() {
+        // At/over goal: affirmation, and for gain explicitly no extra cardio.
+        let loseDone = MovementGoalNarrator.goalSuggestion(
+            direction: .lose, currentSteps: 10_500, goalSteps: 10_000, weightKg: 70)
+        XCTAssertTrue(loseDone.lowercased().contains("goal hit"))
+
+        let gainDone = MovementGoalNarrator.goalSuggestion(
+            direction: .gain, currentSteps: 7_200, goalSteps: 7_000, weightKg: 70)
+        XCTAssertTrue(gainDone.lowercased().contains("no need to add cardio"))
+    }
+
+    // MARK: calorieAdjustedGoal — step goal flexes with calorie balance
+
+    func test_calorieAdjustedGoal_overEating_raisesGoalByFullBurnOff() {
+        // Maintain @ 70kg, 200 over: ~45-min walk × 110 ≈ 4,950 → +5,000 → 13,000.
+        let goal = StepGoalCalculator.calorieAdjustedGoal(
+            direction: .maintain, ageYears: 30,
+            consumed: 2_200, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(goal, 13_000)
+    }
+
+    func test_calorieAdjustedGoal_bigOverEating_capsAtCeiling() {
+        let goal = StepGoalCalculator.calorieAdjustedGoal(
+            direction: .maintain, ageYears: 30,
+            consumed: 2_800, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(goal, StepGoalCalculator.maxAdjustedSteps)  // 15,000
+    }
+
+    func test_calorieAdjustedGoal_underEating_easesTowardFloor() {
+        // Big under → clamped to the 6,000 health floor, never lower.
+        let goal = StepGoalCalculator.calorieAdjustedGoal(
+            direction: .maintain, ageYears: 30,
+            consumed: 1_400, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(goal, StepGoalCalculator.healthFloorSteps)  // 6,000
+    }
+
+    func test_calorieAdjustedGoal_withinTolerance_staysAtBase() {
+        let goal = StepGoalCalculator.calorieAdjustedGoal(
+            direction: .maintain, ageYears: 30,
+            consumed: 2_050, calorieGoal: 2_000, weightKg: 70)  // 50 over < 75 band
+        XCTAssertEqual(goal, 8_000)
+    }
+
+    func test_calorieAdjustedGoal_gain_neverFlexes() {
+        // A surplus is fuel — gain keeps its health base regardless of overage.
+        let goal = StepGoalCalculator.calorieAdjustedGoal(
+            direction: .gain, ageYears: 30,
+            consumed: 3_000, calorieGoal: 2_500, weightKg: 70)
+        XCTAssertEqual(goal, 7_000)
+    }
+
+    func test_calorieAdjustedGoal_noWeight_staysAtBase() {
+        let goal = StepGoalCalculator.calorieAdjustedGoal(
+            direction: .maintain, ageYears: 30,
+            consumed: 2_400, calorieGoal: 2_000, weightKg: nil)
+        XCTAssertEqual(goal, 8_000)
+    }
+
+    // MARK: MovementGuidance — goal + line agree
+
+    func test_guidance_overEating_explainsExtraStepsAndNudgedGoal() {
+        let r = MovementGuidance.compute(
+            direction: .maintain, ageYears: 30, currentSteps: 4_000,
+            consumed: 2_200, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(r.stepGoal, 13_000)
+        XCTAssertEqual(r.baseStepGoal, 8_000)
+        XCTAssertTrue(r.line.contains("200 over"))
+        XCTAssertTrue(r.line.lowercased().contains("extra steps"))
+        XCTAssertTrue(r.line.contains("13,000"))   // nudged goal stated
+    }
+
+    func test_guidance_hitAdjustedGoal_saysBalanced() {
+        let r = MovementGuidance.compute(
+            direction: .maintain, ageYears: 30, currentSteps: 13_500,
+            consumed: 2_200, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertTrue(r.line.lowercased().contains("matched"))
+        XCTAssertTrue(r.line.lowercased().contains("balanced"))
+    }
+
+    func test_guidance_bigOverEating_chipsAwayWhenCapped() {
+        let r = MovementGuidance.compute(
+            direction: .maintain, ageYears: 30, currentSteps: 3_000,
+            consumed: 2_800, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(r.stepGoal, 15_000)
+        XCTAssertTrue(r.line.lowercased().contains("chips away"))
+    }
+
+    func test_guidance_underEating_notesEasedGoal() {
+        let r = MovementGuidance.compute(
+            direction: .maintain, ageYears: 30, currentSteps: 2_000,
+            consumed: 1_400, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(r.stepGoal, 6_000)
+        XCTAssertTrue(r.line.lowercased().contains("under"))
+        XCTAssertTrue(r.line.lowercased().contains("eased"))
+    }
+
+    func test_guidance_gainOver_fallsToStepNudge_noBurnOff() {
+        let r = MovementGuidance.compute(
+            direction: .gain, ageYears: 30, currentSteps: 3_000,
+            consumed: 3_000, calorieGoal: 2_500, weightKg: 70)
+        XCTAssertEqual(r.stepGoal, 7_000)
+        XCTAssertFalse(r.line.lowercased().contains("extra steps"))
+        XCTAssertFalse(r.line.lowercased().contains("eased"))
+    }
+}
+
+// MARK: - Streak freeze math (Tier 2 retention)
+
+final class StreakMathTests: XCTestCase {
+    typealias T = StreakMath
+
+    func test_firstLog_startsAtOne() {
+        let t = T.transition(previousLogged: false, daysBetween: 0, currentStreak: 0, grace: 1)
+        XCTAssertEqual(t.streak, 1)
+        XCTAssertEqual(t.outcome, .started)
+    }
+
+    func test_sameDay_isNoChange() {
+        let t = T.transition(previousLogged: true, daysBetween: 0, currentStreak: 5, grace: 1)
+        XCTAssertEqual(t.streak, 5)
+        XCTAssertEqual(t.outcome, .alreadyToday)
+    }
+
+    func test_consecutiveDay_extends() {
+        let t = T.transition(previousLogged: true, daysBetween: 1, currentStreak: 5, grace: 1)
+        XCTAssertEqual(t.streak, 6)
+        XCTAssertEqual(t.outcome, .extended)
+    }
+
+    func test_banksASecondFreezeOnACleanWeek_uptoCap() {
+        // Day 7 carrying 1 freeze → bank a 2nd (soft cap 2).
+        let t7 = T.transition(previousLogged: true, daysBetween: 1, currentStreak: 6, grace: 1)
+        XCTAssertEqual(t7.streak, 7)
+        XCTAssertEqual(t7.grace, 2)
+        // Day 14 already at the cap → stays at 2, never exceeds.
+        let t14 = T.transition(previousLogged: true, daysBetween: 1, currentStreak: 13, grace: 2)
+        XCTAssertEqual(t14.grace, 2)
+    }
+
+    func test_oneMissedDay_costsOneFreeze() {
+        let t = T.transition(previousLogged: true, daysBetween: 2, currentStreak: 12, grace: 1)
+        XCTAssertEqual(t.streak, 13)
+        XCTAssertEqual(t.grace, 0)
+        XCTAssertEqual(t.outcome, .savedByGrace)
+    }
+
+    func test_oneMissedDay_noFreeze_resets() {
+        let t = T.transition(previousLogged: true, daysBetween: 2, currentStreak: 12, grace: 0)
+        XCTAssertEqual(t.streak, 1)
+        XCTAssertEqual(t.grace, 1)
+        XCTAssertEqual(t.outcome, .reset)
+    }
+
+    func test_twoMissedDays_coveredByTwoBankedFreezes() {
+        // The new behavior: a saved-up user survives a 2-day lapse.
+        let t = T.transition(previousLogged: true, daysBetween: 3, currentStreak: 20, grace: 2)
+        XCTAssertEqual(t.streak, 21)
+        XCTAssertEqual(t.grace, 0)
+        XCTAssertEqual(t.outcome, .savedByGrace)
+    }
+
+    func test_twoMissedDays_onlyOneFreeze_resets() {
+        let t = T.transition(previousLogged: true, daysBetween: 3, currentStreak: 20, grace: 1)
+        XCTAssertEqual(t.streak, 1)
+        XCTAssertEqual(t.outcome, .reset)
+    }
+
+    func test_longGap_alwaysResets() {
+        let t = T.transition(previousLogged: true, daysBetween: 5, currentStreak: 30, grace: 2)
+        XCTAssertEqual(t.streak, 1)
+        XCTAssertEqual(t.grace, 1)
+        XCTAssertEqual(t.outcome, .reset)
+    }
+}
+
+// MARK: - Scan-first activation routing
+
+final class OnboardingScanFirstTests: XCTestCase {
+    @MainActor
+    func test_getStarted_signedOut_goesToSignInFirst() {
+        // Sign-in is the first onboarding step; goal + physiology run after it.
+        let vm = OnboardingViewModel(initialStep: .hero)
+        vm.startFromHero(isSignedIn: false)
+        XCTAssertEqual(vm.step, .signIn)
+    }
+
+    @MainActor
+    func test_getStarted_alreadySignedIn_goesToGoal() {
+        // Legacy already-signed-in account skips the sign-in interrupt.
+        let vm = OnboardingViewModel(initialStep: .hero)
+        vm.startFromHero(isSignedIn: true)
+        XCTAssertEqual(vm.step, .archetype)
+    }
+
+    @MainActor
+    func test_continueFromGoal_goesToPhysiology() {
+        // Goal → physiology (age/height/weight/activity → accurate target),
+        // then sign-in.
+        let vm = OnboardingViewModel(initialStep: .archetype)
+        vm.continueFromGoal(isSignedIn: false)
+        XCTAssertEqual(vm.step, .physiology)
+    }
+
+    @MainActor
+    func test_skipGoal_seedsAwareAndGoesToPhysiology() {
+        let vm = OnboardingViewModel(initialStep: .archetype)
+        vm.skipArchetype(isSignedIn: false)
+        XCTAssertEqual(vm.archetype, .aware)
+        XCTAssertEqual(vm.step, .physiology)
+    }
+
+    @MainActor
+    func test_physiology_advancesToCompleting() {
+        // Physiology (save or skip) completes onboarding — sign-in already
+        // happened up front; the rest of the survey stays deferred.
+        let vm = OnboardingViewModel(initialStep: .physiology)
+        vm.advance()
+        XCTAssertEqual(vm.step, .completing)
+    }
+
+    @MainActor
+    func test_signIn_goesToGoalSetup() {
+        // Sign-in is first; completing it leads into the goal + physiology
+        // setup, not straight to completion.
+        let vm = OnboardingViewModel(initialStep: .signIn)
+        vm.signInDidComplete()
+        XCTAssertEqual(vm.step, .archetype)
+    }
+
+    @MainActor
+    func test_signInDidComplete_isNoOpOutsideSignInStep() {
+        let vm = OnboardingViewModel(initialStep: .completing)
+        vm.signInDidComplete()
+        XCTAssertEqual(vm.step, .completing)
+    }
+}
+
+// MARK: - Streak repair (recover a broken streak)
+
+final class StreakRepairStoreTests: XCTestCase {
+    @MainActor
+    private func freshStore() -> StreakRepairStore {
+        // Isolated suite per test so cases never leak into each other.
+        let defaults = UserDefaults(suiteName: "test.repair.\(UUID().uuidString)")!
+        return StreakRepairStore(defaults: defaults)
+    }
+
+    @MainActor
+    func test_armsForMeaningfulStreak() {
+        let s = freshStore()
+        s.arm(brokenStreak: 20)
+        XCTAssertEqual(s.offer, 20)
+    }
+
+    @MainActor
+    func test_doesNotArmBelowThreshold() {
+        let s = freshStore()
+        s.arm(brokenStreak: 2) // < minRepairableStreak (3)
+        XCTAssertNil(s.offer)
+    }
+
+    @MainActor
+    func test_consumeClearsTheOffer() {
+        let s = freshStore()
+        s.arm(brokenStreak: 10)
+        s.consume()
+        XCTAssertNil(s.offer)
+    }
+
+    @MainActor
+    func test_offerLiveBeforeDeadline() {
+        let s = freshStore()
+        let now = Date()
+        s.arm(brokenStreak: 15, now: now)
+        s.refresh(now: now.addingTimeInterval(12 * 3600)) // ~half a day later
+        XCTAssertEqual(s.offer, 15)
+    }
+
+    @MainActor
+    func test_offerExpiresAfterWindow() {
+        let s = freshStore()
+        let now = Date()
+        s.arm(brokenStreak: 15, now: now)
+        s.refresh(now: now.addingTimeInterval(3 * 24 * 3600)) // 3 days later
+        XCTAssertNil(s.offer)
+    }
+}
+
+/// Widget day-rollover: the home-screen widget must reset its daily figures
+/// (steps, calories) at *local* midnight even when the app isn't opened. Uses
+/// KST (UTC+9) to also guard the east-of-UTC asymmetry — a same local day can
+/// straddle the UTC date boundary.
+final class WidgetSnapshotRolloverTests: XCTestCase {
+    private var kst: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "Asia/Seoul")!
+        return c
+    }
+
+    private func kstDate(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int) -> Date {
+        kst.date(from: DateComponents(year: y, month: mo, day: d, hour: h, minute: mi))!
+    }
+
+    private func sample(updatedAt: Date) -> WidgetSnapshot {
+        WidgetSnapshot(
+            streakDays: 7, caloriesConsumed: 1800, calorieGoal: 2200,
+            steps: 4200, stepGoal: 8000, updatedAt: updatedAt,
+            suggestion: "a 15-min walk evens it out"
+        )
+    }
+
+    func testSameDayKeepsEverything() {
+        let snap = sample(updatedAt: kstDate(2026, 6, 28, 10, 0))
+        let rendered = snap.rolledOver(to: kstDate(2026, 6, 28, 23, 0), calendar: kst)
+        XCTAssertEqual(rendered, snap)
+    }
+
+    func testPreviousDayResetsDailyFiguresButKeepsStreakAndGoals() {
+        let snap = sample(updatedAt: kstDate(2026, 6, 27, 23, 0))
+        let rendered = snap.rolledOver(to: kstDate(2026, 6, 28, 0, 30), calendar: kst)
+        XCTAssertEqual(rendered.steps, 0)
+        XCTAssertEqual(rendered.caloriesConsumed, 0)
+        XCTAssertNil(rendered.suggestion)
+        // Carry-over fields survive the rollover.
+        XCTAssertEqual(rendered.streakDays, 7)
+        XCTAssertEqual(rendered.calorieGoal, 2200)
+        XCTAssertEqual(rendered.stepGoal, 8000)
+    }
+
+    func testIsFromSameDayUsesLocalMidnightNotUTC() {
+        // KST 08:00 Jun 28 is UTC 23:00 Jun 27. In the KST calendar this and
+        // KST 10:00 Jun 28 are the same local day, despite straddling the UTC
+        // date boundary — so no spurious reset fires.
+        let snap = sample(updatedAt: kstDate(2026, 6, 28, 8, 0))
+        let rendered = kstDate(2026, 6, 28, 10, 0)
+        XCTAssertTrue(snap.isFromSameDay(as: rendered, calendar: kst))
+        XCTAssertEqual(snap.rolledOver(to: rendered, calendar: kst), snap)
+    }
+}

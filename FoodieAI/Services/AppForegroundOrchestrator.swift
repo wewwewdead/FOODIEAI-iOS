@@ -41,7 +41,7 @@ final class AppForegroundOrchestrator {
     private var lastRunStartedAt: Date?
     private static let dedupeWindow: TimeInterval = 0.5
 
-    init(profileService: ProfileService = ProfileService(),
+    init(profileService: ProfileService = ProfileService.shared,
          recapService: WeeklyRecapService = WeeklyRecapService(),
          history: MealHistoryService = MealHistoryService(),
          scheduler: NotificationScheduler? = nil) {
@@ -71,6 +71,14 @@ final class AppForegroundOrchestrator {
             return
         }
         lastRunStartedAt = now
+
+        // Session marker — the basis for DAU and D1/D7/D30 retention cohorts.
+        AnalyticsService.shared.track(AnalyticsService.Event.appOpened)
+
+        // Re-arm the HealthKit background delivery that keeps the home-screen
+        // widget's step count fresh (~hourly) while the app is closed. Idempotent
+        // and cheap; no-ops until the user has granted step-read access.
+        HealthActivityService.shared.enableWidgetBackgroundSync(timeZone: timeZone)
 
         #if DEBUG
         NSLog("[Notif] runOnForeground triggered by: %@", caller)
@@ -185,6 +193,11 @@ final class AppForegroundOrchestrator {
                                 confidence: .insufficient),
                 timeZone: deviceTZ
             )
+            // Master off → cancel the dormancy comeback AND the end-of-day
+            // under-calorie/streak nudge (the recompute path also enforces this,
+            // but cancel here too so a master-off foreground clears it promptly).
+            scheduler.cancelComebackReminder()
+            scheduler.cancelUnderCalorieReminder()
             return
         }
 
@@ -197,6 +210,11 @@ final class AppForegroundOrchestrator {
         let scheduleTZ = profile.timeZone.flatMap { TimeZone(identifier: $0) } ?? deviceTZ
         await scheduler.reschedule(
             preferences: prefs, inferred: inferred, timeZone: scheduleTZ
+        )
+        // Gentle dormancy nudge — rescheduled forward on every foreground, so
+        // it only ever delivers after a real lapse. Best streak flavors copy.
+        await scheduler.scheduleComebackReminder(
+            bestStreakDays: profile.longestStreakDays, timeZone: scheduleTZ
         )
     }
 

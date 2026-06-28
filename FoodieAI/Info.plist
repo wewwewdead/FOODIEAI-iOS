@@ -63,6 +63,10 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>FoodieAI uses the camera to analyze meals you capture.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>FoodieAI reads your steps and active energy to credit your movement toward your daily goal.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>FoodieAI reads live step counts so your movement ring updates in real time as you walk.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
 	<key>NSPhotoLibraryUsageDescription</key>

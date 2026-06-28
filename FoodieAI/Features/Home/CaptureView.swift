@@ -40,6 +40,33 @@ struct CaptureView: View {
     /// updates live as `scansUsedToday` / `dailyLimit` change. The
     /// manager is injected at app scope (FoodieAIApp.body).
     @EnvironmentObject private var subscriptions: SubscriptionManager
+    /// Drives both the analyzing aura's "lock-in" collapse transition and
+    /// the static-aura fallback under Reduce Motion (the food-tinted blobs
+    /// and the inward contract are both skipped when this is true).
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// "Photo morphs into a living bubble while analyzing, then un-forms
+    /// into the next step." On by default now that it's the intended look;
+    /// still gated by a compile-time constant (`BubbleMorphFeature
+    /// .isAvailable`) and this runtime toggle, and always bypassed under
+    /// Reduce Motion (→ today's static aura). Set false to fall back to the
+    /// original aura + crossfade.
+    @AppStorage("bubbleMorphEnabled") private var bubbleMorphEnabled = true
+    /// "Photo lifts out of the card as an orb, genie-travels to the notch to
+    /// 'think', then travels back." Layered on top of the bubble morph as the
+    /// analyzing hero. Runtime toggle; always bypassed under Reduce Motion (the
+    /// in-card aura then carries the analyzing state). See `AnalyzingOrbJourney`.
+    @AppStorage("orbNotchJourneyEnabled") private var orbNotchJourneyEnabled = true
+    /// Analyzing animation: OFF = the Metal genie-warp shader + orb in the
+    /// Dynamic Island (the default). ON = the experimental GPU particle-fluid
+    /// ("dust") simulation. Kept behind the flag so it can be re-enabled, but
+    /// the genie warp is the shipping look. See `Genie.metal` / `FluidParticleView`.
+    @AppStorage("sphFluidEnabled") private var sphFluidEnabled = false
+    /// Single namespace shared by the capture-side photo and the result-
+    /// screen meal photo. Declared on the parent that hosts BOTH the
+    /// `emptyOrPickedFlow` and `resultFlow` branches — it must live above
+    /// both, never inside either, or the geometry match silently breaks.
+    @Namespace private var mealMorph
 
     @State private var pickerSheet: PickerSheet? = nil
     @State private var showingSourceDialog = false
@@ -66,6 +93,8 @@ struct CaptureView: View {
     /// after the third save's success-sheet dismiss, with a small
     /// guard so it doesn't fight the coach picker for the same slot.
     @State private var showingNotificationPermission = false
+    /// Loop-building first-save celebration + reminders opt-in (once ever).
+    @State private var showingFirstLogLoop = false
 
     /// Phase 20 — calorie-goal scan warning. Surfaces a confirmation
     /// dialog before the photo source picker when today's consumed
@@ -99,6 +128,14 @@ struct CaptureView: View {
     /// repeatedly before saving — we only celebrate once).
     @State private var firstScanGlowVisible: Bool = false
     @State private var firstScanGlowFired: Bool = false
+    /// Food-derived palette for the analyzing aura. Computed exactly once
+    /// per scan (when `.analyzing` begins, from `state.image`) and passed
+    /// down into `AnalyzingImageAura` so the free-tier glow picks up the
+    /// dish's own hues instead of a fixed rainbow. Empty means "fall back
+    /// to the default palette" — set when extraction yields < 2 usable
+    /// colors. Pro keeps its champagne override regardless. Never sampled
+    /// per frame: the `TimelineView` inside the aura only reads this array.
+    @State private var foodPalette: [Color] = []
     /// Today's meal count, fetched alongside `cachedCalorieStatus` so the
     /// daily check-in card can render its primary copy without a second
     /// `todaysLogs` round-trip. `nil` while loading; the card renders
@@ -191,6 +228,39 @@ struct CaptureView: View {
         }
     }
 
+    /// Whether the matched-geometry morph should engage: feature compiled
+    /// in, runtime flag on, and Reduce Motion off. Any one false → the
+    /// crossfade fallback. Read everywhere the morph branches, so the whole
+    /// feature collapses to today's behavior from a single switch.
+    private var bubbleMorphActive: Bool {
+        BubbleMorphFeature.isAvailable && bubbleMorphEnabled && !reduceMotion
+    }
+
+    /// Whether the orb-to-notch journey owns the analyzing visual. When on, the
+    /// photo lifts out of the card and the in-card analyzing chrome (dim field /
+    /// badge / aura) is suppressed so the two don't fight. Off under Reduce
+    /// Motion (→ in-card aura) and when the user disables it.
+    private var orbJourneyActive: Bool {
+        orbNotchJourneyEnabled && BubbleMorphFeature.isAvailable && !reduceMotion
+    }
+
+    /// Whether the matched-geometry photo→result handoff should engage.
+    /// Gated additionally on `resultHandoffAvailable` (off), so the analyzing
+    /// bubble can ship without the fragile cross-branch result morph. When
+    /// false the result reveal is exactly today's focus-pull crossfade.
+    private var photoResultHandoffActive: Bool {
+        bubbleMorphActive && BubbleMorphFeature.resultHandoffAvailable
+    }
+
+    /// True only while a morph is active AND analysis is underway — the
+    /// window where the matched-geometry effect (not `DelightfulImageEntry`'s
+    /// bounce or `FirstScanGlow`'s fixed ring) should own the photo's
+    /// position/scale/shape. Always false when the morph is disabled, so the
+    /// default entrance choreography is untouched.
+    private var suppressPhotoEntranceForMorph: Bool {
+        bubbleMorphActive && viewModel.state.isThinking
+    }
+
     enum PickerSheet: Identifiable {
         case camera
         var id: String { "camera" }
@@ -231,21 +301,29 @@ struct CaptureView: View {
                         //     to a flat opacity fade.
                         Group {
                             switch viewModel.state {
-                            case .idle, .picked, .analyzing, .moodPulse, .clarifying:
+                            case .idle, .picked, .analyzing, .moodPulse,
+                                 .clarifying, .confirmingName:
                                 // .moodPulse is rendered as the empty/idle
                                 // hero with the mood sheet on top — the
                                 // result rendering would be a misleading
                                 // background while the user reflects.
-                                // .clarifying does the same — the photo
-                                // card stays the focal background while
-                                // the Quantity Clarification sheet asks
-                                // the user about portions.
+                                // .clarifying and .confirmingName do the
+                                // same — the photo card stays the focal
+                                // background while the name-confirmation /
+                                // Quantity Clarification sheet is up.
                                 emptyOrPickedFlow
                                     .transition(.asymmetric(
                                         insertion: .opacity,
-                                        removal: .opacity.combined(
-                                            with: .scale(scale: 0.94, anchor: .top)
-                                        )
+                                        // When the result handoff is engaged,
+                                        // a scale on the whole capture flow
+                                        // would fight the traveling photo, so
+                                        // the backdrop just fades. With it off
+                                        // (today), keep the upward lift.
+                                        removal: photoResultHandoffActive
+                                            ? AnyTransition.opacity
+                                            : .opacity.combined(
+                                                with: .scale(scale: 0.94, anchor: .top)
+                                            )
                                     ))
                             case .ready, .saving, .saved, .saveFailed,
                                  .noFood, .failed:
@@ -491,12 +569,29 @@ struct CaptureView: View {
             .presentationDetents([.height(280)])
             .presentationDragIndicator(.visible)
         }
+        // Mandatory name confirmation — presented on `.confirmingName`
+        // (every successful scan lands here first). Extracted to a
+        // ViewModifier for the same type-check-budget reason as the
+        // clarification sheet below.
+        .modifier(NameConfirmSheetModifier(viewModel: viewModel))
         // Quantity Clarification — sheet presentation extracted to a
         // ViewModifier so the type-checker doesn't have to thread the
         // whole CaptureView modifier chain through the new sheet's
         // generic context. Adding it inline pushed
         // `body` past Swift's expression type-check budget.
         .modifier(ClarificationSheetModifier(viewModel: viewModel))
+        // Analyzing hero: the meal photo lifts out of its card as an orb,
+        // genie-travels to the notch to "think," then back. Self-gated; a
+        // no-op when disabled / Reduce Motion (see `orbJourneyActive`).
+        .analyzingOrbJourney(
+            image: viewModel.state.image,
+            isAnalyzing: viewModel.state.isThinking,
+            palette: foodPalette,
+            isPro: subscriptions.tier == .pro,
+            isActive: isActive,
+            enabled: orbJourneyActive,
+            useFluid: sphFluidEnabled
+        )
         // Phase 15 — Quick Re-log picker sheet.
         .sheet(isPresented: $showingRecentMeals) {
             RecentMealsSheet { picked in
@@ -544,6 +639,21 @@ struct CaptureView: View {
             firstScanGlowFired = true
             firstScanGlowVisible = true
         }
+        .onChange(of: viewModel.state.isThinking) { _, analyzing in
+            // Tint the analyzing aura from the dish itself. Sample exactly
+            // once, the moment analysis begins, from the same image the
+            // aura overlays — never per frame. Clear on exit so a later
+            // scan of a different photo can't inherit a stale palette.
+            guard analyzing else {
+                foodPalette = []
+                return
+            }
+            guard let image = viewModel.state.image else { return }
+            let palette = DominantColors.extract(from: image)
+            // Fallback rule lives here so the aura subviews stay simple:
+            // < 2 usable colors → empty → they use their default palette.
+            foodPalette = palette.count >= 2 ? palette : []
+        }
         .onChange(of: viewModel.state.isIdle) { wasIdle, isIdle in
             // Edge: success sheet dismissed (.saved → .idle).
             // Guard against the no-op idle→idle case.
@@ -553,6 +663,16 @@ struct CaptureView: View {
             // press evaluates honestly rather than riding the prior
             // "Scan anyway" decision.
             bypassCalorieWarningOnce = false
+            // Loop-building first-save hook: the very first saved meal is the
+            // aha. Celebrate it as "day 1 of your streak" and ask to turn on
+            // meal-time reminders (the external trigger) right after value
+            // lands — fires once, ahead of the coach/notification moments. The
+            // logged-day guard ensures a real save (not a cancel back to idle).
+            if !FirstLogLoopHook.didShow, rhythmStore.rhythm().totalLoggedDays >= 1 {
+                FirstLogLoopHook.markShown()
+                showingFirstLogLoop = true
+                return
+            }
             // Coach picker (Phase 16) wins the slot if it hasn't been
             // shown — newer users hit it first; the notification
             // permission sheet (Phase 17) is gated on save count and
@@ -571,6 +691,12 @@ struct CaptureView: View {
         }
         .sheet(isPresented: $showingCoachPicker) {
             CoachPickerOnboardingSheet(onClosed: {})
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
+        // Loop-building first-save celebration + reminders opt-in.
+        .sheet(isPresented: $showingFirstLogLoop) {
+            FirstLogLoopSheet()
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
@@ -760,6 +886,17 @@ struct CaptureView: View {
             mirrorPreview.markDirty()
             if isActive {
                 mirrorPreview.scheduleDebouncedRefresh(reason: .foodLogChanged)
+            }
+            // Live "left today" scoreboard: a saved/edited/deleted meal
+            // shifts today's totals, so refresh the cached goal status
+            // immediately instead of waiting for the next idle pass — the
+            // TodayGoalCard + daily check-in update the moment a meal lands.
+            Task { @MainActor in
+                let snapshot = await CalorieReminderService.shared.currentSnapshot()
+                cachedCalorieStatus = snapshot.status
+                if let count = snapshot.mealCount {
+                    cachedTodayMealCount = count
+                }
             }
         }
         // Phase 21.11 — quest-completion celebration modal. Sits on
@@ -958,7 +1095,8 @@ struct CaptureView: View {
             remaining: subscriptions.scansRemainingToday,
             limit: subscriptions.dailyLimit,
             isPro: subscriptions.tier == .pro,
-            isUnlimited: subscriptions.isUnlimited
+            isUnlimited: subscriptions.isUnlimited,
+            isActive: isActive
         ) {
             // Any state → explainer modal. The modal carries the
             // "Try Pro" CTA itself so out-of-scans users still have a
@@ -997,6 +1135,26 @@ struct CaptureView: View {
         // user sees the scan affordance within the first viewport —
         // no scrolling past secondary cards to find the primary
         // action. The pinned bottom "Take a photo" CTA mirrors it.
+        // Live "left today" scoreboard — the always-on goal anchor, placed
+        // above the photo card so it's glanceable without scrolling. Shows
+        // only when idle and a real goal exists (first-timers without a goal
+        // still get an uncrowded photo card at the top). Reads the same
+        // cached status the result screen uses; refreshes the instant a meal
+        // saves via the `.foodLogDidChange` hook above. Taps to Tracker.
+        if viewModel.state.isIdle,
+           let status = cachedCalorieStatus, status.hasValidGoal {
+            TodayGoalCard(
+                status: status,
+                goalDirection: profileStore.profile?.weightGoalDirection,
+                bodyWeightKg: profileStore.profile?.weightKg
+            ) {
+                Haptics.tap()
+                notifRouter.requestTab(1)
+            }
+            .padding(.top, AppSpacing.lg)
+            .transition(.opacity)
+        }
+
         photoCard
             .padding(.top, AppSpacing.xl)
 
@@ -1012,11 +1170,12 @@ struct CaptureView: View {
                     .transition(.opacity)
             }
 
-            // Quick re-log link — secondary path for returning users.
-            // Quiet text link; visually subordinate to the photo card
-            // and pinned CTA.
-            quickRelogLink
-                .padding(.top, AppSpacing.sm)
+            // Quick re-log row — promoted secondary path for returning
+            // users. Re-logging copies a past meal in two taps (no photo,
+            // no AI, no scan credit) — the lowest-friction way to log, so
+            // it's a pair of tappable chips, not a buried text link.
+            quickLogRow
+                .padding(.top, AppSpacing.md)
                 .frame(maxWidth: .infinity)
                 .transition(.opacity)
         }
@@ -1094,17 +1253,60 @@ struct CaptureView: View {
                             .appShadow(.shadowCard)
 
                         if let image = viewModel.state.image {
-                            DelightfulImageEntry(image: image)
+                            // Bubble mode only: a dim + food-tinted living
+                            // halo sits BEHIND the photo so the gooey photo
+                            // bubble reads as floating on a Siri-like field.
+                            // Fades in/out with analyzing via the photoCard's
+                            // `.animation(value: isAnalyzing)`.
+                            if (bubbleMorphActive || orbJourneyActive),
+                               viewModel.state.isThinking {
+                                bubbleAnalyzingField
+                                    .transition(.opacity)
+                            }
+                            DelightfulImageEntry(
+                                image: image,
+                                // Once analysis is underway the morph owns the
+                                // photo's shape — gate the bounce-in so it
+                                // doesn't fight it. No-op when the morph is off
+                                // (initial pick still bounces).
+                                suppressEntrance: suppressPhotoEntranceForMorph
+                            )
                                 .id(ObjectIdentifier(image))
+                                // Bubble mode: while analyzing, the photo
+                                // itself morphs into a gooey, breathing bubble
+                                // (progress 0 = full card → 1 = liquid blob),
+                                // then un-forms back to the card as analysis
+                                // ends — a fluid handoff into the next step.
+                                // No-op (passes through) when the morph is off,
+                                // and when the orb journey owns the analyzing
+                                // visual (the photo lifts out instead).
+                                .modifier(ConditionalBubbleMask(
+                                    active: bubbleMorphActive && !orbJourneyActive,
+                                    progress: viewModel.state.isThinking ? 1 : 0,
+                                    cornerRadius: AppRadius.xl2
+                                ))
+                                // Matched-geometry SOURCE for the later
+                                // photo→result handoff (.confirmingName/
+                                // .clarifying → .ready). Gated separately and
+                                // currently off; no-op modifier in that case.
+                                .modifier(MealMorphMatch(
+                                    namespace: photoResultHandoffActive ? mealMorph : nil,
+                                    isSource: true
+                                ))
+                                // Orb journey: this photo's frame is where the
+                                // orb launches from / returns to. While the orb
+                                // is flying, the in-card photo fades so it reads
+                                // as having lifted out of the card.
+                                .orbSourceAnchor()
+                                .opacity(orbJourneyActive && viewModel.state.isThinking ? 0 : 1)
+                                .animation(.easeOut(duration: 0.22),
+                                           value: viewModel.state.isThinking)
                             // First-scan magic: brand-tinted glow ring that
-                            // radiates around the photo as it lands. Lives
-                            // in the same overlay frame as the image so it
-                            // hugs the card edge. Owns its own fade-out
-                            // (.task with try/catch), so this view doesn't
-                            // retain a delayed Task — SwiftUI cancels the
-                            // .task automatically when the glow's `onDone`
-                            // flips visibility off and removes it.
-                            if firstScanGlowVisible {
+                            // radiates around the photo as it lands. Owns its
+                            // own fade-out via `.task`. Suppressed during the
+                            // morph window so its fixed xl2 ring can't clip
+                            // against the photo's changing shape.
+                            if firstScanGlowVisible, !suppressPhotoEntranceForMorph {
                                 FirstScanGlow {
                                     firstScanGlowVisible = false
                                 }
@@ -1112,18 +1314,25 @@ struct CaptureView: View {
                                 .allowsHitTesting(false)
                                 .transition(.opacity)
                             }
-                            if viewModel.state.isAnalyzing {
-                                // Pro analyses get a champagne-tinted
-                                // aura — same fluid motion as free,
-                                // but the palette skews to warm gold
-                                // so Pro users feel the moment is
-                                // theirs without an explicit label.
-                                AnalyzingImageAura(
-                                    isPro: subscriptions.tier == .pro
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
-                                .transition(.opacity)
-                                .allowsHitTesting(false)
+                            if viewModel.state.isThinking, !orbJourneyActive {
+                                if bubbleMorphActive {
+                                    // Bubble mode: the photo IS the bubble, so
+                                    // the analyzing chrome is just the dots
+                                    // badge floating over it.
+                                    bubbleAnalyzingBadge
+                                        .transition(.opacity)
+                                } else {
+                                    // Original mode: aura overlay over the
+                                    // photo. Pro analyses get a champagne tint.
+                                    AnalyzingImageAura(
+                                        isPro: subscriptions.tier == .pro,
+                                        foodPalette: foodPalette,
+                                        isActive: isActive
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
+                                    .transition(analyzingAuraTransition)
+                                    .allowsHitTesting(false)
+                                }
                             }
                         } else {
                             photoCardEmptyContent
@@ -1138,7 +1347,7 @@ struct CaptureView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            viewModel.state.isAnalyzing ? "Analyzing meal photo"
+            viewModel.state.isThinking ? "Analyzing meal photo"
             : viewModel.state.image == nil ? "Tap to add a photo"
                                            : "Change meal photo"
         )
@@ -1148,8 +1357,15 @@ struct CaptureView: View {
         // so the user sees: empty halo pops out → image scales in past
         // 1.0, settles, then a tiny secondary stamp confirms the moment.
         .animation(.appBouncy, value: viewModel.state.image == nil)
-        .animation(.motionBase, value: viewModel.state.isAnalyzing)
-        .disabled(viewModel.state.isAnalyzing)
+        // Snappy spring so the aura's removal reads as a "lock-in" — the
+        // colored blobs collapse toward center as the result reveals,
+        // rather than crossfading. Insertion (opacity) barely registers
+        // the spring; the contract is where it earns its keep.
+        .animation(
+            reduceMotion ? .appReduced : .appMorph,
+            value: viewModel.state.isThinking
+        )
+        .disabled(viewModel.state.isThinking)
         // Floating "change photo" affordance so the user can swap the
         // captured/picked photo without having to know the whole card
         // is tappable. Visible only in `.picked` — once analyze fires
@@ -1181,6 +1397,88 @@ struct CaptureView: View {
             }
         }
         .animation(.appBouncy, value: showsChangePhotoButton)
+    }
+
+    /// Bubble mode only: the ambient field rendered BEHIND the gooey photo
+    /// bubble while analyzing — a soft dim plus the food-tinted living glow,
+    /// so the bubble reads as floating on a Siri-like surface. Self-timed
+    /// via its own TimelineView; clipped to the card and non-interactive.
+    @ViewBuilder
+    private var bubbleAnalyzingField: some View {
+        TimelineView(.animation) { timeline in
+            let seconds = timeline.date.timeIntervalSinceReferenceDate
+            ZStack {
+                Color.black.opacity(0.14)
+                SiriFluidGlow(
+                    time: seconds,
+                    isPro: subscriptions.tier == .pro,
+                    palette: foodPalette
+                )
+                .blur(radius: 18)
+                .opacity(0.55)
+                .blendMode(.screen)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
+        .allowsHitTesting(false)
+    }
+
+    /// Bubble mode only: the analyzing dots badge floating over the photo
+    /// bubble, bottom-trailing. The bubble itself communicates "analyzing,"
+    /// so this is the only chrome on top.
+    private var bubbleAnalyzingBadge: some View {
+        AnalyzingDotsBadge()
+            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                   alignment: .bottomTrailing)
+            .padding(AppSpacing.md)
+            .allowsHitTesting(false)
+    }
+
+    /// The analyzing aura's "lock-in": insertion is a plain opacity fade,
+    /// but removal contracts the colored glow toward center (scale → 0.2,
+    /// anchor `.center`) while fading and picking up a small blur bump —
+    /// so when analysis finishes the blobs visibly collapse inward as the
+    /// result reveals, rather than crossfading out. Driven by the snappy
+    /// `.appMorph` spring on the photo card. Under Reduce Motion both
+    /// directions degrade to a plain opacity fade.
+    private var analyzingAuraTransition: AnyTransition {
+        if reduceMotion {
+            return .opacity
+        }
+        return .asymmetric(
+            insertion: .opacity,
+            removal: .opacity
+                .combined(with: .scale(scale: 0.2, anchor: .center))
+                .combined(with: .modifier(
+                    active: AuraCollapseBlur(radius: 8),
+                    identity: AuraCollapseBlur(radius: 0)
+                ))
+        )
+    }
+
+    /// The result reveal's "focus-pull". The analysis content enters
+    /// diffuse (blur 16) and resolves to crisp as it rises and fades in,
+    /// timed to the same `.appMorph` spring that animates the idle→result
+    /// switch — so the analysis "comes into focus" exactly as the analyzing
+    /// bubble collapses inward (see `analyzingAuraTransition`). Under Reduce
+    /// Motion the blur ramp is dropped for a plain opacity fade.
+    private var resultRevealTransition: AnyTransition {
+        if reduceMotion {
+            return .opacity
+        }
+        // Only when the matched-geometry result handoff is engaged does the
+        // photo carry itself into place — then a container move + focus-pull
+        // blur would fight it. With the handoff off (today), keep the full
+        // focus-pull crossfade below.
+        if photoResultHandoffActive {
+            return .opacity
+        }
+        return .opacity
+            .combined(with: .move(edge: .bottom))
+            .combined(with: .modifier(
+                active: FocusPullBlur(radius: 16),
+                identity: FocusPullBlur(radius: 0)
+            ))
     }
 
     /// Show the floating "change photo" button only after the user has
@@ -1215,52 +1513,54 @@ struct CaptureView: View {
         }
     }
 
-    /// Phase 15. Subtle text link "Or pick from your recent meals →".
-    /// Hidden when there's no list to show — but we don't pre-fetch
-    /// here; the sheet itself handles loading + the empty state, and
-    /// always-rendering this affordance keeps the layout stable across
-    /// users with and without prior saves.
-    private var quickRelogLink: some View {
-        Button {
-            Haptics.tap()
-            showingRecentMeals = true
-        } label: {
-            HStack(spacing: 6) {
-                Text("Or pick from your recent meals")
-                    .appFont(.captionStrong)
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 11, weight: .heavy))
+    /// Promoted quick-log row for returning users: re-log a recent meal or a
+    /// favorite in two taps — no photo, no AI, no scan credit. This is the
+    /// lowest-friction path in the app, so it's surfaced as tappable chips
+    /// rather than the old buried text link. The favorites chip only appears
+    /// once the user has hearted at least one meal.
+    private var quickLogRow: some View {
+        VStack(spacing: AppSpacing.xs) {
+            Text("Already had it? Re-log in a tap")
+                .appFont(.caption)
+                .foregroundStyle(Color.inkMute)
+            HStack(spacing: AppSpacing.sm) {
+                quickLogChip(title: "Recent meals",
+                             systemImage: "clock.arrow.circlepath") {
+                    showingRecentMeals = true
+                }
+                if !favoritesStore.favorites.isEmpty {
+                    quickLogChip(title: "Favorites",
+                                 systemImage: "heart.fill") {
+                        showingFavoriteMeals = true
+                    }
+                }
             }
-            .foregroundStyle(Color.brandDeep)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Pick from recent meals to re-log")
     }
 
-    /// Companion to `quickRelogLink`. Surfaces the favorites-filtered
-    /// picker so users with a small set of hearted meals can land in
-    /// one tap instead of scrolling through the full recents list.
-    private var quickFavoriteLink: some View {
+    /// One tappable pill in `quickLogRow`. Bordered so it reads as a button,
+    /// not a text link — matching the brand's quiet-but-clear chip style.
+    private func quickLogChip(title: String, systemImage: String,
+                              action: @escaping () -> Void) -> some View {
         Button {
             Haptics.tap()
-            showingFavoriteMeals = true
+            action()
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "heart.fill")
-                    .font(.system(size: 11, weight: .heavy))
-                Text("Quick log a favorite")
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .bold))
+                Text(title)
                     .appFont(.captionStrong)
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 11, weight: .heavy))
             }
             .foregroundStyle(Color.brandDeep)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Capsule().fill(Color.bgSurface))
+            .overlay(Capsule().strokeBorder(Color.brand.opacity(0.30), lineWidth: 1))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Quick log a favorite meal")
+        .accessibilityLabel("\(title) — re-log a meal without a photo")
     }
 
     private var hintChip: some View {
@@ -1368,6 +1668,11 @@ struct CaptureView: View {
                     // what `predictedImpactCopy` expects to fold the
                     // analyzed calories into.
                     dailyStatus: cachedCalorieStatus,
+                    // Strava-for-food loop: goal direction + body weight let
+                    // the result show "X left today" and, when over (and not
+                    // a gain goal), a personalized "earn it back" walk/jog.
+                    goalDirection: profileStore.profile?.weightGoalDirection,
+                    bodyWeightKg: profileStore.profile?.weightKg,
                     foodNameOverride: viewModel.editedFoodName,
                     patternInsight: viewModel.patternInsight,
                     onFoodNameEdited: { name in
@@ -1376,6 +1681,12 @@ struct CaptureView: View {
                     onFoodNameCorrected: { name in
                         Task { await viewModel.reanalyzeWithCorrectedName(name) }
                     },
+                    // Destination half of the matched-geometry pair. Gated on
+                    // the (currently-off) result handoff, so it's nil today
+                    // and the result photo renders with its normal reveal.
+                    // Declared after onFoodNameCorrected, so it must appear
+                    // here (before onSave) to match memberwise-init order.
+                    morphNamespace: photoResultHandoffActive ? mealMorph : nil,
                     onSave:   { handleSaveTapped() },
                     onCancel: { handleCancelTapped() }
                 )
@@ -1388,7 +1699,7 @@ struct CaptureView: View {
                 }
             }
             .padding(.top, AppSpacing.lg)
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
+            .transition(resultRevealTransition)
         } else {
             switch viewModel.state {
             case .noFood:
@@ -1489,10 +1800,10 @@ struct CaptureView: View {
             // primary "Take a photo" button while the user is mid-
             // reflection.
             EmptyView()
-        case .clarifying:
-            // Quantity Clarification sheet owns the user's attention.
-            // No bottom CTA so the underlying photo card reads as a
-            // quiet background, not a competing affordance.
+        case .clarifying, .confirmingName:
+            // The name-confirmation / Quantity Clarification sheet owns
+            // the user's attention. No bottom CTA so the underlying photo
+            // card reads as a quiet background, not a competing affordance.
             EmptyView()
         }
     }
@@ -1779,6 +2090,123 @@ private struct BreathingCameraHalo: View {
 /// All inputs are pure data caches owned by the parent — there is no
 /// polling, no timer, no retained `Task`. Repeated renders produce
 /// identical copy for the same inputs (deterministic).
+/// The always-on "Today" scoreboard on Home — a glanceable mini calorie
+/// ring + the running headline ("1,240 left today" / "180 over today")
+/// against the daily goal. The first beat of the goal loop made persistent:
+/// you see where you stand without having to scan. Taps through to Tracker.
+private struct TodayGoalCard: View {
+    let status: DailyCalorieGoalStatus
+    /// Goal direction + body weight power the "earn it back" line — same
+    /// rule as the result screen: only for lose/maintain, never gain, and
+    /// the minutes are personalized to the user's weight.
+    var goalDirection: CalorieGoalCalculator.GoalDirection? = nil
+    var bodyWeightKg: Double? = nil
+    let onTap: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var isOver: Bool {
+        status.exceededBy > 0 || status.warningState == .reached
+    }
+    /// Show the walk/jog burn-off only when genuinely over budget and the
+    /// goal isn't to gain (where a surplus is the point).
+    private var showBurnOff: Bool {
+        status.exceededBy > 0 && goalDirection != .gain
+    }
+    private var clamped: Double { min(max(status.progress, 0), 1) }
+    private var ringColor: Color { isOver ? Color.error : Color.brand }
+
+    /// Headline figure, rounded to the nearest 10 for a calm read and
+    /// grouped (1,240) by locale.
+    private var headline: String {
+        let value = isOver ? status.exceededBy : status.remaining
+        let n = Int((value / 10).rounded() * 10)
+        return isOver ? "\(n.formatted()) over today"
+                      : "\(n.formatted()) left today"
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: AppSpacing.md) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.borderHairline, lineWidth: 6)
+                    Circle()
+                        .trim(from: 0, to: clamped)
+                        .stroke(ringColor,
+                                style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(reduceMotion ? nil
+                                   : .spring(response: 0.6, dampingFraction: 0.85),
+                                   value: clamped)
+                }
+                .frame(width: 46, height: 46)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(headline)
+                        .appFont(.title2)
+                        .foregroundStyle(isOver ? Color.error : Color.ink)
+                    Text("of \(Int(status.goal).formatted()) kcal goal")
+                        .appFont(.caption)
+                        .foregroundStyle(Color.inkLight)
+
+                    if showBurnOff {
+                        let walk = ActivityBurnEstimator.walkMinutes(
+                            toBurn: status.exceededBy, weightKg: bodyWeightKg)
+                        let jog = ActivityBurnEstimator.jogMinutes(
+                            toBurn: status.exceededBy, weightKg: bodyWeightKg)
+                        HStack(spacing: 5) {
+                            Image(systemName: "figure.walk")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Color.brandDeep)
+                            Text("\(walk)-min walk or \(jog)-min jog to burn it off")
+                                .appFont(.caption)
+                                .foregroundStyle(Color.inkMute)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.top, 2)
+                    } else if let eatLine = MealSuggestionEngine.compactLine(
+                                remaining: status.remaining) {
+                        // Under goal → one calm line on what fits. The
+                        // headline already carries the number.
+                        HStack(spacing: 5) {
+                            Image(systemName: "fork.knife")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Color.brandDeep)
+                            Text(eatLine)
+                                .appFont(.caption)
+                                .foregroundStyle(Color.inkMute)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.top, 2)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.inkLight)
+            }
+            .padding(AppSpacing.md)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .fill(Color.bgSurface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppRadius.lg)
+                            .strokeBorder(Color.borderHairline, lineWidth: 1)
+                    )
+            )
+            .appShadow(.shadowCard)
+            .contentShape(RoundedRectangle(cornerRadius: AppRadius.lg))
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(headline)
+        .accessibilityHint("Opens today's tracker")
+    }
+}
+
 private struct DailyCheckInCard: View {
     let mealCount: Int
     let rhythm: LoggingRhythmStore.Rhythm
@@ -1831,12 +2259,9 @@ private struct DailyCheckInCard: View {
         if isEndOfDay, mealCount >= 1 {
             return "Your day is almost complete. Come back tomorrow for a fresh pulse."
         }
-        if let status, status.hasValidGoal, mealCount >= 1 {
-            if status.warningState == .reached || status.exceededBy > 0 {
-                return "goal reached"
-            }
-            return "about \(Int(status.remaining.rounded())) calories left"
-        }
+        // Calorie standing now lives in the always-on TodayGoalCard above,
+        // so this card stays focused on rhythm/encouragement and doesn't
+        // echo the same "X calories left" number twice on one screen.
         if let status, status.hasValidGoal, mealCount == 0 {
             // Empty state with a goal set — keep the calorie sub-line
             // quiet (we don't want to greet the user with their target
@@ -2074,9 +2499,18 @@ private struct RemovePhotoButton: View {
 /// photo, which re-runs the whole choreography from the top.
 private struct DelightfulImageEntry: View {
     let image: UIImage
+    /// When true, skip the bounce-in entirely and render at identity. Used
+    /// during the bubble→result morph so the matched-geometry effect owns
+    /// the photo's transform instead of this entrance fighting it.
+    var suppressEntrance: Bool = false
     @State private var landed: Bool = false
     @State private var stamping: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Treat the photo as fully landed (no transform) whenever the entrance
+    /// is suppressed — derived rather than written to @State so there's no
+    /// opacity-0 flash before `onAppear` would otherwise run.
+    private var effectiveLanded: Bool { suppressEntrance || landed }
 
     var body: some View {
         Image(uiImage: image)
@@ -2094,12 +2528,16 @@ private struct DelightfulImageEntry: View {
             .scaleEffect(scale)
             // Reduce Motion: skip the rotation tilt so the image fades in
             // straight rather than swinging into place.
-            .rotationEffect(.degrees(reduceMotion ? 0 : (landed ? 0 : -6)))
-            .opacity(landed ? 1 : 0)
-            .onAppear { runEntrance() }
+            .rotationEffect(.degrees(reduceMotion ? 0 : (effectiveLanded ? 0 : -6)))
+            .opacity(effectiveLanded ? 1 : 0)
+            .onAppear {
+                guard !suppressEntrance else { return }
+                runEntrance()
+            }
     }
 
     private var scale: CGFloat {
+        if suppressEntrance { return 1.0 }
         if reduceMotion { return 1.0 }
         if !landed { return 0.55 }
         return stamping ? 1.04 : 1.0
@@ -2208,6 +2646,17 @@ private struct FirstScanGlow: View {
 /// belongs to Pro users.
 private struct AnalyzingImageAura: View {
     var isPro: Bool = false
+    /// Food-derived tint for the free path, sampled once per scan by the
+    /// photo card and threaded straight into the fluid glow + ribbons.
+    /// Empty → the subviews use their default rainbow palette. Ignored on
+    /// the Pro path (champagne override) and under Reduce Motion (static
+    /// aura draws no blobs).
+    var foodPalette: [Color] = []
+    /// Pauses the per-frame metaball `TimelineView` when the Home tab isn't
+    /// active (e.g. the user switches tabs mid-analyze) — the inactive tab
+    /// stays alive in the TabView and would otherwise keep redrawing the
+    /// Canvas every frame.
+    var isActive: Bool = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -2230,18 +2679,25 @@ private struct AnalyzingImageAura: View {
                                alignment: .bottomTrailing)
                 }
             } else {
-                TimelineView(.animation) { timeline in
+                TimelineView(.animation(paused: !isActive)) { timeline in
                     let seconds = timeline.date.timeIntervalSinceReferenceDate
 
                     ZStack {
                         Color.black.opacity(0.16)
 
-                        SiriFluidGlow(time: seconds, isPro: isPro)
-                            .blur(radius: 26)
+                        // Outer blur is intentionally lighter than the
+                        // pre-metaball recipe (was 26): the Canvas now emits
+                        // a defined fused silhouette, so a softer halo keeps
+                        // the liquid edge legible instead of diffusing the
+                        // bubble back into a vague glow.
+                        SiriFluidGlow(time: seconds, isPro: isPro,
+                                      palette: foodPalette)
+                            .blur(radius: 14)
                             .opacity(0.82)
                             .blendMode(.screen)
 
-                        SiriWaveRibbons(time: seconds, isPro: isPro)
+                        SiriWaveRibbons(time: seconds, isPro: isPro,
+                                        palette: foodPalette)
                             .blendMode(.screen)
 
                         LinearGradient(
@@ -2310,49 +2766,95 @@ private struct AnalyzingDot: View {
 private struct SiriFluidGlow: View {
     let time: TimeInterval
     var isPro: Bool = false
+    /// Food-derived tint for the bubble. When non-empty (the caller
+    /// guarantees ≥ 2 colors before passing it through) its dominant hue
+    /// tints the fused silhouette; empty falls back to the classic Siri
+    /// cyan. Only the *first* color is read now that the four blobs fuse
+    /// into a single metaball — per-blob color is discarded by the alpha
+    /// threshold, so multi-hue richness comes from the ribbons drawn over
+    /// the bubble instead.
+    var palette: [Color] = []
 
-    // Pro palette: champagne, warm amber, peach blush, brand-cream
-    // (so the gold reads against the brand instead of looking
-    // photoshopped in). Same 4 stops so the existing blob layout
-    // (count/scale/positions) is unchanged.
+    /// Number of orbiting blobs fused into the bubble. Held at 4 — the
+    /// metaball Canvas (blur + alpha-threshold) is the expensive part, so
+    /// the blob count stays put for performance regardless of palette size.
+    private static let blobCount = 4
+
     private static let freeColors: [Color] = [
         Color(red: 0.15, green: 0.86, blue: 1.00),
         Color(red: 0.90, green: 0.21, blue: 1.00),
         Color(red: 1.00, green: 0.63, blue: 0.18),
         Color.brandBright,
     ]
-    private static let proColors: [Color] = [
-        ProGold.cream,
-        ProGold.warm,
-        ProGold.rose,
-        Color.brandBright,
-    ]
 
-    private var colors: [Color] { isPro ? Self.proColors : Self.freeColors }
+    /// Single fill + threshold color for the fused bubble. Pro keeps its
+    /// champagne body; otherwise the dominant food hue tints the bubble,
+    /// falling back to the classic Siri cyan when no palette was sampled.
+    private var bubbleTint: Color {
+        if isPro { return ProGold.cream }
+        return palette.first ?? Self.freeColors[0]
+    }
 
     var body: some View {
         GeometryReader { proxy in
             let side = min(proxy.size.width, proxy.size.height)
+            // Bubble breathing: a gentle ±4% sin pulse on the blob radius,
+            // driven off the same `time` the orbit uses, so the fused shape
+            // feels alive while analyzing. This scales the *drawn* blobs,
+            // never the blur/threshold parameters — the metaball recipe
+            // stays static per frame.
+            let breathe = 1 + 0.04 * sin(time * 1.6)
 
-            ZStack {
-                ForEach(colors.indices, id: \.self) { index in
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    colors[index].opacity(0.82),
-                                    colors[index].opacity(0.0)
-                                ],
-                                center: .center,
+            Canvas { context, size in
+                // Gooey metaball fusion. The four orbiting blobs are drawn
+                // into one transparency layer, blurred, then alpha-
+                // thresholded so their soft fields merge into a single
+                // liquid silhouette wherever they overlap — instead of four
+                // separate orbs floating apart.
+                //
+                // Filter order is deliberate: SwiftUI applies the most
+                // recently added filter first, so adding the threshold
+                // *first* and the blur *last* means the blur runs on the raw
+                // blobs (building the gooey field) and the threshold runs on
+                // the blurred result (cutting the crisp fused edge). Both
+                // filter parameters are constant — only `position(for:)`
+                // animates the orbit — so the recipe never re-tunes per
+                // frame.
+                context.addFilter(.alphaThreshold(min: 0.45, color: bubbleTint))
+                context.addFilter(.blur(radius: 18))
+                context.drawLayer { layer in
+                    for index in 0..<Self.blobCount {
+                        let diameter = side * blobScale(index) * breathe
+                        let center = position(for: index, in: size)
+                        let rect = CGRect(
+                            x: center.x - diameter / 2,
+                            y: center.y - diameter / 2,
+                            width: diameter,
+                            height: diameter
+                        )
+                        layer.fill(
+                            Path(ellipseIn: rect),
+                            with: .radialGradient(
+                                Gradient(stops: [
+                                    .init(color: bubbleTint.opacity(0.95),
+                                          location: 0.0),
+                                    .init(color: bubbleTint.opacity(0.90),
+                                          location: 0.45),
+                                    .init(color: bubbleTint.opacity(0.0),
+                                          location: 1.0),
+                                ]),
+                                center: center,
                                 startRadius: 0,
-                                endRadius: side * 0.42
+                                endRadius: diameter * 0.5
                             )
                         )
-                        .frame(width: side * blobScale(index),
-                               height: side * blobScale(index))
-                        .position(position(for: index, in: proxy.size))
+                    }
                 }
             }
+            // Flatten the metaball into a single Metal-backed layer so the
+            // blur + threshold compose once per frame rather than against
+            // the parent's blend.
+            .drawingGroup()
         }
     }
 
@@ -2371,6 +2873,11 @@ private struct SiriFluidGlow: View {
 private struct SiriWaveRibbons: View {
     let time: TimeInterval
     var isPro: Bool = false
+    /// Food-derived tint for the free path. When non-empty it's expanded
+    /// into the same 3-ribbon × 3-stop shape the hardcoded
+    /// `freeRibbonColors` uses, so the wave geometry below is untouched —
+    /// only the colors change. Empty falls back to the default rainbow.
+    var palette: [Color] = []
 
     private static let freeRibbonColors: [[Color]] = [
         [
@@ -2412,7 +2919,23 @@ private struct SiriWaveRibbons: View {
     ]
 
     private var ribbonColors: [[Color]] {
-        isPro ? Self.proRibbonColors : Self.freeRibbonColors
+        if isPro { return Self.proRibbonColors }
+        return palette.isEmpty ? Self.freeRibbonColors : Self.ribbons(from: palette)
+    }
+
+    /// Expand a flat food palette into 3 ribbons of 3 stops, keeping the
+    /// existing 3-ribbon geometry (drawWaves centers its vertical offset
+    /// on index 1, so the count must stay 3). Each ribbon walks the
+    /// palette from a different offset for variety; a white top-stop on
+    /// the first ribbon preserves the sparkle `freeRibbonColors` had.
+    private static func ribbons(from palette: [Color]) -> [[Color]] {
+        let n = palette.count
+        func c(_ i: Int) -> Color { palette[((i % n) + n) % n] }
+        return [
+            [c(0), c(1), c(2)],
+            [c(1), c(2), c(0)],
+            [Color.white.opacity(0.9), c(0), c(2)],
+        ]
     }
 
     var body: some View {
@@ -2475,6 +2998,262 @@ private struct SiriWaveRibbons: View {
                 )
             )
         }
+    }
+}
+
+/// Transition-only blur for the analyzing aura's "lock-in" collapse — the
+/// glow softens slightly as it contracts toward center. Kept as a
+/// dedicated modifier so the blur can animate via `.modifier(active:
+/// identity:)` inside the asymmetric removal transition.
+private struct AuraCollapseBlur: ViewModifier {
+    let radius: CGFloat
+    func body(content: Content) -> some View {
+        content.blur(radius: radius)
+    }
+}
+
+/// Transition-only blur for the result reveal's "focus-pull": the analysis
+/// content lands diffuse (blur ~16) and resolves to crisp (blur 0) as the
+/// analyzing bubble collapses inward — the analysis "comes into focus."
+/// Driven by the same `.appMorph` spring already animating the idle↔result
+/// switch; the call site degrades to a plain opacity fade (no blur ramp)
+/// under Reduce Motion.
+private struct FocusPullBlur: ViewModifier {
+    let radius: CGFloat
+    func body(content: Content) -> some View {
+        content.blur(radius: radius)
+    }
+}
+
+// MARK: - Experimental bubble → result-photo morph
+
+/// Gate + constants for the experimental "analyzing bubble physically
+/// morphs into the result meal photo" handoff. The morph replaces the
+/// capture→result crossfade with a single matched-geometry travel of the
+/// photo (position + size + corner radius).
+///
+/// Two locks, both required to engage (plus Reduce Motion off, checked at
+/// the call site): this compile-time `isAvailable` constant, and the
+/// `@AppStorage("bubbleMorphEnabled")` runtime toggle (default off). Flip
+/// `isAvailable` to false to strip the matched-geometry path entirely
+/// without touching persisted user defaults. `internal` (not `private`)
+/// so `AnalysisResultView` in its own file can share the same `matchID`.
+enum BubbleMorphFeature {
+    static let isAvailable = true
+    /// Separate, currently-off gate for the matched-geometry photo→result
+    /// handoff (capture photo flying into `AnalysisResultView`). Decoupled
+    /// from the analyzing-bubble effect because the mandatory `.confirmingName`
+    /// step sits between `.analyzing` and `.ready`, so a clean bubble→result
+    /// morph isn't possible without state-logic changes. Left in place
+    /// (gated off) rather than deleted so it can be revisited.
+    static let resultHandoffAvailable = false
+    /// Geometry id shared by the capture-side source photo and the
+    /// result-side destination photo. Must appear on exactly those two
+    /// views and never on two simultaneously-mounted *sources*.
+    static let matchID = "mealPhoto"
+    /// Near-circular corner radius the result photo starts the morph at,
+    /// rounding down to the thumbnail radius as it settles. Large enough
+    /// that `RoundedRectangle` clamps it to a circle on the bubble-sized
+    /// starting frame.
+    static let circularRadius: CGFloat = 200
+}
+
+/// Applies the shared meal-photo matched-geometry effect when a namespace
+/// is provided; a no-op otherwise, so the flag-off / Reduce-Motion path is
+/// structurally identical to today's tree (no matched geometry attached).
+struct MealMorphMatch: ViewModifier {
+    let namespace: Namespace.ID?
+    let isSource: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let namespace {
+            content.matchedGeometryEffect(
+                id: BubbleMorphFeature.matchID,
+                in: namespace,
+                isSource: isSource
+            )
+        } else {
+            content
+        }
+    }
+}
+
+/// Applies `BubbleMorphMask` only when the morph is engaged for this view;
+/// otherwise passes content through untouched, so the flag-off path keeps
+/// the photo's plain rounded-rect clip (no mask, no extra redraws).
+struct ConditionalBubbleMask: ViewModifier {
+    let active: Bool
+    let progress: CGFloat
+    let cornerRadius: CGFloat
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if active {
+            content.modifier(BubbleMorphMask(
+                progress: progress,
+                cornerRadius: cornerRadius
+            ))
+        } else {
+            content
+        }
+    }
+}
+
+/// Masks a view into a living "jelly" that embodies what the app does while
+/// it works: the meal photo melts out of its card into a glossy blob that
+/// rhythmically **loosens into lobes and re-fuses** — a visual "we're
+/// breaking your meal down" — while it **jiggles** with elastic squash-and-
+/// stretch and carries a drifting **wet sheen**. Morphs between a full
+/// rounded-rect (progress 0 — the photo card) and the formed jelly
+/// (progress 1), un-forming back to the card as analysis ends.
+///
+/// Three motions, each serving the brief:
+///  - Split & merge: the metaball lobes' separation breathes, so the blob
+///    gently parts into pieces and rejoins — the decomposition the analyzer
+///    is performing, made tactile.
+///  - Squash & stretch: anisotropic x/y wobble (out of phase) gives the
+///    elastic, edible jiggle that matches the app's bouncy character.
+///  - Sheen: a soft white highlight drifts across the surface (overlaid on
+///    the photo, masked along with it) so the jelly reads as wet/appetizing.
+///
+/// Conforms to `Animatable` so `progress` interpolates frame-by-frame; the
+/// metaball blur scales with `progress` so progress 0 is a crisp full card
+/// (matching the normal photo) and only the formed jelly is gooey.
+struct BubbleMorphMask: ViewModifier, Animatable {
+    /// 0 = full rounded-rect card; 1 = formed jelly.
+    var progress: CGFloat
+    /// Card corner radius the silhouette starts from at progress 0.
+    var cornerRadius: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let p = max(0, min(1, progress))
+        return content
+            // Wet sheen — a soft, slowly drifting highlight. It sits over the
+            // photo and is clipped by the same jelly mask below, so it only
+            // shows on the blob. Fades in with `p`; gone at rest.
+            .overlay {
+                if p > 0.02 {
+                    TimelineView(.animation) { timeline in
+                        let t = timeline.date.timeIntervalSinceReferenceDate
+                        GeometryReader { geo in
+                            let w = geo.size.width
+                            let h = geo.size.height
+                            let r = min(w, h) * 0.42
+                            let cx = w * (0.34 + 0.05 * CGFloat(sin(t * 0.7)))
+                            let cy = h * (0.28 + 0.04 * CGFloat(cos(t * 0.6)))
+                            Circle()
+                                .fill(
+                                    RadialGradient(
+                                        colors: [.white.opacity(0.75 * p),
+                                                 .white.opacity(0.18 * p),
+                                                 .white.opacity(0.0)],
+                                        center: .center,
+                                        startRadius: 0,
+                                        endRadius: r
+                                    )
+                                )
+                                .frame(width: r * 2, height: r * 2)
+                                .position(x: cx, y: cy)
+                                .blendMode(.screen)
+                        }
+                        .allowsHitTesting(false)
+                    }
+                }
+            }
+            .mask {
+                // Paused when flat so an idle/picked photo card doesn't drive
+                // a continuous redraw; runs while the jelly forms or lives.
+                TimelineView(.animation(paused: p <= 0.001)) { timeline in
+                    let t = timeline.date.timeIntervalSinceReferenceDate
+                    Canvas { ctx, size in
+                        // Gooey fusion: blur then alpha-threshold (threshold
+                        // added first → applied last, since SwiftUI applies
+                        // the most recently added filter first). A small base
+                        // blur even at progress 0 keeps the rounded-card edge
+                        // anti-aliased; it ramps up as the jelly forms.
+                        ctx.addFilter(.alphaThreshold(min: 0.5, color: .white))
+                        ctx.addFilter(.blur(radius: 0.5 + 17 * p))
+                        ctx.drawLayer { layer in
+                            let w = size.width
+                            let h = size.height
+                            let center = CGPoint(x: w / 2, y: h / 2)
+                            let side = min(w, h)
+
+                            // Elastic jiggle: width and height wobble out of
+                            // phase so the body widens-then-heightens like
+                            // settling jelly (subsumes the old uniform breath).
+                            let jiggleX = 1 + 0.05 * sin(t * 2.0) * p
+                            let jiggleY = 1 + 0.05 * sin(t * 2.0 + .pi) * p
+
+                            // Body: full card → ~58% rounded core as it forms,
+                            // corner rounding all the way to a circle. Smaller
+                            // core lets the lobes read as distinct pieces.
+                            let bodyScale = 1 - 0.42 * p
+                            let bw = w * bodyScale * jiggleX
+                            let bh = h * bodyScale * jiggleY
+                            let circleCorner = min(bw, bh) / 2
+                            let corner = cornerRadius
+                                + (circleCorner - cornerRadius) * p
+                            let bodyRect = CGRect(x: center.x - bw / 2,
+                                                  y: center.y - bh / 2,
+                                                  width: bw, height: bh)
+                            layer.fill(
+                                Path(roundedRect: bodyRect, cornerRadius: corner),
+                                with: .color(.white.opacity(0.98))
+                            )
+
+                            guard p > 0.02 else { return }
+
+                            // Split & merge: separation breathes (~5.7s cycle)
+                            // so the lobes gently part — "breaking it down" —
+                            // and re-fuse. 0 = merged, 1 = most separated.
+                            let split = 0.5 + 0.5 * sin(t * 1.1)
+                            let sep = (0.10 + 0.22 * split) * p
+                            let scales: [CGFloat] = [0.6, 0.54, 0.48, 0.42]
+                            for i in 0..<4 {
+                                let phase = t * (0.5 + Double(i) * 0.08)
+                                    + Double(i) * 1.7
+                                let ox = CGFloat(cos(phase)) * w * sep * jiggleX
+                                let oy = CGFloat(sin(phase * 1.13)) * h * sep * jiggleY
+                                let bx = center.x + ox
+                                let by = center.y + oy
+                                let d = side * scales[i] * p
+                                    * (jiggleX + jiggleY) / 2
+                                guard d > 0.5 else { continue }
+                                let r = CGRect(x: bx - d / 2, y: by - d / 2,
+                                               width: d, height: d)
+                                layer.fill(Path(ellipseIn: r),
+                                           with: .color(.white.opacity(0.98)))
+                            }
+                        }
+                    }
+                    .drawingGroup()
+                }
+            }
+    }
+}
+
+/// The analyzing "dots" badge, extracted so bubble mode can float it over
+/// the photo bubble. Mirrors the badge `AnalyzingImageAura` draws.
+private struct AnalyzingDotsBadge: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<3, id: \.self) { index in
+                AnalyzingDot(delay: Double(index) * 0.16)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(
+            Capsule().strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
+        )
     }
 }
 
@@ -2669,6 +3448,44 @@ private struct RelogToastModifier: ViewModifier {
                 }
             }
             .animation(.motionBase, value: viewModel.relogToast?.id)
+    }
+}
+
+/// Mandatory name confirmation — presents `NameConfirmSheet` whenever
+/// the view model is in `.confirmingName` (every successful first-pass
+/// analyze lands there). Mirrors `ClarificationSheetModifier`:
+/// visibility is entirely state-driven and the binding's `set` is a true
+/// no-op. We do NOT route dismissal through `confirmDetectedName` here —
+/// doing so would race `correctNameAndContinue` (which flips state to
+/// `.analyzing`) the same way the clarification path could race the
+/// refine Task. "Looks right" / drag-to-dismiss call `confirmDetectedName`
+/// from inside the sheet view itself (via its `onConfirm` + `onDisappear`
+/// default).
+private struct NameConfirmSheetModifier: ViewModifier {
+    @ObservedObject var viewModel: CaptureViewModel
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: Binding(
+            get: { viewModel.state.isConfirmingName },
+            set: { _ in /* no-op — state machine owns dismissal */ }
+        )) {
+            if case .confirmingName(_, let response) = viewModel.state {
+                NameConfirmSheet(
+                    detectedName: viewModel.editedFoodName
+                        ?? response.analysis.food
+                        ?? "this dish",
+                    nameAlternatives: response.analysis.nameAlternatives ?? [],
+                    onConfirm: {
+                        viewModel.confirmDetectedName()
+                    },
+                    onCorrect: { name in
+                        Task { await viewModel.correctNameAndContinue(name) }
+                    }
+                )
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+        }
     }
 }
 
@@ -3407,6 +4224,10 @@ private struct ScanCounterChip: View {
     /// sheet so users can learn the scan budget before being
     /// upsold.
     let onTap: () -> Void
+    /// Whether the Home tab is the active tab. The heartbeat loop only runs
+    /// when true, so the chip stops animating on inactive tabs (TabView keeps
+    /// the view alive otherwise).
+    var isActive: Bool = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var haloBreathe = false
@@ -3451,8 +4272,13 @@ private struct ScanCounterChip: View {
         .onAppear(perform: startBreathing)
         // .task auto-cancels on view disappear, so the heartbeat loop
         // exits cleanly when the user navigates away — no leaked
-        // timers, no zombie animations against a defunct chip.
-        .task { await runHeartbeatLoop() }
+        // timers, no zombie animations against a defunct chip. Keyed on
+        // `isActive` so it also stops on inactive tabs (where the chip stays
+        // alive in the TabView) and restarts when Home is reselected.
+        .task(id: isActive) {
+            guard isActive else { return }
+            await runHeartbeatLoop()
+        }
         .onChange(of: isOut) { _, nowOut in
             if nowOut { runOutWiggle() }
         }

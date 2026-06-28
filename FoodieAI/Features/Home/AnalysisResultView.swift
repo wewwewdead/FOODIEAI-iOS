@@ -48,6 +48,14 @@ struct AnalysisResultView: View {
     /// Nil hides the line entirely — invalid/missing goals are not a
     /// place to surface vague copy.
     var dailyStatus: DailyCalorieGoalStatus? = nil
+    /// User's weight-goal direction (lose / maintain / gain). Drives the
+    /// framing of the goal-standing block: "earn it back" effort only
+    /// appears for lose/maintain; gain stays positive. Nil → treated as a
+    /// neutral cut (lose/maintain framing) so the line is never silent.
+    var goalDirection: CalorieGoalCalculator.GoalDirection? = nil
+    /// User's body weight (kg) for the personalized burn-off estimate.
+    /// Nil falls back to a neutral adult default inside `ActivityBurnEstimator`.
+    var bodyWeightKg: Double? = nil
     /// User-corrected food name from a prior tap-to-edit. When set,
     /// shadows `analysis.food` in the detected block so the corrected
     /// name reads first. Nil = show what the AI returned.
@@ -70,6 +78,13 @@ struct AnalysisResultView: View {
     /// (calories/macros recompute). Server treats this as a refinement
     /// and does NOT charge it against the daily scan limit.
     var onFoodNameCorrected: ((String) -> Void)? = nil
+    /// Optional shared namespace for the experimental capture→result photo
+    /// morph. Nil — the default and every existing call site — keeps the
+    /// result photo static (no matched geometry, exactly today's reveal).
+    /// Non-nil means the parent has the morph engaged (flag on + Reduce
+    /// Motion off), so the meal photo becomes the matched-geometry
+    /// destination and its corner radius settles from near-circular.
+    var morphNamespace: Namespace.ID? = nil
     let onSave: () -> Void
     let onCancel: () -> Void
 
@@ -126,7 +141,23 @@ struct AnalysisResultView: View {
     /// the downsample lands so the screen never shows an empty card.
     @State private var displayImage: UIImage? = nil
 
+    /// Drives the morph's corner-radius settle. Starts false (near-circular,
+    /// matching the round bubble) and flips true on appear under `.appMorph`
+    /// so the photo rounds down to the thumbnail radius as it lands. Only
+    /// consulted when `morphNamespace != nil`.
+    @State private var photoMorphSettled: Bool = false
+
     private var analysis: GeminiAnalysis { response.analysis }
+
+    /// Corner radius for the result meal photo. Static at the thumbnail
+    /// radius normally; during the bubble→photo morph it starts near-
+    /// circular and rounds down to the thumbnail radius via `.appMorph`, so
+    /// the photo "sets" out of the round analyzing bubble. Only animated
+    /// when a morph namespace is supplied.
+    private var photoCornerRadius: CGFloat {
+        guard morphNamespace != nil else { return AppRadius.lg }
+        return photoMorphSettled ? AppRadius.lg : BubbleMorphFeature.circularRadius
+    }
 
     /// Stable scroll target id used by `CaptureView`'s `ScrollViewReader`
     /// to focus the typewriter cascade once analyze succeeds. Always
@@ -150,7 +181,7 @@ struct AnalysisResultView: View {
             VStack(alignment: .leading, spacing: AppSpacing.md) {
                 sectionEyebrow("By the numbers")
                 annotatedPhotoBlock
-                dayAwareImpactLine
+                goalStandingBlock
             }
             .opacity(cascadeOn ? 1 : 0)
             .offset(y: cascadeOn ? 0 : 8)
@@ -614,23 +645,64 @@ struct AnalysisResultView: View {
 
             ZStack(alignment: .topLeading) {
                 // --- Photo ---
-                // `compositingGroup` + `drawingGroup` rasterizes the
-                // clipped image + hairline border + card shadow into a
-                // single GPU texture. Without this the shadow recomputes
-                // on every scroll frame and the JPEG re-samples through
-                // the rounded clip mask each pass — the prior version's
-                // top jank source.
-                photoView
-                    .frame(width: photoWidth, height: photoHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: AppRadius.lg))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppRadius.lg)
-                            .strokeBorder(Color.borderHairline, lineWidth: 0.5)
-                    )
-                    .compositingGroup()
-                    .appShadow(.shadowCard)
-                    .drawingGroup(opaque: false)
-                    .offset(x: photoLeading, y: 0)
+                // `compositingGroup` + `drawingGroup` (in both branches)
+                // rasterizes the clipped image + hairline border + card
+                // shadow into a single GPU texture. Without this the shadow
+                // recomputes on every scroll frame and the JPEG re-samples
+                // through the rounded clip mask each pass — the prior
+                // version's top jank source.
+                //
+                // Two structures, chosen by whether the morph is engaged for
+                // this view. The fallback branch is byte-for-byte today's
+                // tree (fixed frame + clip + shadow + `.offset`), so a
+                // flag-off / Reduce-Motion render is unchanged.
+                //
+                // The morph branch decouples size from layout: a `Color.clear`
+                // reserves the natural slot (photoWidth × photoHeight) while
+                // the photo rides in an overlay carrying the matched-geometry
+                // effect, so it can resize to the bubble during the morph (the
+                // overlay overflows the slot) and animate back. It is also
+                // positioned with `.padding(.leading)` rather than `.offset`:
+                // matched geometry reads *layout* frames, so a render-only
+                // `.offset` would mis-place the morph by `photoLeading`.
+                if morphNamespace != nil {
+                    Color.clear
+                        .frame(width: photoWidth, height: photoHeight)
+                        .overlay {
+                            photoView
+                                .clipShape(RoundedRectangle(cornerRadius: photoCornerRadius))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: photoCornerRadius)
+                                        .strokeBorder(Color.borderHairline, lineWidth: 0.5)
+                                )
+                                .compositingGroup()
+                                .appShadow(.shadowCard)
+                                .drawingGroup(opaque: false)
+                                .modifier(MealMorphMatch(
+                                    namespace: morphNamespace,
+                                    isSource: false
+                                ))
+                                .onAppear {
+                                    guard !photoMorphSettled else { return }
+                                    withAnimation(.appMorph) {
+                                        photoMorphSettled = true
+                                    }
+                                }
+                        }
+                        .padding(.leading, photoLeading)
+                } else {
+                    photoView
+                        .frame(width: photoWidth, height: photoHeight)
+                        .clipShape(RoundedRectangle(cornerRadius: AppRadius.lg))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppRadius.lg)
+                                .strokeBorder(Color.borderHairline, lineWidth: 0.5)
+                        )
+                        .compositingGroup()
+                        .appShadow(.shadowCard)
+                        .drawingGroup(opaque: false)
+                        .offset(x: photoLeading, y: 0)
+                }
 
                 // --- Connector lines + endpoint discs ---
                 // A single `Canvas` draws all 12 strokes / fills in one
@@ -1259,43 +1331,101 @@ struct AnalysisResultView: View {
 
     // MARK: - Day-aware impact line
 
-    /// Tiny inline line under the calorie hero. Folds the just-analyzed
-    /// meal's calories into the pre-scan status to predict where today
-    /// would land if the user saves — so the copy never disagrees with
-    /// the Today ring's warning state. Hidden when there's no usable
-    /// pre-scan status (missing/invalid goal).
+    /// Goal-anchored standing block under the hero macros — the first beat
+    /// of the "Strava for food" loop. Folds the just-analyzed meal's
+    /// calories into the pre-scan day total to show, in real numbers, where
+    /// saving this meal leaves you against today's goal: how much room is
+    /// left, or — if it tips you over (and your goal is to lose/maintain) —
+    /// a doable "earn it back" move estimated from your own weight. Hidden
+    /// only when there's no usable pre-scan goal or no meal calories.
     @ViewBuilder
-    private var dayAwareImpactLine: some View {
-        if let copy = predictedImpactCopy {
-            Text(copy)
-                .appFont(.caption)
-                .foregroundStyle(Color.inkMute)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private var goalStandingBlock: some View {
+        if let status = dailyStatus, status.hasValidGoal,
+           let cals = analysis.calories, cals.isFinite, cals >= 0 {
+            let predicted = DailyCalorieGoalStatus.compute(
+                consumed: status.consumed + cals,
+                goal: status.goal
+            )
+            let isGain = goalDirection == .gain
+            let over = predicted.exceededBy
+            let showBurnOff = over > 0 && !isGain
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: showBurnOff
+                          ? "exclamationmark.circle.fill" : "target")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(showBurnOff ? Color.error : Color.brandDeep)
+                    Text(goalStandingText(predicted: predicted, isGain: isGain))
+                        .appFont(.bodyEmphasis)
+                        .foregroundStyle(Color.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if showBurnOff {
+                    let walk = ActivityBurnEstimator.walkMinutes(
+                        toBurn: over, weightKg: bodyWeightKg)
+                    let jog = ActivityBurnEstimator.jogMinutes(
+                        toBurn: over, weightKg: bodyWeightKg)
+                    HStack(spacing: 8) {
+                        Image(systemName: "figure.walk")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color.brandDeep)
+                        Text("A \(walk)-min walk or \(jog)-min jog evens it out.")
+                            .appFont(.caption)
+                            .foregroundStyle(Color.inkMute)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if let eatLine = MealSuggestionEngine.compactLine(
+                            remaining: predicted.remaining) {
+                    // Inverse of the burn-off line: still under goal → a calm,
+                    // one-line "what fits" nudge. The headline already shows
+                    // the number, so this is just the size of meal that fits.
+                    HStack(spacing: 8) {
+                        Image(systemName: "fork.knife")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color.brandDeep)
+                        Text(eatLine)
+                            .appFont(.caption)
+                            .foregroundStyle(Color.inkMute)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(AppSpacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .fill(Color.bgSurfaceSoft)
+            )
         }
     }
 
-    /// Picks the friendly, non-shaming copy for the predicted-post-save
-    /// status. Returns nil when the inputs don't justify a line (no
-    /// valid goal in the cached pre-scan status, or no calories on the
-    /// analyze response).
-    private var predictedImpactCopy: String? {
-        guard let cached = dailyStatus, cached.hasValidGoal else { return nil }
-        guard let cals = analysis.calories, cals.isFinite, cals >= 0 else {
-            return nil
+    /// Friendly, non-shaming standing line for the predicted post-save day.
+    /// Numbers are rounded to the nearest 5 kcal for a calmer read.
+    private func goalStandingText(predicted: DailyCalorieGoalStatus,
+                                  isGain: Bool) -> String {
+        let over = roundedCalories(predicted.exceededBy)
+        let remaining = roundedCalories(predicted.remaining)
+        if isGain {
+            if predicted.exceededBy > 0 {
+                return "Over maintenance — fuel for building."
+            }
+            return "\(remaining) kcal to go toward today's goal."
         }
-        let predicted = DailyCalorieGoalStatus.compute(
-            consumed: cached.consumed + cals,
-            goal: cached.goal
-        )
-        if predicted.exceededBy > 0 || predicted.warningState == .reached {
-            return "This would put you at today's goal."
+        if predicted.exceededBy > 0 {
+            return "\(over) kcal over today's goal."
         }
-        if predicted.warningState == .approaching {
-            return "This would bring you close to today's goal."
+        if predicted.remaining <= 0 {
+            return "Right at today's goal."
         }
-        return "This would still keep you within today's goal."
+        return "\(remaining) kcal left today after this."
+    }
+
+    /// Rounds a calorie figure to the nearest 5 for a calmer, less
+    /// false-precise number.
+    private func roundedCalories(_ value: Double) -> Int {
+        guard value.isFinite else { return 0 }
+        return Int((value / 5).rounded() * 5)
     }
 
     // MARK: - Zone 5 — insights helper

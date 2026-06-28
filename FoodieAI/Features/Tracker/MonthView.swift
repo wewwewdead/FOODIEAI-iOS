@@ -6,6 +6,9 @@ import SwiftUI
 struct MonthView: View {
     @ObservedObject var viewModel: MonthViewModel
     let isActive: Bool
+    /// Injected at the app root — used so a tapped day can show its standing
+    /// against the user's goal + direction.
+    @EnvironmentObject private var profileStore: ProfileStore
     @State private var selectedBucket: DailyBucket?
     @State private var automaticRefreshTask: Task<Void, Never>? = nil
     @State private var lastAutomaticRefreshAt: Date? = nil
@@ -39,9 +42,15 @@ struct MonthView: View {
             }
         }
         .sheet(item: $selectedBucket) { bucket in
-            DayDetailSheet(bucket: bucket, onDeleted: {
-                Task { await viewModel.refresh() }
-            })
+            DayDetailSheet(
+                bucket: bucket,
+                onDeleted: {
+                    Task { await viewModel.refresh() }
+                },
+                goal: profileStore.calorieGoal,
+                direction: profileStore.profile?.weightGoalDirection,
+                bodyWeightKg: profileStore.profile?.weightKg
+            )
         }
     }
 
@@ -86,7 +95,7 @@ struct MonthView: View {
             VStack(spacing: AppSpacing.md) {
                 Text("Couldn't load this month")
                     .appFont(.displayMD)
-                    .foregroundStyle(Color.redError)
+                    .foregroundStyle(Color.error)
                     .multilineTextAlignment(.center)
                 Text(error.localizedDescription)
                     .appFont(.meta)
@@ -225,9 +234,9 @@ struct MonthView: View {
             .padding(.vertical, 22)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
+            RoundedRectangle(cornerRadius: AppRadius.xl2, style: .continuous)
                 .strokeBorder(Color.brandDeep.opacity(0.10), lineWidth: 1)
         )
         .shadow(color: Color.brand.opacity(0.28), radius: 16, x: 0, y: 10)
@@ -255,6 +264,9 @@ struct MonthView: View {
                     Circle().strokeBorder(Color.brandDeep.opacity(0.12),
                                           lineWidth: 0.75)
                 )
+                // 34pt visual circle, 44pt tap target (a11y minimum).
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -292,7 +304,7 @@ struct MonthView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.panelBorder, lineWidth: 2)
+                .strokeBorder(Color.borderHairline, lineWidth: 2)
         )
     }
 
@@ -383,25 +395,28 @@ struct MonthView: View {
 
     // MARK: - Formatting helpers
 
+    // Cached formatters — `dayNumber`/`accessibilityLabel` were re-allocating a
+    // fresh ICU formatter per day cell (~60 per month-grid render). Share one.
+    private static let monthYearFmt: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "MMMM yyyy"; return f
+    }()
+    private static let dayNumberFmt: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "d"; return f
+    }()
+    private static let fullDate: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateStyle = .full; return f
+    }()
+
     private func monthYearLabel(interval: DateInterval) -> String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = "MMMM yyyy"
-        return f.string(from: interval.start)
+        Self.monthYearFmt.string(from: interval.start)
     }
 
     private func dayNumber(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = "d"
-        return f.string(from: date)
+        Self.dayNumberFmt.string(from: date)
     }
 
     private func accessibilityLabel(for bucket: DailyBucket, isFuture: Bool) -> String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateStyle = .full
-        let dateStr = f.string(from: bucket.date)
+        let dateStr = Self.fullDate.string(from: bucket.date)
         if isFuture { return dateStr }
         if bucket.hasLogs {
             return "\(dateStr), \(bucket.logs.count) meal\(bucket.logs.count == 1 ? "" : "s") logged"

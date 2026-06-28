@@ -65,12 +65,17 @@ extension NotificationRouter: UNUserNotificationCenterDelegate {
         let kind = info["kind"] as? String
 
         Task { @MainActor in
+            // Re-engagement effectiveness: which nudge brought them back.
+            AnalyticsService.shared.track(
+                AnalyticsService.Event.notificationOpened, ["kind": kind ?? "unknown"])
             switch kind {
-            case "reminder":
-                // Reminder tap → Home/Capture so the user can snap.
+            case "reminder", "under_calorie_reminder", "comeback":
+                // Meal nudge, streak/under-calorie nudge, and the dormancy
+                // comeback all want the user on Home/Capture so they can log.
                 self.requestedTab = 0
             case "recap":
-                self.requestedTab = 1
+                // Recap moved to the Insights tab (index 2).
+                self.requestedTab = 2
                 self.requestedRecap = true
             default:
                 break

@@ -18,6 +18,9 @@ struct OnboardingArchetypeView: View {
     /// from its hero-position into the floating Continue stack. Optional
     /// so previews still build.
     var ctaNamespace: Namespace.ID? = nil
+    /// Whether the user is already authenticated — decides whether continuing
+    /// goes to the sign-in interrupt or straight to completion (legacy account).
+    var isSignedIn: Bool = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -52,12 +55,12 @@ struct OnboardingArchetypeView: View {
             VStack(spacing: AppSpacing.sm) {
                 PrimaryButton(title: "Continue",
                               isDisabled: vm.archetype == nil) {
-                    vm.advance()
+                    vm.continueFromGoal(isSignedIn: isSignedIn)
                 }
                 .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
                 Button {
                     Haptics.tap()
-                    vm.skipArchetype()
+                    vm.skipArchetype(isSignedIn: isSignedIn)
                 } label: {
                     Text("Skip this")
                         .appFont(.caption)

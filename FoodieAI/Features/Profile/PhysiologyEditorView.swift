@@ -44,7 +44,7 @@ struct PhysiologyEditorView: View {
     private enum Field: Hashable { case age, height, weight }
     @FocusState private var focusedField: Field?
 
-    private let service = ProfileService()
+    private let service = ProfileService.shared
 
     var body: some View {
         ZStack {
@@ -126,7 +126,7 @@ struct PhysiologyEditorView: View {
         section(title: "Age", caption: nil) {
             HStack {
                 TextField("30", text: $ageText)
-                    .keyboardType(.default)
+                    .keyboardType(.numberPad)
                     .focused($focusedField, equals: .age)
                     .tint(Color.brand)
                     .font(AppFont.font(.kcal))
@@ -141,7 +141,7 @@ struct PhysiologyEditorView: View {
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: AppRadius.lg)
-                            .strokeBorder(focusedField == .age ? Color.brand : Color.panelBorder,
+                            .strokeBorder(focusedField == .age ? Color.brand : Color.borderHairline,
                                           lineWidth: 2)
                     )
                     .onChange(of: ageText) { _, newValue in
@@ -179,7 +179,7 @@ struct PhysiologyEditorView: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppRadius.lg)
-                                .strokeBorder(focusedField == .height ? Color.brand : Color.panelBorder,
+                                .strokeBorder(focusedField == .height ? Color.brand : Color.borderHairline,
                                               lineWidth: 2)
                         )
                         .onChange(of: heightText) { _, newValue in
@@ -203,7 +203,7 @@ struct PhysiologyEditorView: View {
                 HStack {
                     TextField(weightUnit == .kg ? "75" : "165",
                               text: $weightText)
-                        .keyboardType(.default)
+                        .keyboardType(.decimalPad)
                         .focused($focusedField, equals: .weight)
                         .tint(Color.brand)
                         .font(AppFont.font(.kcal))
@@ -218,7 +218,7 @@ struct PhysiologyEditorView: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppRadius.lg)
-                                .strokeBorder(focusedField == .weight ? Color.brand : Color.panelBorder,
+                                .strokeBorder(focusedField == .weight ? Color.brand : Color.borderHairline,
                                               lineWidth: 2)
                         )
                         .onChange(of: weightText) { _, newValue in
@@ -288,7 +288,7 @@ struct PhysiologyEditorView: View {
                     if goals.wasFloored {
                         Text("We've set the minimum to a safe floor — adjust your goal direction if you want more aggressive change.")
                             .appFont(.caption)
-                            .foregroundStyle(Color.redError)
+                            .foregroundStyle(Color.error)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -300,7 +300,7 @@ struct PhysiologyEditorView: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: AppRadius.lg)
-                        .strokeBorder(Color.panelBorder, lineWidth: 2)
+                        .strokeBorder(Color.borderHairline, lineWidth: 2)
                 )
 
                 VStack(spacing: AppSpacing.xs) {
@@ -336,7 +336,7 @@ struct PhysiologyEditorView: View {
                 if let saveError {
                     Text(saveError)
                         .appFont(.caption)
-                        .foregroundStyle(Color.redError)
+                        .foregroundStyle(Color.error)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -365,7 +365,7 @@ struct PhysiologyEditorView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.panelBorder, lineWidth: 2)
+                .strokeBorder(Color.borderHairline, lineWidth: 2)
         )
     }
 
@@ -444,7 +444,7 @@ struct PhysiologyEditorView: View {
                         .appFont(.captionStrong)
                         .foregroundStyle(selected.wrappedValue == option
                                          ? Color.ink : Color.inkMute)
-                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                         .background(
                             selected.wrappedValue == option
                             ? Color.brandSoft : Color.clear
@@ -518,6 +518,8 @@ struct PhysiologyEditorView: View {
                 goals:      goals
             )
             profileStore.apply(updated)
+            // Closes the scan-first loop: a deferred-default user personalized.
+            AnalyticsService.shared.track(AnalyticsService.Event.goalsPersonalized)
             Haptics.success()
             dismiss()
         } catch {

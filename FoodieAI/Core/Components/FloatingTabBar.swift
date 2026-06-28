@@ -217,7 +217,7 @@ private struct FloatingTabBarPreview: View {
                 tabs: [
                     .init(title: "Home", systemImage: "camera", selectedSystemImage: "camera.fill"),
                     .init(title: "Tracker", systemImage: "list.bullet.rectangle"),
-                    .init(title: "Mirror", systemImage: "sparkles"),
+                    .init(title: "Insights", systemImage: "sparkles"),
                     .init(title: "Profile", systemImage: "person.crop.circle")
                 ]
             )

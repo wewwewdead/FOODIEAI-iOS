@@ -28,7 +28,7 @@ struct CoachPickerOnboardingSheet: View {
     /// preferred_coaches (e.g., trigger an immediate generate).
     var onClosed: () -> Void
 
-    private static let service = ProfileService()
+    private static let service = ProfileService.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {

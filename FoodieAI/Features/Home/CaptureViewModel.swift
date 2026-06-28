@@ -4,10 +4,20 @@ import SwiftUI
 ///
 /// State graph:
 ///   .idle → setPhoto → .picked
-///   .picked → analyze() → .analyzing → .ready | .noFood | .failed
+///   .picked → analyze() → .analyzing → .confirmingName | .noFood | .failed
+///   .confirmingName → confirmDetectedName() → .clarifying | .ready
+///   .confirmingName → correctNameAndContinue() → .analyzing → .clarifying | .ready
+///   .clarifying → refineAnalysis() / acceptOriginalAnalysis() → .ready
 ///   .ready → save() → .saving → .saved | .saveFailed
 ///   .saved → discardSaved() → .idle
 ///   any non-idle → resetToPick / discardCurrent → .idle
+///
+/// Mandatory name confirmation: every successful first-pass analyze
+/// lands in `.confirmingName` (never straight to `.clarifying`/`.ready`).
+/// Gemini's self-reported `nameConfidence` is unreliable, so the user
+/// confirms the detected food name before we trust the macros. The
+/// portion-clarification / ready branching runs *after* the name is
+/// confirmed, in `proceedAfterNameConfirmed`.
 ///
 /// While `.analyzing` or `.saving`, a duplicate call is a no-op.
 @MainActor
@@ -17,10 +27,17 @@ final class CaptureViewModel: ObservableObject {
         case picked(UIImage)
         case analyzing(UIImage)
         case noFood(UIImage)
-        /// Quantity Clarification — first-pass analyze returned a
-        /// non-empty `portionAmbiguousItems`. Carries the original
-        /// response so we can fall back to it if the user dismisses
-        /// or the refine call fails.
+        /// Mandatory name confirmation — first-pass analyze succeeded
+        /// and detected food. We pause here on *every* scan so the user
+        /// can confirm (or correct) the detected dish name before we
+        /// trust Gemini's macros. Carries the first-pass response so
+        /// "Looks right" can proceed with no second network call, and so
+        /// a failed correction re-pass can fall back to it.
+        case confirmingName(UIImage, AnalyzeResponse)
+        /// Quantity Clarification — analyze returned a non-empty
+        /// `portionAmbiguousItems`. Reached only *after* the name is
+        /// confirmed. Carries the (name-confirmed) response so we can
+        /// fall back to it if the user dismisses or the refine call fails.
         case clarifying(UIImage, AnalyzeResponse, [GeminiAnalysis.AmbiguousItem])
         case ready(UIImage, AnalyzeResponse)
         case saving(UIImage, AnalyzeResponse)
@@ -43,6 +60,8 @@ final class CaptureViewModel: ObservableObject {
                  .moodPulse(let i, _, _):
                 return i
             case .clarifying(let i, _, _):
+                return i
+            case .confirmingName(let i, _):
                 return i
             }
         }
@@ -71,6 +90,24 @@ final class CaptureViewModel: ObservableObject {
         /// Quantity Clarification.
         var isClarifying: Bool {
             if case .clarifying = self { return true } else { return false }
+        }
+
+        /// Mandatory name confirmation.
+        var isConfirmingName: Bool {
+            if case .confirmingName = self { return true } else { return false }
+        }
+
+        /// The whole "the orb is parked at the island, thinking" window: from
+        /// the moment analysis starts, through the mandatory name confirmation
+        /// and the optional quantity clarification, until the result is ready.
+        /// The analyzing animation (genie up → orb hold → genie back) is driven
+        /// by THIS, not `isAnalyzing`, so the orb stays docked across those
+        /// sub-steps instead of returning + replaying on each transition.
+        var isThinking: Bool {
+            switch self {
+            case .analyzing, .confirmingName, .clarifying: return true
+            default: return false
+            }
         }
     }
 
@@ -237,7 +274,7 @@ final class CaptureViewModel: ObservableObject {
          imageService: FoodImageService = FoodImageService(),
          logService: FoodLogService = FoodLogService(),
          history: MealHistoryService = MealHistoryService(),
-         profileService: ProfileService = ProfileService(),
+         profileService: ProfileService = ProfileService.shared,
          feedbackStore: FoodOSMomentFeedbackStore = .shared) {
         self.analyzer = analyzer
         self.imageService = imageService
@@ -319,23 +356,19 @@ final class CaptureViewModel: ObservableObject {
             // structured-output field with ""); only a *non-empty* fallback
             // means "no food detected".
             if response.analysis.hasFood {
-                // Quantity Clarification — if Gemini flagged any
-                // portion-ambiguous items, pause for the user to confirm
-                // or adjust quantities before showing the result.
-                let ambiguous = response.analysis.portionAmbiguousItems ?? []
-                if !ambiguous.isEmpty {
-                    Haptics.prepare()
-                    state = .clarifying(image, response, ambiguous)
-                } else {
-                    Haptics.prepare() // warm the engine for the upcoming save tap
-                    // On-device pattern insight is enrichment only —
-                    // it never changes Gemini's calories/macros, which
-                    // stay the displayed source. Compute it before
-                    // flipping state so the result view's first render
-                    // carries the "Your Pattern" card.
-                    patternInsight = patternInsightService.insight(for: response)
-                    state = .ready(image, response)
-                }
+                // Mandatory name confirmation — Gemini's self-reported
+                // `nameConfidence` is unreliable, so we confirm the
+                // detected food name with the user on *every* scan
+                // before trusting the macros. The portion-clarification
+                // / ready branching happens only after the name is
+                // confirmed, inside `proceedAfterNameConfirmed`.
+                // Activation / aha — the first analyzed meal is the key
+                // new-user milestone; also tracks scan frequency over time.
+                AnalyticsService.shared.track(
+                    AnalyticsService.Event.mealAnalyzed,
+                    ["source": lastPhotoSource.rawValue])
+                Haptics.prepare()
+                state = .confirmingName(image, response)
             } else {
                 Haptics.warning()
                 state = .noFood(image)
@@ -396,6 +429,119 @@ final class CaptureViewModel: ObservableObject {
         )
     }
 
+    // MARK: - Mandatory name confirmation
+
+    /// Shared tail for both name-confirmation outcomes. Given a response
+    /// whose *name* the user has accepted (either as-detected or after a
+    /// correction re-pass), decide whether we still owe the Quantity
+    /// Clarification step (non-empty `portionAmbiguousItems`) or can go
+    /// straight to the result. Computes the on-device pattern insight
+    /// before flipping to `.ready` so the result view's first render
+    /// carries the "Your Pattern" card — mirroring the original inline
+    /// logic this replaced in `analyze()`.
+    private func proceedAfterNameConfirmed(image: UIImage,
+                                           response: AnalyzeResponse) {
+        let ambiguous = response.analysis.portionAmbiguousItems ?? []
+        if !ambiguous.isEmpty {
+            Haptics.prepare()
+            state = .clarifying(image, response, ambiguous)
+        } else {
+            Haptics.prepare() // warm the engine for the upcoming save tap
+            patternInsight = patternInsightService.insight(for: response)
+            state = .ready(image, response)
+        }
+    }
+
+    /// "Looks right" on the name-confirmation sheet. The detected name
+    /// is trusted as-is, so we proceed with the first-pass response —
+    /// no second network call and no scan credit consumed. No-op outside
+    /// `.confirmingName`.
+    func confirmDetectedName() {
+        guard case .confirmingName(let image, let response) = state else { return }
+        Haptics.tap()
+        proceedAfterNameConfirmed(image: image, response: response)
+    }
+
+    /// "Not correct" on the name-confirmation sheet: the user typed (or
+    /// quick-picked) the real dish name. Re-run `/analyze` with
+    /// `corrected_food_name` so calories/macros recompute for the right
+    /// dish. The server treats this as a refinement and does NOT count
+    /// it against the daily scan limit — so, exactly like
+    /// `reanalyzeWithCorrectedName` and the quantity-refine path, we
+    /// deliberately do NOT call `noteSuccessfulScanLocally()` here.
+    ///
+    /// On success: stamp `editedFoodName` with the corrected name so the
+    /// rest of the flow (save, display) treats it as authoritative, then
+    /// route through `proceedAfterNameConfirmed` (which still honors any
+    /// portion ambiguity in the refined response).
+    ///
+    /// On failure: fall back to the original first-pass response — don't
+    /// punish the user for a network blip while correcting a name.
+    func correctNameAndContinue(_ name: String) async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let image: UIImage
+        let originalResponse: AnalyzeResponse
+        switch state {
+        case .confirmingName(let i, let r):
+            image = i
+            originalResponse = r
+        default:
+            #if DEBUG
+            NSLog("[NameConfirm] correctNameAndContinue ignored — state=%@",
+                  Self.stateName(state))
+            #endif
+            return
+        }
+
+        editedFoodName = trimmed
+        state = .analyzing(image) // re-show the analyzing UI over the photo
+
+        let jpeg = await Task.detached(priority: .userInitiated) {
+            ImagePreparation.compressMain(image)
+        }.value
+        guard case .analyzing = state, !Task.isCancelled else { return }
+
+        guard let jpeg else {
+            #if DEBUG
+            NSLog("[NameConfirm] compression FAILED; falling back to original response")
+            #endif
+            proceedAfterNameConfirmed(image: image, response: originalResponse)
+            return
+        }
+
+        let context = await fetchContextForAnalyze()
+
+        do {
+            let refined = try await analyzer.analyze(
+                jpegData: jpeg,
+                recentMeals: context.recentMeals,
+                preferredCoaches: context.preferredCoaches,
+                recentMoods: context.recentMoods,
+                correctedFoodName: trimmed
+            )
+            guard case .analyzing = state, !Task.isCancelled else { return }
+            #if DEBUG
+            NSLog("[NameConfirm] succeeded — corrected='%@' refined food=%@ calories=%@ (orig calories=%@)",
+                  trimmed,
+                  refined.analysis.food ?? "<nil>",
+                  refined.analysis.calories.map { "\($0)" } ?? "<nil>",
+                  originalResponse.analysis.calories.map { "\($0)" } ?? "<nil>")
+            #endif
+            // Prefer the refined response only when it still detected
+            // food; otherwise keep the original so the user doesn't lose
+            // their result over a flaky re-pass.
+            let resolved = refined.analysis.hasFood ? refined : originalResponse
+            proceedAfterNameConfirmed(image: image, response: resolved)
+        } catch {
+            #if DEBUG
+            NSLog("[NameConfirm] reanalyze FAILED, falling back to original: %@", "\(error)")
+            #endif
+            proceedAfterNameConfirmed(image: image, response: originalResponse)
+        }
+    }
+
     // MARK: - Quantity Clarification
 
     /// Diagnostic-only — short case label for logs so we can tell
@@ -407,6 +553,7 @@ final class CaptureViewModel: ObservableObject {
         case .picked:      return ".picked"
         case .analyzing:   return ".analyzing"
         case .noFood:      return ".noFood"
+        case .confirmingName: return ".confirmingName"
         case .clarifying:  return ".clarifying"
         case .ready:       return ".ready"
         case .saving:      return ".saving"
@@ -810,6 +957,7 @@ final class CaptureViewModel: ObservableObject {
             // `SavedConfirmationSheet` when the checkmark hits full
             // scale, so it lands with the visual.
             state = .saved(image, response, inserted)
+            AnalyticsService.shared.track(AnalyticsService.Event.mealSaved)
             questEvaluationInFlight = false
 
             // Refresh the local quest cache so the Home card morphs
@@ -1050,6 +1198,8 @@ final class CaptureViewModel: ObservableObject {
             #endif
             Haptics.success()
             relogToast = RelogToast(foodName: source.foodName, kind: .success)
+            // Quick-log adoption — measures the surfaced re-log path (Tier 1).
+            AnalyticsService.shared.track(AnalyticsService.Event.mealRelogged)
             // Retention polish — a re-log is still "the user logged
             // today," so it counts toward the local rhythm.
             LoggingRhythmStore.shared.markToday()
@@ -1095,7 +1245,7 @@ final class CaptureViewModel: ObservableObject {
             async let questTask = DailyQuestService.shared.todaysQuest(
                 timeZone: .current
             )
-            async let profileTask = ProfileService().currentProfile()
+            async let profileTask = ProfileService.shared.currentProfile()
             let quest = try await questTask
             let profile = try await profileTask
             self.dailyQuest = quest

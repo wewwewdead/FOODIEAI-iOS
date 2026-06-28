@@ -59,15 +59,20 @@ struct AmbientFloater: View {
                     let angle = seed.startAngle + Double(driftPhase) * 2 * .pi
                     let cx = cos(angle) * geo.size.width * seed.radius
                     let cy = sin(angle * 0.7) * geo.size.height * seed.radius
+                    // Blur + flatten each blob ONCE into a cached Metal texture;
+                    // only the cheap `.offset` transform changes per frame as it
+                    // drifts. The previous version blurred the whole moving
+                    // composition every frame — a full-screen Gaussian per tick.
                     Circle()
                         .fill(palette[seed.colorIndex])
                         .frame(width: seed.size, height: seed.size)
-                        .offset(x: cx, y: cy)
+                        .blur(radius: 22)
+                        .drawingGroup()
                         .opacity(0.35 * intensity)
+                        .offset(x: cx, y: cy)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
-            .blur(radius: 22)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

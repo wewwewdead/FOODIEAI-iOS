@@ -22,7 +22,7 @@ final class ProfileStore: ObservableObject {
     private let service: ProfileService
     private var didStartInitialLoad = false
 
-    init(service: ProfileService = ProfileService()) {
+    init(service: ProfileService = ProfileService.shared) {
         self.service = service
     }
 

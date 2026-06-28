@@ -16,6 +16,13 @@ struct DayDetailSheet: View {
     /// hides the delete affordance entirely (e.g., previews).
     var onDeleted: (() -> Void)? = nil
 
+    /// Goal context for the day-standing block. When `goal <= 0` the block
+    /// hides — callers that have a profile pass these so the sheet can show
+    /// how the day landed vs. goal + a direction-aware recommendation.
+    var goal: Double = 0
+    var direction: CalorieGoalCalculator.GoalDirection? = nil
+    var bodyWeightKg: Double? = nil
+
     @Environment(\.dismiss) private var dismiss
     @State private var showAllMacros: Bool = false
     private let logService = FoodLogService()
@@ -26,6 +33,7 @@ struct DayDetailSheet: View {
                 header
                 if bucket.hasLogs {
                     caloriesBlock
+                    goalStandingBlock
                     macroChipRow
                     mealsSection
                 } else {
@@ -56,19 +64,17 @@ struct DayDetailSheet: View {
         }
     }
 
-    private var weekdayLabel: String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = "EEEE"
-        return f.string(from: bucket.date)
-    }
+    // Cached formatters (header reads these from body; avoid per-render alloc).
+    private static let weekdayFmt: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "EEEE"; return f
+    }()
+    private static let monthDayFmt: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "MMM d"; return f
+    }()
 
-    private var monthDayLabel: String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = "MMM d"
-        return f.string(from: bucket.date)
-    }
+    private var weekdayLabel: String { Self.weekdayFmt.string(from: bucket.date) }
+
+    private var monthDayLabel: String { Self.monthDayFmt.string(from: bucket.date) }
 
     private var subhead: String {
         bucket.hasLogs
@@ -92,6 +98,53 @@ struct DayDetailSheet: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Goal standing (how the day landed)
+
+    /// Shows how the day's calories compared to the goal, with a
+    /// direction-aware recommendation: over (lose/maintain) → a walk/jog to
+    /// burn it off; under → a food idea; on goal → quiet praise. Hidden when
+    /// the caller didn't supply a valid goal. See `DayCalorieStanding`.
+    @ViewBuilder
+    private var goalStandingBlock: some View {
+        if let standing = DayCalorieStanding.compute(
+            dayCalories: bucket.totals.totalCalories,
+            goal: goal,
+            direction: direction,
+            bodyWeightKg: bodyWeightKg
+        ) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: standing.headlineImage)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(standing.isWarning ? Color.error : Color.brandDeep)
+                    Text(standing.headline)
+                        .appFont(.bodyEmphasis)
+                        .foregroundStyle(Color.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let rec = standing.recommendation {
+                    HStack(spacing: 8) {
+                        if let icon = standing.recommendationImage {
+                            Image(systemName: icon)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(Color.brandDeep)
+                        }
+                        Text(rec)
+                            .appFont(.caption)
+                            .foregroundStyle(Color.inkMute)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(AppSpacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurfaceSoft)
+            )
+            .accessibilityElement(children: .combine)
+        }
     }
 
     // MARK: - Macro chips

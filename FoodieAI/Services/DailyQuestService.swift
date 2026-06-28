@@ -443,7 +443,7 @@ final class DailyQuestService {
     private let foodLogService: FoodLogService
     private let mealHistory: MealHistoryService
 
-    init(profileService: ProfileService = ProfileService(),
+    init(profileService: ProfileService = ProfileService.shared,
          foodLogService: FoodLogService = FoodLogService(),
          mealHistory: MealHistoryService = MealHistoryService()) {
         self.profileService = profileService

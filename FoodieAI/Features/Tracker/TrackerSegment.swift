@@ -1,12 +1,14 @@
 import Foundation
 
-/// Three views the Tracker tab can show. Phase 9 splits the original Tracker
-/// into Today (Phase 6 behavior, unchanged), Week (bar chart), and Month
-/// (calendar grid).
+/// Three categories the Tracker tab can show:
+///   - Today:   the live daily scoreboard (TodayView).
+///   - Records: the "how am I doing over time" surface — streak, weekly
+///              challenge, 30-day record (RecordsView).
+///   - History: past data, with an inner Week/Month toggle (HistoryView).
 enum TrackerSegment: String, CaseIterable, Identifiable {
-    case today = "Today"
-    case week  = "Week"
-    case month = "Month"
+    case today   = "Today"
+    case records = "Records"
+    case history = "History"
 
     var id: String { rawValue }
 }

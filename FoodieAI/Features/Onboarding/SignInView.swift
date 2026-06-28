@@ -229,14 +229,18 @@ struct SignInView: View {
     // MARK: - Nonce helpers (per Apple's SIWA + Supabase guidance)
 
     private static func randomNonceString(length: Int = 32) -> String {
-        precondition(length > 0)
         let charset: [Character] = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._")
         var result = ""
-        var remaining = length
+        var remaining = max(1, length)
         while remaining > 0 {
             var randoms = [UInt8](repeating: 0, count: 16)
             let status = SecRandomCopyBytes(kSecRandomDefault, randoms.count, &randoms)
-            precondition(status == errSecSuccess, "SecRandomCopyBytes failed: \(status)")
+            if status != errSecSuccess {
+                // Astronomically rare. Fall back to the system RNG (still
+                // high-entropy) rather than crash mid-sign-in.
+                var rng = SystemRandomNumberGenerator()
+                for i in randoms.indices { randoms[i] = UInt8.random(in: 0...255, using: &rng) }
+            }
             for random in randoms where remaining > 0 {
                 if random < charset.count {
                     result.append(charset[Int(random)])

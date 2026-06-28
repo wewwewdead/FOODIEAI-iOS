@@ -57,7 +57,7 @@ final class ProfileViewModel: ObservableObject {
     /// keeps us from issuing duplicate concurrent network calls.
     private var isLoadingProfile = false
 
-    init(profileService: ProfileService = ProfileService(),
+    init(profileService: ProfileService = ProfileService.shared,
          foodLogService: FoodLogService = FoodLogService(),
          auth: AuthService) {
         self.profileService = profileService

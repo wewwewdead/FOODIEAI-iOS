@@ -14,6 +14,9 @@ import Charts
 struct WeekView: View {
     @ObservedObject var viewModel: WeekViewModel
     let isActive: Bool
+    /// Injected at the app root — used so a tapped day can show its standing
+    /// against the user's goal + direction.
+    @EnvironmentObject private var profileStore: ProfileStore
     @State private var selectedBucket: DailyBucket?
     @State private var automaticRefreshTask: Task<Void, Never>? = nil
     @State private var lastAutomaticRefreshAt: Date? = nil
@@ -47,9 +50,15 @@ struct WeekView: View {
             }
         }
         .sheet(item: $selectedBucket) { bucket in
-            DayDetailSheet(bucket: bucket, onDeleted: {
-                Task { await viewModel.refresh() }
-            })
+            DayDetailSheet(
+                bucket: bucket,
+                onDeleted: {
+                    Task { await viewModel.refresh() }
+                },
+                goal: profileStore.calorieGoal,
+                direction: profileStore.profile?.weightGoalDirection,
+                bodyWeightKg: profileStore.profile?.weightKg
+            )
         }
     }
 
@@ -90,7 +99,7 @@ struct WeekView: View {
             VStack(spacing: AppSpacing.md) {
                 Text("Couldn't load this week")
                     .appFont(.displayMD)
-                    .foregroundStyle(Color.redError)
+                    .foregroundStyle(Color.error)
                     .multilineTextAlignment(.center)
                 Text(error.localizedDescription)
                     .appFont(.meta)
@@ -238,9 +247,9 @@ struct WeekView: View {
             .padding(.vertical, 22)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
+            RoundedRectangle(cornerRadius: AppRadius.xl2, style: .continuous)
                 .strokeBorder(Color.brandDeep.opacity(0.10), lineWidth: 1)
         )
         .shadow(color: Color.brand.opacity(0.28), radius: 16, x: 0, y: 10)
@@ -320,7 +329,7 @@ struct WeekView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.panelBorder, lineWidth: 2)
+                .strokeBorder(Color.borderHairline, lineWidth: 2)
         )
     }
 
@@ -344,19 +353,28 @@ struct WeekView: View {
 
     // MARK: - Formatting helpers
 
+    // Cached formatters — these were being re-allocated per call (per day cell,
+    // per chart-axis render), bootstrapping a fresh ICU formatter dozens of
+    // times per render. One shared instance each is all that's needed.
+    private static let monthAbbrev: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "MMM"; return f
+    }()
+    private static let dayNumberFmt: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "d"; return f
+    }()
+    private static let weekdayNarrow: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "EEEEE"; return f
+    }()
+    private static let fullDate: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateStyle = .full; return f
+    }()
+
     private func weekRangeLabel(interval: DateInterval) -> String {
         let endInclusive = calendar.date(byAdding: .day, value: -1, to: interval.end) ?? interval.end
-        let monthFmt = DateFormatter()
-        monthFmt.locale = .current
-        monthFmt.dateFormat = "MMM"
-        let dayFmt = DateFormatter()
-        dayFmt.locale = .current
-        dayFmt.dateFormat = "d"
-
-        let startMonth = monthFmt.string(from: interval.start)
-        let endMonth   = monthFmt.string(from: endInclusive)
-        let startDay   = dayFmt.string(from: interval.start)
-        let endDay     = dayFmt.string(from: endInclusive)
+        let startMonth = Self.monthAbbrev.string(from: interval.start)
+        let endMonth   = Self.monthAbbrev.string(from: endInclusive)
+        let startDay   = Self.dayNumberFmt.string(from: interval.start)
+        let endDay     = Self.dayNumberFmt.string(from: endInclusive)
 
         if startMonth == endMonth {
             return "\(startMonth) \(startDay)–\(endDay)"
@@ -366,24 +384,15 @@ struct WeekView: View {
     }
 
     private func weekdayLetter(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = "EEEEE" // narrow: S M T W T F S
-        return f.string(from: date)
+        Self.weekdayNarrow.string(from: date) // narrow: S M T W T F S
     }
 
     private func dayNumber(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = "d"
-        return f.string(from: date)
+        Self.dayNumberFmt.string(from: date)
     }
 
     private func accessibilityLabel(for bucket: DailyBucket) -> String {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateStyle = .full
-        let dateStr = f.string(from: bucket.date)
+        let dateStr = Self.fullDate.string(from: bucket.date)
         if bucket.hasLogs {
             return "\(dateStr), \(format(bucket.totals.totalCalories)) calories"
         } else {

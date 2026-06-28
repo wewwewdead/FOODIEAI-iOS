@@ -181,7 +181,7 @@ struct OnboardingPhysiologyStepView: View {
         section(title: "Age", caption: nil) {
             HStack {
                 TextField("30", text: $ageText)
-                    .keyboardType(.default)
+                    .keyboardType(.numberPad)
                     .focused($focusedField, equals: .age)
                     .tint(Color.brand)
                     .font(AppFont.font(.kcal))
@@ -196,7 +196,7 @@ struct OnboardingPhysiologyStepView: View {
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: AppRadius.lg)
-                            .strokeBorder(focusedField == .age ? Color.brand : Color.panelBorder,
+                            .strokeBorder(focusedField == .age ? Color.brand : Color.borderHairline,
                                           lineWidth: 2)
                     )
                     .onChange(of: ageText) { _, newValue in
@@ -234,7 +234,7 @@ struct OnboardingPhysiologyStepView: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppRadius.lg)
-                                .strokeBorder(focusedField == .height ? Color.brand : Color.panelBorder,
+                                .strokeBorder(focusedField == .height ? Color.brand : Color.borderHairline,
                                               lineWidth: 2)
                         )
                         .onChange(of: heightText) { _, newValue in
@@ -258,7 +258,7 @@ struct OnboardingPhysiologyStepView: View {
                 HStack {
                     TextField(weightUnit == .kg ? "75" : "165",
                               text: $weightText)
-                        .keyboardType(.default)
+                        .keyboardType(.decimalPad)
                         .focused($focusedField, equals: .weight)
                         .tint(Color.brand)
                         .font(AppFont.font(.kcal))
@@ -273,7 +273,7 @@ struct OnboardingPhysiologyStepView: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppRadius.lg)
-                                .strokeBorder(focusedField == .weight ? Color.brand : Color.panelBorder,
+                                .strokeBorder(focusedField == .weight ? Color.brand : Color.borderHairline,
                                               lineWidth: 2)
                         )
                         .onChange(of: weightText) { _, newValue in
@@ -351,7 +351,7 @@ struct OnboardingPhysiologyStepView: View {
                     if goals.wasFloored {
                         Text("We've set the minimum to a safe floor — adjust your goal direction if you want more aggressive change.")
                             .appFont(.caption)
-                            .foregroundStyle(Color.redError)
+                            .foregroundStyle(Color.error)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -363,7 +363,7 @@ struct OnboardingPhysiologyStepView: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: AppRadius.lg)
-                        .strokeBorder(Color.panelBorder, lineWidth: 2)
+                        .strokeBorder(Color.borderHairline, lineWidth: 2)
                 )
 
                 VStack(spacing: AppSpacing.xs) {
@@ -429,7 +429,7 @@ struct OnboardingPhysiologyStepView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.panelBorder, lineWidth: 2)
+                .strokeBorder(Color.borderHairline, lineWidth: 2)
         )
     }
 
@@ -511,7 +511,7 @@ struct OnboardingPhysiologyStepView: View {
                         .appFont(.captionStrong)
                         .foregroundStyle(selected.wrappedValue == option
                                          ? Color.ink : Color.inkMute)
-                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                         .background(
                             selected.wrappedValue == option
                             ? Color.brandSoft : Color.clear
@@ -580,6 +580,16 @@ struct OnboardingPhysiologyStepView: View {
     /// has a stashed physiology (e.g. user came back from coaches
     /// step), hydrate so we don't lose their answers.
     private func hydrateFromVM() {
+        // Pre-select the goal from the up-front goal question so the user isn't
+        // asked their direction twice. They can still change it here.
+        if goal == nil {
+            switch vm.archetype {
+            case .loseWeight?:  goal = .lose
+            case .buildMuscle?: goal = .gain
+            case .aware?:       goal = .maintain
+            default:            break   // .curious / nil → no pre-selection
+            }
+        }
         guard sex == nil, ageText.isEmpty,
               let phys = vm.physiology else { return }
         sex = phys.sex

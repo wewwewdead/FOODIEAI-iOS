@@ -94,7 +94,9 @@ private struct ProBadgeShine: View {
         .overlay(glossyTopHighlight)
         .overlay(shineSweep)
         .background(outerHalo)
-        .scaleEffect(breathe ? 1.025 : 1.0)
+        // Shadows are static (no breathe scale here) — animating scale on a
+        // double-shadowed layer re-rasterizes both shadows every frame. The
+        // breathing aura is carried by `outerHalo` instead.
         .shadow(color: Self.goldWarm.opacity(0.45), radius: 8, x: 0, y: 3)
         .shadow(color: Self.goldRose.opacity(0.25), radius: 14, x: 0, y: 6)
         .onAppear(perform: startAnimations)
@@ -202,6 +204,9 @@ private struct ProBadgeShine: View {
                 )
             )
             .blur(radius: 8)
+            // Cache the blurred halo so the breathing loop scales/opacities a
+            // Metal texture instead of re-running the blur every frame.
+            .drawingGroup()
             .scaleEffect(breathe ? 1.25 : 1.10)
             .opacity(breathe ? 0.95 : 0.70)
             .allowsHitTesting(false)

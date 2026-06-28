@@ -51,12 +51,13 @@ final class CalorieReminderService {
     private var latestGeneration: UInt64 = 0
 
     private enum StatusFetchResult {
-        case status(DailyCalorieGoalStatus)
+        case status(DailyCalorieGoalStatus, streakDays: Int, loggedToday: Bool,
+                    notificationsEnabled: Bool)
         case unavailable
     }
 
     init(logService: FoodLogService = FoodLogService(),
-         profileService: ProfileService = ProfileService(),
+         profileService: ProfileService = ProfileService.shared,
          scheduler: NotificationScheduler? = nil) {
         self.logService = logService
         self.profileService = profileService
@@ -121,7 +122,10 @@ final class CalorieReminderService {
                 consumed: consumed,
                 goal: Double(profile.dailyCalorieGoal)
             )
-            return .status(status)
+            return .status(status,
+                           streakDays: profile.currentStreakDays,
+                           loggedToday: !logs.isEmpty,
+                           notificationsEnabled: profile.notificationsEnabled)
         } catch {
             #if DEBUG
             NSLog("[CalorieReminder] status fetch unavailable: %@", "\(error)")
@@ -220,9 +224,14 @@ final class CalorieReminderService {
             }
 
             switch result {
-            case .status(let status):
+            case .status(let status, let streakDays, let loggedToday, let notifsEnabled):
+                // Streak is "at risk" only when it's live AND nothing has
+                // been logged today — a log today already keeps it alive.
+                let atRisk = loggedToday ? 0 : streakDays
                 await applyReminderDecision(
-                    status: status, now: now, timeZone: timeZone
+                    status: status, streakAtRiskDays: atRisk,
+                    notificationsEnabled: notifsEnabled,
+                    now: now, timeZone: timeZone
                 )
             case .unavailable:
                 #if DEBUG
@@ -251,8 +260,12 @@ final class CalorieReminderService {
         NSLog("[CalorieReminder] direct-data apply gen=%llu state=%@ consumed=%.0f goal=%.0f",
               latestGeneration, "\(status.warningState)", status.consumed, status.goal)
         #endif
+        // Direct-data path has no profile in hand; it's only reached by callers
+        // that already gate on the master toggle, so pass `true` (no extra gate)
+        // and let the fetch path enforce it authoritatively.
         await applyReminderDecision(
-            status: status, now: now, timeZone: timeZone
+            status: status, streakAtRiskDays: 0, notificationsEnabled: true,
+            now: now, timeZone: timeZone
         )
     }
 
@@ -267,8 +280,16 @@ final class CalorieReminderService {
     /// request with the same identifier before adding a new one, so
     /// repeated apply calls never spawn duplicates.
     private func applyReminderDecision(status: DailyCalorieGoalStatus,
+                                       streakAtRiskDays: Int,
+                                       notificationsEnabled: Bool,
                                        now: Date,
                                        timeZone: TimeZone) async {
+        // Respect the in-app master toggle — OS permission alone isn't consent.
+        // A user who turned notifications off shouldn't get the 10pm nudge.
+        guard notificationsEnabled else {
+            scheduler.cancelUnderCalorieReminder()
+            return
+        }
         guard status.hasValidGoal else {
             // No goal → can't reason about "under"; cancel any stale
             // pending notification so we don't ship the user a number
@@ -284,9 +305,11 @@ final class CalorieReminderService {
             return
         }
 
-        // Under goal → schedule (one-shot for the next 22:00).
+        // Under goal → schedule (one-shot for the next 22:00). When a live
+        // streak is unlogged today, the same slot carries streak-saver copy.
         await scheduler.scheduleUnderCalorieReminder(
             remaining: status.remaining,
+            streakAtRiskDays: streakAtRiskDays,
             now: now,
             timeZone: timeZone
         )

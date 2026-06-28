@@ -212,7 +212,7 @@ final class CoachPreferencesViewModel: ObservableObject {
 
     private let service: ProfileService
 
-    init(service: ProfileService = ProfileService()) {
+    init(service: ProfileService = ProfileService.shared) {
         self.service = service
     }
 

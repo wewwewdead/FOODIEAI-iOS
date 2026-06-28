@@ -16,25 +16,15 @@ import SwiftUI
 struct OnboardingFlow: View {
     @EnvironmentObject private var auth: AuthService
     @EnvironmentObject private var profileStore: ProfileStore
-    @StateObject private var vm: OnboardingViewModel
+    /// Owned by `RootView` (not a local `@StateObject`) so the model — and the
+    /// user's goal + physiology answers — survives `RootView` swapping this
+    /// flow out and back in when `auth.isSignedIn` flips mid-onboarding.
+    /// Otherwise a fresh instance would reset the flow to the very start.
+    @ObservedObject var vm: OnboardingViewModel
     /// Shared namespace so the primary CTA can morph (matched geometry)
     /// between hero ("Get started") and archetype ("Continue"). One id
     /// per logical button is enough — see `OnboardingHeroView.ctaMatchedID`.
     @Namespace private var ctaNamespace
-
-    init() {
-        // The view model decides its initial step lazily — see
-        // `bootstrap()`. We can't read environment objects from here.
-        let initial: OnboardingViewModel.Step = {
-            #if DEBUG
-            if ProcessInfo.processInfo.environment["LAUNCH_SIGNIN_DIRECT"] != nil {
-                return .signIn
-            }
-            #endif
-            return .hero
-        }()
-        _vm = StateObject(wrappedValue: OnboardingViewModel(initialStep: initial))
-    }
 
     var body: some View {
         ZStack {
@@ -53,7 +43,8 @@ struct OnboardingFlow: View {
                 SignInView()
                     .transition(.opacity)
             case .archetype:
-                OnboardingArchetypeView(vm: vm, ctaNamespace: ctaNamespace)
+                OnboardingArchetypeView(vm: vm, ctaNamespace: ctaNamespace,
+                                        isSignedIn: auth.isSignedIn)
                     .transition(.asymmetric(
                         insertion: .opacity.animation(.easeOut(duration: 0.38)),
                         removal:   .opacity.animation(.easeIn(duration: 0.22))
@@ -96,9 +87,22 @@ struct OnboardingFlow: View {
         // cross-screen `matchedGeometryEffect` traversals (slightly slower
         // than `.appEntrance`, near-critically damped — see AppAnimation).
         .animation(.appMorph, value: vm.step)
-        .onAppear { bootstrap() }
+        .onAppear {
+            bootstrap()
+            // If we (re)mounted already signed in but parked at the sign-in
+            // interrupt — e.g. RootView swapped the flow out during the brief
+            // post-sign-in profile load — advance past it instead of stalling.
+            if vm.step == .signIn && auth.isSignedIn { vm.signInDidComplete() }
+        }
         .onChange(of: auth.isSignedIn) { _, signedIn in
             if signedIn { vm.signInDidComplete() }
+        }
+        .onChange(of: vm.step) { _, step in
+            // Legacy already-signed-in account reaching the sign-in interrupt
+            // (after the goal + physiology steps) — skip straight past it to
+            // completion, since `auth.isSignedIn` won't change to re-trigger
+            // the handler above.
+            if step == .signIn && auth.isSignedIn { vm.signInDidComplete() }
         }
     }
 
@@ -394,7 +398,7 @@ private struct OnboardingSubscriptionStepView: View {
 
 #if DEBUG
 #Preview("OnboardingFlow") {
-    OnboardingFlow()
+    OnboardingFlow(vm: OnboardingViewModel())
         .environmentObject(AuthService())
         .environmentObject(ProfileStore())
         .environmentObject(SubscriptionManager.shared)

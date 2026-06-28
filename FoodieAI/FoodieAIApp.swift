@@ -146,6 +146,20 @@ struct FoodieAIApp: App {
             // needing UI taps.
             LiveAnalyzeProbeView()
                 .preferredColorScheme(.light)
+        } else if env["LAUNCH_BACKDROP_PROBE"] != nil {
+            // Verification helper: the interactive Metal aurora backdrop.
+            BackdropProbeView()
+                .preferredColorScheme(.light)
+        } else if env["LAUNCH_SPH_PROBE"] != nil {
+            // Verification helper: the GPU particle-fluid effect in isolation.
+            FluidProbeView()
+                .preferredColorScheme(.light)
+        } else if env["LAUNCH_ORB_PROBE"] != nil {
+            // Verification helper: mount the analyzing orb journey over a
+            // sample photo so the genie-to-notch animation can be screenshot
+            // without a server or UI taps.
+            OrbJourneyProbeView()
+                .preferredColorScheme(.light)
         } else if env["LAUNCH_CAPTURE_DIRECT"] != nil {
             CaptureView()
                 .preferredColorScheme(.light)
@@ -230,6 +244,24 @@ struct FoodieAIApp: App {
 struct RootView: View {
     @EnvironmentObject private var auth: AuthService
     @EnvironmentObject private var profileStore: ProfileStore
+    /// Owned here (not inside `OnboardingFlow`) so the onboarding model — and
+    /// the user's goal + physiology answers — survives the flow being swapped
+    /// between the signed-out and signed-in-not-onboarded branches below when
+    /// the user signs in mid-flow. Reset on sign-out so a new account starts
+    /// clean.
+    @StateObject private var onboardingVM = OnboardingViewModel(
+        initialStep: RootView.initialOnboardingStep()
+    )
+
+    private static func initialOnboardingStep() -> OnboardingViewModel.Step {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["LAUNCH_SIGNIN_DIRECT"] != nil {
+            return .signIn
+        }
+        #endif
+        return .hero
+    }
+
     /// Minimum splash duration. Even when auth + profile resolve in a
     /// few hundred ms, we keep the launch screen up long enough for the
     /// breathing animation to play through. Without this, fast cold
@@ -245,13 +277,13 @@ struct RootView: View {
             if shouldShowSplash {
                 LaunchView()
             } else if !auth.isSignedIn {
-                OnboardingFlow()
+                OnboardingFlow(vm: onboardingVM)
             } else if let profile = profileStore.profile {
                 if profile.onboardingCompletedAt != nil
                     || OnboardingViewModel.hasLocalFallbackGate() {
                     MainTabView()
                 } else {
-                    OnboardingFlow()
+                    OnboardingFlow(vm: onboardingVM)
                 }
             } else if profileStore.loadError != nil {
                 // Profile fetch failed (e.g., offline). Don't trap the
@@ -270,6 +302,11 @@ struct RootView: View {
         .task {
             try? await Task.sleep(nanoseconds: Self.minSplashDuration)
             minSplashElapsed = true
+        }
+        .onChange(of: auth.isSignedIn) { _, signedIn in
+            // Sign-out → reset the persisted onboarding model so the next
+            // account starts from the hero rather than inheriting answers.
+            if !signedIn { onboardingVM.reset() }
         }
         // Smooth cross-fade when auth state flips, so we don't pop hard from
         // the launch screen into a tab bar.
@@ -384,7 +421,7 @@ enum AppTab: Int, CaseIterable, Hashable {
         switch self {
         case .home:    return "Home"
         case .tracker: return "Tracker"
-        case .mirror:  return "Mirror"
+        case .mirror:  return "Insights"
         case .profile: return "Profile"
         }
     }
@@ -558,7 +595,7 @@ struct MainTabView: View {
         [
             .init(title: "Home", systemImage: "camera", selectedSystemImage: "camera.fill"),
             .init(title: "Tracker", systemImage: "list.bullet.rectangle", selectedSystemImage: "list.bullet.rectangle.fill"),
-            .init(title: "Mirror", systemImage: "sparkles"),
+            .init(title: "Insights", systemImage: "sparkles"),
             .init(title: "Profile", systemImage: "person.crop.circle", selectedSystemImage: "person.crop.circle.fill")
         ]
     }

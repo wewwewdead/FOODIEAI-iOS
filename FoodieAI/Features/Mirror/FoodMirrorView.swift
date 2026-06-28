@@ -10,6 +10,12 @@ struct FoodMirrorView: View {
 
     @StateObject private var viewModel = FoodMirrorViewModel()
 
+    /// Reflection content relocated here from Today: the weekly recap entry,
+    /// detected patterns, and the active coach observation. Loaded on its own
+    /// (reads only) so Insights is the single home for "what the app notices."
+    @StateObject private var reflection = ReflectionLoader()
+    @State private var showingReflectionRecap = false
+
     @EnvironmentObject private var notifRouter: NotificationRouter
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -62,6 +68,7 @@ struct FoodMirrorView: View {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
                     hero
                     transientErrorBanner
+                    reflectionSection
                     content
                         .transition(
                             .scale(scale: 0.96).combined(with: .opacity)
@@ -77,6 +84,7 @@ struct FoodMirrorView: View {
             }
             .refreshable {
                 await viewModel.refresh(reason: .pullToRefresh, tab: .mirror)
+                await reflection.load()
             }
 
             if celebrate {
@@ -101,6 +109,17 @@ struct FoodMirrorView: View {
         .onChange(of: viewModel.state) { _, _ in
             checkForFirstReady()
         }
+        .onChange(of: notifRouter.requestedRecap) { _, requested in
+            // A recap notification now lands on Insights — load and open it.
+            guard requested else { return }
+            Task {
+                await reflection.load()
+                if reflection.latestRecap != nil {
+                    showingReflectionRecap = true
+                }
+                notifRouter.clearRecapRequest()
+            }
+        }
         .onReceive(
             NotificationCenter.default.publisher(for: .foodLogDidChange)
         ) { _ in
@@ -123,6 +142,60 @@ struct FoodMirrorView: View {
         .fullScreenCover(isPresented: $showingStory) {
             storyCover
         }
+        .sheet(isPresented: $showingReflectionRecap) {
+            if let recap = reflection.latestRecap {
+                NavigationStack {
+                    RecapView(recap: recap)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Close") { showingReflectionRecap = false }
+                            }
+                        }
+                }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+            }
+        }
+    }
+
+    // MARK: - Reflection section (recap · patterns · coach)
+
+    /// Surfaces the reflection content moved here from Today. Hidden entirely
+    /// when there's nothing to say, so the Insights hero/story stays clean on
+    /// a fresh account.
+    @ViewBuilder
+    private var reflectionSection: some View {
+        let hasRecap = reflection.latestRecap != nil
+        let hasPatterns = !reflection.patterns.isEmpty
+        let hasObservation = reflection.activeObservation != nil
+        if hasRecap || hasPatterns || hasObservation {
+            VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                if let recap = reflection.latestRecap {
+                    WeeklyRecapBanner(recap: recap) {
+                        Haptics.tap()
+                        showingReflectionRecap = true
+                    }
+                }
+                if hasPatterns {
+                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                        Text("Patterns").eyebrow()
+                            .foregroundStyle(Color.inkMute)
+                        ForEach(reflection.patterns) { pattern in
+                            PatternCard(pattern: pattern)
+                        }
+                    }
+                }
+                if let observation = reflection.activeObservation {
+                    CoachObservationCard(
+                        observation: observation,
+                        onDismiss: {
+                            Haptics.tap()
+                            Task { await reflection.dismissObservation() }
+                        }
+                    )
+                }
+            }
+        }
     }
 
     private func scheduleAutomaticRefresh(reason: RefreshReason) {
@@ -133,6 +206,7 @@ struct FoodMirrorView: View {
             guard !Task.isCancelled, isActive else { return }
             TabPerformanceProbe.firstFrameYielded(.mirror)
             await viewModel.refresh(reason: reason, tab: .mirror)
+            await reflection.load()
             checkForFirstReady()
         }
     }
@@ -1460,6 +1534,107 @@ struct FoodMirrorView: View {
     }
 }
 
+// MARK: - Reflection loader (recap · patterns · coach)
+
+/// Read-only loader for the reflection content shown on Insights — the
+/// weekly recap, detected patterns, and the active coach observation. These
+/// used to ride along on `TrackerViewModel`; relocating the *display* here
+/// keeps "what the app notices" in one tab. Observation *generation* still
+/// happens on the Tracker refresh (it writes to the DB); this just reads the
+/// stored results, so there's no extra generation work and no new egress
+/// beyond the three reads that used to run on Today.
+@MainActor
+final class ReflectionLoader: ObservableObject {
+    @Published private(set) var patterns: [Pattern] = []
+    @Published private(set) var activeObservation: CoachObservation?
+    @Published private(set) var latestRecap: WeeklyRecap?
+
+    private let history: MealHistoryService
+    private let observations: CoachObservationService
+    private let recapService: WeeklyRecapService
+    private let profileService: ProfileService
+
+    /// Account age (days) below which we don't generate or surface
+    /// observations — avoids editorial cards on a brand-new account.
+    static let observationMinAccountAgeDays: Int = 3
+
+    init(history: MealHistoryService = MealHistoryService(),
+         observations: CoachObservationService = CoachObservationService(),
+         recapService: WeeklyRecapService = WeeklyRecapService(),
+         profileService: ProfileService = ProfileService.shared) {
+        self.history = history
+        self.observations = observations
+        self.recapService = recapService
+        self.profileService = profileService
+    }
+
+    func load() async {
+        async let p: [Pattern]? = try? history.patternsForToday()
+        async let o: CoachObservation? = try? observations.todaysObservation()
+        async let r: WeeklyRecap? = try? recapService.latest()
+        let resolvedPatterns = await p ?? []
+        let observation = await o
+        self.patterns = resolvedPatterns
+        self.activeObservation = observation
+        self.latestRecap = await r
+        await generateObservationIfNeeded(patterns: resolvedPatterns,
+                                          hasExisting: observation != nil)
+    }
+
+    /// Optimistic dismiss — clears locally, restores on failure.
+    func dismissObservation() async {
+        guard let observation = activeObservation else { return }
+        activeObservation = nil
+        do {
+            try await observations.dismiss(observation.id)
+        } catch {
+            activeObservation = observation
+        }
+    }
+
+    /// Best-effort background generation: when there are patterns, no active
+    /// card, and the account is past the warmup window, generate a fresh
+    /// observation. Dedup guardrails live inside `generateIfNeeded`, so it's
+    /// safe to call repeatedly. Relocated here from the Tracker so reflection
+    /// loads + generates in exactly one place.
+    private func generateObservationIfNeeded(patterns: [Pattern],
+                                             hasExisting: Bool) async {
+        guard !hasExisting, !patterns.isEmpty else { return }
+        let profile = try? await profileService.currentProfile()
+        let ageDays = profile.map { Self.daysSince($0.createdAt) } ?? 0
+        guard ageDays >= Self.observationMinAccountAgeDays else { return }
+
+        let preferred = profile?.preferredCoaches ?? []
+        let observations = self.observations
+        let recentMoods = (try? await history.recentMoodsForCoachContext()) ?? []
+
+        Task.detached { [weak self, observations, patterns, preferred, recentMoods] in
+            do {
+                let generated = try await observations.generateIfNeeded(
+                    patterns: patterns,
+                    preferredCoaches: preferred,
+                    recentMoods: recentMoods
+                )
+                if let generated {
+                    await MainActor.run { [weak self] in
+                        self?.activeObservation = generated
+                    }
+                }
+            } catch {
+                #if DEBUG
+                NSLog("[Insights] generateIfNeeded FAILED: %@", "\(error)")
+                #endif
+            }
+        }
+    }
+
+    private static func daysSince(_ date: Date,
+                                  now: Date = Date(),
+                                  calendar: Calendar = .current) -> Int {
+        max(calendar.dateComponents([.day], from: date, to: now).day ?? 0, 0)
+    }
+}
+
 // MARK: - Reusable bits
 
 /// Small icon badge consumed by `MirrorContentCard`.
@@ -1915,8 +2090,11 @@ private struct MirrorHeroOrb: View {
                         .strokeBorder(Color.brand.opacity(0.4), lineWidth: 1)
                 )
                 .scaleEffect(pulse ? 1.07 : 1.0)
+                // Constant shadow radius — animating it re-rasterizes the
+                // shadow every frame of the breathing loop; the scale pulse
+                // already carries the "alive" feel.
                 .shadow(color: Color.brand.opacity(0.22),
-                        radius: pulse ? 14 : 8, x: 0, y: 3)
+                        radius: 10, x: 0, y: 3)
             Image(systemName: "sparkles")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(Color.brandDeep)
@@ -2437,7 +2615,9 @@ fileprivate struct FoodMirrorStoryView: View {
             } label: {
                 Text(nextButtonLabel)
                     .appFont(.pillTitle)
-                    .foregroundStyle(.white)
+                    // Ink-on-brand, not white-on-brand: white on lime (#B8CA38)
+                    // fails WCAG contrast. Ink is the AA-verified pairing.
+                    .foregroundStyle(Color.ink)
                     .frame(maxWidth: .infinity, minHeight: 56)
                     .background(
                         Capsule().fill(Color.brand)

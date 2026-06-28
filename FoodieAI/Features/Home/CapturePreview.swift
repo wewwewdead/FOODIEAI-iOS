@@ -139,7 +139,7 @@ struct LiveAnalyzeProbeView: View {
         case .analyzing:
             PillButton(title: "Analyzing...", variant: .outline, isLoading: true) {}
         case .ready, .noFood, .failed, .saving, .saved, .saveFailed,
-             .moodPulse, .clarifying:
+             .moodPulse, .clarifying, .confirmingName:
             PillButton(title: "Analyze new food", variant: .outline) {}
         }
     }
@@ -203,7 +203,8 @@ struct LiveAnalyzeProbeView: View {
                     .multilineTextAlignment(.center)
             }
             .padding(AppSpacing.lg)
-        case .idle, .picked, .analyzing, .moodPulse, .clarifying:
+        case .idle, .picked, .analyzing, .moodPulse, .clarifying,
+             .confirmingName:
             EmptyView()
         }
     }
@@ -415,6 +416,125 @@ private struct SamplePanelsOnlyView: View {
         let chars = items.reduce(0) { $0 + $1.count }
         let seconds = Double(chars) * 0.02 + 0.4
         return UInt64(seconds * 1_000_000_000)
+    }
+}
+
+/// LAUNCH_ORB_PROBE entry point. Mounts the analyzing orb journey over a
+/// sample photo card and flips `isAnalyzing` on after a beat, so a screenshot
+/// can verify the orb forms, genie-travels to the notch, and swirls there —
+/// without a server or UI taps. Pass `LAUNCH_ORB_PROBE=hold` to keep it docked.
+struct OrbJourneyProbeView: View {
+    @State private var analyzing = false
+    private let image = SamplePayload.image
+
+    var body: some View {
+        ZStack {
+            Color.bgCanvas.ignoresSafeArea()
+            VStack {
+                Spacer()
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 300, height: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                    .orbSourceAnchor()
+                    .opacity(analyzing ? 0 : 1)
+                    .animation(.easeOut(duration: 0.22), value: analyzing)
+                Text(analyzing ? "Analyzing…" : "Tap-free probe")
+                    .appFont(.meta)
+                    .foregroundStyle(Color.textMeta)
+                    .padding(.top, AppSpacing.lg)
+                Spacer()
+            }
+        }
+        .analyzingOrbJourney(
+            image: image,
+            isAnalyzing: analyzing,
+            palette: [Color(red: 0.95, green: 0.55, blue: 0.20),
+                      Color(red: 0.85, green: 0.25, blue: 0.20),
+                      Color(red: 0.98, green: 0.80, blue: 0.30)],
+            isPro: false,
+            isActive: true,
+            enabled: true,
+            useFluid: false
+        )
+        .task {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            analyzing = true
+        }
+    }
+}
+
+/// LAUNCH_SPH_PROBE entry point. Renders the GPU particle-fluid effect
+/// standalone (sample photo → particles sucked into the island) so the Metal
+/// compute/render pipeline can be verified without the full analyze flow.
+struct FluidProbeView: View {
+    private let image = SamplePayload.image
+    @State private var thinking = false
+
+    var body: some View {
+        ZStack {
+            Color.bgCanvas.ignoresSafeArea()
+            // Mimic CaptureView's card↔result body swap, so the probe exercises
+            // the real modifier path: the card (with the source anchor) is shown
+            // while thinking, then swapped for a "result" when thinking ends —
+            // the return must survive that swap.
+            Group {
+                if thinking {
+                    Image(uiImage: image)
+                        .resizable().scaledToFill()
+                        .frame(width: 300, height: 300)
+                        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                        .orbSourceAnchor()
+                        .opacity(0)   // hidden — the orb is up at the island
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Text("Breakdown / result")
+                        .appFont(.display2)
+                        .foregroundStyle(Color.textPrimary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            Text(thinking ? "SPH — thinking" : "SPH — returned")
+                .appFont(.meta)
+                .foregroundStyle(Color.textMeta)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 80)
+        }
+        .analyzingOrbJourney(
+            image: image,
+            isAnalyzing: thinking,
+            palette: [Color(red: 0.95, green: 0.55, blue: 0.20),
+                      Color(red: 0.85, green: 0.25, blue: 0.20)],
+            isPro: false,
+            isActive: true,
+            enabled: true,
+            useFluid: true
+        )
+        .task {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            thinking = true                               // gather + pouch + swirl
+            try? await Task.sleep(nanoseconds: 3_600_000_000)
+            thinking = false                              // SWAP body + flow home
+        }
+    }
+}
+
+/// LAUNCH_BACKDROP_PROBE entry point. Renders the interactive Metal aurora
+/// backdrop full-screen so the shader can be verified (and touch-tested).
+struct BackdropProbeView: View {
+    var body: some View {
+        ZStack {
+            MetalBackdrop()
+            VStack {
+                Spacer()
+                Text("Metal aurora backdrop — drag to bloom")
+                    .appFont(.meta)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.bottom, 60)
+            }
+        }
+        .ignoresSafeArea()
     }
 }
 

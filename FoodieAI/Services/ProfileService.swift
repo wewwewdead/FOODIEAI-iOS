@@ -13,10 +13,41 @@ import Supabase
 /// lowercased UUID into `.eq("id", value: …)` to keep the string-typed
 /// PostgREST filter consistent with what the policy compares against.
 actor ProfileService {
+    /// App-wide shared instance so the read cache below is shared across the
+    /// services that fan out around a save/foreground (Streak, CalorieReminder,
+    /// Quest, Orchestrator…). Tests still inject their own `ProfileService(client:)`.
+    static let shared = ProfileService()
+
     private let client: SupabaseClient
 
     init(client: SupabaseClient = FoodieClient.shared) {
         self.client = client
+    }
+
+    // MARK: - Short-TTL read cache
+    //
+    // The save/foreground fan-out (Streak, CalorieReminder, Quest,
+    // suppressWindow…) reads `currentProfile()` ~5× in a burst; without a cache
+    // each is a fresh SELECT. Reads within `cacheTTL` reuse the last value, and
+    // every write keeps the cache hot by storing its returned representation —
+    // so the burst collapses to a single round-trip. Keyed by the profile's own
+    // id so a sign-out→sign-in can't serve the previous user's row; cross-device
+    // edits are bounded to the short TTL.
+    private var cachedProfile: Profile?
+    private var cachedAt: Date?
+    private let cacheTTL: TimeInterval = 60
+
+    @discardableResult
+    private func cache(_ profile: Profile) -> Profile {
+        cachedProfile = profile
+        cachedAt = Date()
+        return profile
+    }
+
+    /// Drop the cache — call when the signed-in user changes.
+    func invalidateCache() {
+        cachedProfile = nil
+        cachedAt = nil
     }
 
     /// Resolve the signed-in user's UUID, preferring the live session over
@@ -42,6 +73,14 @@ actor ProfileService {
     /// ourselves so we can distinguish the missing-row case and self-heal.
     func currentProfile() async throws -> Profile {
         let id = try await signedInUserId()
+
+        // Fresh cache for the same user → skip the SELECT entirely.
+        if let cached = cachedProfile, let at = cachedAt,
+           cached.id.uuidString.lowercased() == id,
+           Date().timeIntervalSince(at) < cacheTTL {
+            return cached
+        }
+
         #if DEBUG
         NSLog("[Profile] SELECT profiles WHERE id=%@", id)
         #endif
@@ -59,7 +98,7 @@ actor ProfileService {
             #endif
 
             if let profile = rows.first {
-                return profile
+                return cache(profile)
             }
 
             // Self-heal: trigger-skipped row. Insert a defaulted row using
@@ -106,7 +145,7 @@ actor ProfileService {
         #if DEBUG
         NSLog("[Profile] self-heal INSERT returned id=%@", profile.id.uuidString)
         #endif
-        return profile
+        return cache(profile)
     }
 
     /// Update display name and goals. Returns the updated row so the VM
@@ -160,7 +199,7 @@ actor ProfileService {
             NSLog("[Profile] UPDATE returned id=%@ updated_at=%@",
                   updated.id.uuidString, ISO8601DateFormatter().string(from: updated.updatedAt))
             #endif
-            return updated
+            return cache(updated)
         } catch {
             #if DEBUG
             NSLog("[Profile] UPDATE FAILED: %@", "\(error)")
@@ -190,7 +229,7 @@ actor ProfileService {
             .single()
             .execute()
             .value
-        return updated
+        return cache(updated)
     }
 
     /// Phase 17 — write notification preferences in one round-trip.
@@ -222,14 +261,14 @@ actor ProfileService {
               id)
         #endif
 
-        return try await client
+        return cache(try await client
             .from("profiles")
             .update(patch)
             .eq("id", value: id)
             .select()
             .single()
             .execute()
-            .value
+            .value)
     }
 
     /// Phase 19 — single round-trip that persists every answer the
@@ -258,6 +297,7 @@ actor ProfileService {
                             reminderLunch: Bool?,
                             reminderDinner: Bool?,
                             physiology: CalorieGoalCalculator.Physiology? = nil,
+                            weightGoalDirection: CalorieGoalCalculator.GoalDirection? = nil,
                             completedAt: Date) async throws -> Profile {
         let id = try await signedInUserId()
         let patch = ProfileUpdate(
@@ -279,7 +319,7 @@ actor ProfileService {
             heightCm:             physiology?.heightCm,
             weightKg:             physiology?.weightKg,
             activityLevel:        physiology?.activity,
-            weightGoalDirection:  physiology?.goal
+            weightGoalDirection:  weightGoalDirection ?? physiology?.goal
         )
 
         #if DEBUG
@@ -287,14 +327,14 @@ actor ProfileService {
               archetype.rawValue, id)
         #endif
 
-        return try await client
+        return cache(try await client
             .from("profiles")
             .update(patch)
             .eq("id", value: id)
             .select()
             .single()
             .execute()
-            .value
+            .value)
     }
 
     /// Phase 20 — persist physiology + the calorie/macro target derived
@@ -338,14 +378,14 @@ actor ProfileService {
               activity.rawValue, goal.rawValue, goals.calories, id)
         #endif
 
-        return try await client
+        return cache(try await client
             .from("profiles")
             .update(patch)
             .eq("id", value: id)
             .select()
             .single()
             .execute()
-            .value
+            .value)
     }
 
     /// Phase 21 — write the four streak fields in one round-trip.
@@ -374,14 +414,14 @@ actor ProfileService {
               currentStreakDays, longestStreakDays, graceDaysRemaining, id)
         #endif
 
-        return try await client
+        return cache(try await client
             .from("profiles")
             .update(patch)
             .eq("id", value: id)
             .select()
             .single()
             .execute()
-            .value
+            .value)
     }
 
     /// Phase 21 — write the three quest fields. Called when:
@@ -405,14 +445,14 @@ actor ProfileService {
               lastQuestCompleted ? "true" : "false", id)
         #endif
 
-        return try await client
+        return cache(try await client
             .from("profiles")
             .update(patch)
             .eq("id", value: id)
             .select()
             .single()
             .execute()
-            .value
+            .value)
     }
 
     /// Phase 21.12 — toggle for the daily Healthy Choice quest card.
@@ -427,14 +467,14 @@ actor ProfileService {
               enabled ? "true" : "false", id)
         #endif
 
-        return try await client
+        return cache(try await client
             .from("profiles")
             .update(patch)
             .eq("id", value: id)
             .select()
             .single()
             .execute()
-            .value
+            .value)
     }
 
     /// Phase 17 — quiet timezone sync. Writes the IANA identifier only
@@ -450,14 +490,14 @@ actor ProfileService {
               identifier, id)
         #endif
 
-        return try await client
+        return cache(try await client
             .from("profiles")
             .update(patch)
             .eq("id", value: id)
             .select()
             .single()
             .execute()
-            .value
+            .value)
     }
 }
 

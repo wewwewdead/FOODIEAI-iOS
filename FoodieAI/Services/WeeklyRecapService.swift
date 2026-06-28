@@ -28,7 +28,7 @@ actor WeeklyRecapService {
          session: URLSession = .shared,
          logService: FoodLogService = FoodLogService(),
          history: MealHistoryService = MealHistoryService(),
-         profileService: ProfileService = ProfileService()) {
+         profileService: ProfileService = ProfileService.shared) {
         self.client = client
         self.analyzeBaseURL = analyzeBaseURL
         self.session = session

@@ -6,8 +6,9 @@ import UIKit
 /// `UNUserNotificationCenter`. Everything that schedules, suppresses,
 /// or cancels a notification routes through here.
 ///
-/// Notification cap: at most **5** scheduled at a time
-///   (3 meal reminders + 1 weekly recap + 1 daily under-calorie reminder).
+/// Notification cap: at most **6** scheduled at a time
+///   (3 meal reminders + 1 weekly recap + 1 daily under-calorie reminder
+///    + 1 dormancy "comeback" nudge).
 /// The system allows up to 64; we're well under, but the cap is
 /// documented here so any future addition is intentional.
 ///
@@ -32,7 +33,7 @@ final class NotificationScheduler {
 
     /// Limits documented in the file header. Used in DEBUG asserts to
     /// catch any accidental over-scheduling during development.
-    static let maxScheduledNotifications = 5
+    static let maxScheduledNotifications = 6
 
     // MARK: - Identifiers
 
@@ -46,7 +47,15 @@ final class NotificationScheduler {
         /// the user saves/deletes a meal or changes their calorie goal. The
         /// identifier is stable across reschedules so cancel-and-replace
         /// never spawns duplicates (see `scheduleUnderCalorieReminder`).
+        /// Doubles as the streak-at-risk nudge when a live streak is unlogged
+        /// (same slot, streak-aware copy) so we never stack two evening pings.
         static let underCalorieReminder = "daily_under_calorie_reminder"
+
+        /// One-shot dormancy "comeback" nudge. Scheduled a few days out on
+        /// every foreground and pushed forward each time, so it only ever
+        /// fires when the user hasn't opened the app for that window. Gentle,
+        /// opt-in (gated on the master notifications toggle by the caller).
+        static let comebackReminder = "comeback_reminder"
 
         /// One-shot replacement for today's cancelled recurring reminder.
         /// Fires tomorrow at the same time as today's recurring would have.
@@ -300,7 +309,12 @@ final class NotificationScheduler {
     /// If notification authorization isn't granted, this is a no-op
     /// (UNUserNotificationCenter rejects `add` silently in that case
     /// anyway, but the explicit check avoids spurious DEBUG noise).
+    /// `streakAtRiskDays > 0` switches the copy to a gentle streak-saver
+    /// ("keep your N-day run going") instead of the calorie line. The caller
+    /// passes this only when a live streak is genuinely unlogged today, so
+    /// the single evening reminder does double duty without a second ping.
     func scheduleUnderCalorieReminder(remaining: Double,
+                                      streakAtRiskDays: Int = 0,
                                       now: Date = Date(),
                                       timeZone: TimeZone = .current) async {
         // Authorization check — skip the work if we wouldn't be allowed
@@ -351,8 +365,16 @@ final class NotificationScheduler {
         )
 
         let content = UNMutableNotificationContent()
-        content.title = "Still under your calorie goal"
-        content.body  = Self.underCalorieBody(remaining: remaining)
+        // Only lead with streak-saver copy once the streak is worth protecting
+        // (>= 2). Losing a 1-day "streak" isn't a compelling nudge, so a
+        // single-day run falls back to the plain under-calorie line.
+        if streakAtRiskDays >= 2 {
+            content.title = "Keep your \(streakAtRiskDays)-day streak"
+            content.body  = Self.streakAtRiskBody(days: streakAtRiskDays)
+        } else {
+            content.title = "Still under your calorie goal"
+            content.body  = Self.underCalorieBody(remaining: remaining)
+        }
         content.sound = .default
         content.userInfo = ["kind": "under_calorie_reminder"]
 
@@ -401,6 +423,94 @@ final class NotificationScheduler {
             return "You still have room left today. Want to log your last meal?"
         }
         return "You have about \(rounded) calories left today. Want to log your last meal?"
+    }
+
+    /// Gentle streak-saver copy — no guilt, no "you'll lose everything," just
+    /// a low-pressure nudge that one quick log keeps the run going.
+    private static func streakAtRiskBody(days: Int) -> String {
+        "A quick photo before midnight keeps your \(days)-day run going."
+    }
+
+    // MARK: - Comeback (dormancy) reminder (Phase 23)
+
+    /// Days of app dormancy before the gentle comeback nudge fires. It's
+    /// rescheduled fresh on every foreground, so it only ever delivers when
+    /// the user hasn't opened the app for this many days.
+    static let comebackDormancyDays = 3
+
+    /// Schedule the one-shot comeback nudge for `comebackDormancyDays` out,
+    /// delivered around midday. Replaces any prior pending comeback so each
+    /// foreground pushes it forward — it fires only after a real lapse.
+    /// No-op (and clears any stale request) when not authorized.
+    /// `bestStreakDays` only flavors the copy.
+    func scheduleComebackReminder(now: Date = Date(),
+                                  bestStreakDays: Int = 0,
+                                  timeZone: TimeZone = .current) async {
+        let status = await authorizationStatus()
+        guard status == .authorized || status == .provisional else {
+            center.removePendingNotificationRequests(
+                withIdentifiers: [Identifier.comebackReminder]
+            )
+            return
+        }
+        center.removePendingNotificationRequests(
+            withIdentifiers: [Identifier.comebackReminder]
+        )
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        guard let targetDay = cal.date(byAdding: .day,
+                                       value: Self.comebackDormancyDays,
+                                       to: cal.startOfDay(for: now)),
+              let fireDate = cal.date(bySettingHour: 12, minute: 0, second: 0,
+                                      of: targetDay),
+              fireDate > now else { return }
+
+        var fireComps = cal.dateComponents(
+            [.year, .month, .day, .hour, .minute], from: fireDate
+        )
+        fireComps.timeZone = timeZone
+        let trigger = UNCalendarNotificationTrigger(
+            dateMatching: fireComps, repeats: false
+        )
+
+        let content = UNMutableNotificationContent()
+        content.title = "Your spot's saved"
+        content.body  = Self.comebackBody(bestStreakDays: bestStreakDays)
+        content.sound = .default
+        content.userInfo = ["kind": "comeback"]
+
+        let request = UNNotificationRequest(
+            identifier: Identifier.comebackReminder,
+            content: content, trigger: trigger
+        )
+        do {
+            try await center.add(request)
+            #if DEBUG
+            NSLog("[Notif] comeback scheduled for %@ (bestStreak=%d)",
+                  "\(fireDate)", bestStreakDays)
+            #endif
+        } catch {
+            #if DEBUG
+            NSLog("[Notif] comeback schedule FAILED: %@", "\(error)")
+            #endif
+        }
+    }
+
+    /// Cancel any pending comeback nudge. Safe when none is scheduled.
+    func cancelComebackReminder() {
+        center.removePendingNotificationRequests(
+            withIdentifiers: [Identifier.comebackReminder]
+        )
+    }
+
+    /// Gentle, non-shaming comeback copy. References a notable best run as
+    /// encouragement when there is one; otherwise stays light.
+    private static func comebackBody(bestStreakDays: Int) -> String {
+        if bestStreakDays >= 3 {
+            return "Whenever you're ready, a quick photo picks things back up — your \(bestStreakDays)-day best is in reach again."
+        }
+        return "No pressure — snap your next meal whenever you're ready and pick up right where you left off."
     }
 
     // MARK: - Internal scheduling
@@ -521,7 +631,7 @@ final class NotificationScheduler {
                   prefix, req.identifier, req.content.title, trig)
         }
         if pending.count > Self.maxScheduledNotifications {
-            NSLog("⚠️ Notification cap exceeded: %d > %d (3 meal + 1 weekly recap + 1 under-calorie)",
+            NSLog("⚠️ Notification cap exceeded: %d > %d (3 meal + 1 weekly recap + 1 under-calorie + 1 comeback)",
                   pending.count, Self.maxScheduledNotifications)
         }
     }

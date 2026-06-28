@@ -60,9 +60,10 @@ struct TrackerView: View {
     private var content: some View {
         Group {
             switch segment {
-            case .today: TodayView(viewModel: todayVM, isActive: isActive)
-            case .week:  WeekView(viewModel: weekVM, isActive: isActive)
-            case .month: MonthView(viewModel: monthVM, isActive: isActive)
+            case .today:   TodayView(viewModel: todayVM, isActive: isActive)
+            case .records: RecordsView(viewModel: todayVM, isActive: isActive)
+            case .history: HistoryView(weekVM: weekVM, monthVM: monthVM,
+                                       isActive: isActive)
             }
         }
         .id(segment)
@@ -89,9 +90,49 @@ struct TrackerView: View {
 private extension TrackerSegment {
     var orderIndex: Int {
         switch self {
-        case .today: 0
-        case .week:  1
-        case .month: 2
+        case .today:   0
+        case .records: 1
+        case .history: 2
+        }
+    }
+}
+
+// MARK: - History (Week / Month, with an inner toggle)
+
+/// Hosts the two history views behind a sub-segment toggle. Keeps the
+/// top-level Tracker segments to three clear categories while preserving the
+/// existing Week bar chart and Month calendar untouched.
+struct HistoryView: View {
+    @ObservedObject var weekVM: WeekViewModel
+    @ObservedObject var monthVM: MonthViewModel
+    let isActive: Bool
+
+    @State private var mode: Mode = .week
+
+    enum Mode: String, CaseIterable, Identifiable, Hashable {
+        case week  = "Week"
+        case month = "Month"
+        var id: String { rawValue }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            AppSegmentedControl<Mode>(
+                selection: $mode,
+                titleProvider: { $0.rawValue }
+            )
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.bottom, AppSpacing.sm)
+
+            Group {
+                switch mode {
+                case .week:  WeekView(viewModel: weekVM, isActive: isActive)
+                case .month: MonthView(viewModel: monthVM, isActive: isActive)
+                }
+            }
+            .id(mode)
+            .transition(.opacity)
+            .animation(.appReduced, value: mode)
         }
     }
 }

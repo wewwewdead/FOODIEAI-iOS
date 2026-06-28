@@ -181,6 +181,8 @@ final class SubscriptionManager: ObservableObject {
                     let ok = await validateOnServer(jws: jws)
                     await transaction.finish()
                     if ok {
+                        AnalyticsService.shared.track(
+                            AnalyticsService.Event.proPurchased, ["product": product.id])
                         return .success
                     } else {
                         let msg = "Server couldn't verify the purchase. Try Restore."
@@ -292,10 +294,17 @@ final class SubscriptionManager: ObservableObject {
     }
 
     private func getJSON(path: String, token: String, query: [String: String]) async throws -> [String: Any] {
-        var components = URLComponents(url: baseURL.appendingPathComponent(path),
-                                       resolvingAgainstBaseURL: false)!
+        guard var components = URLComponents(url: baseURL.appendingPathComponent(path),
+                                             resolvingAgainstBaseURL: false) else {
+            throw NSError(domain: "Subscription", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Bad URL for \(path)"])
+        }
         components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
-        var request = URLRequest(url: components.url!)
+        guard let url = components.url else {
+            throw NSError(domain: "Subscription", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Bad URL for \(path)"])
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 20

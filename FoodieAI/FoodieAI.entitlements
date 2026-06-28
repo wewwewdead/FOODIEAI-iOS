@@ -6,5 +6,13 @@
 	<array>
 		<string>Default</string>
 	</array>
+	<key>com.apple.developer.healthkit</key>
+	<true/>
+	<key>com.apple.developer.healthkit.background-delivery</key>
+	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.thefoodieai.app</string>
+	</array>
 </dict>
 </plist>

@@ -78,6 +78,73 @@ struct DailyBucket: Identifiable, Hashable {
     var hasLogs: Bool { !logs.isEmpty }
 }
 
+/// Rolling-window consistency record (the "Strava for food" proof loop for
+/// users without a scale): over the last N days, how often did you stay on
+/// goal, what's your best run, and your current run. "On goal" is
+/// direction-aware — within budget for lose/maintain, at-or-above for gain —
+/// and only *tracked* days count toward a run (an untracked day breaks it).
+struct ConsistencyStats: Equatable {
+    enum DayState: Equatable { case onGoal, off, untracked }
+
+    /// Per-day verdict, chronological (oldest → newest). Length == window.
+    let days: [DayState]
+    let daysTracked: Int
+    let daysOnGoal: Int
+    let bestStreak: Int
+    let currentStreak: Int
+    let totalMeals: Int
+
+    static func compute(buckets: [DailyBucket],
+                        goal: Double,
+                        direction: CalorieGoalCalculator.GoalDirection?) -> ConsistencyStats {
+        let wantSurplus = (direction == .gain)
+        var states: [DayState] = []
+        var tracked = 0
+        var onGoal = 0
+        var meals = 0
+        var best = 0
+        var run = 0
+
+        for bucket in buckets {
+            meals += bucket.logs.count
+            guard bucket.hasLogs else {
+                states.append(.untracked)
+                run = 0
+                continue
+            }
+            tracked += 1
+            let cals = bucket.totals.totalCalories
+            let isOnGoal: Bool = {
+                guard goal > 0, cals.isFinite else { return false }
+                return wantSurplus ? cals >= goal : cals <= goal
+            }()
+            if isOnGoal {
+                onGoal += 1
+                run += 1
+                best = max(best, run)
+                states.append(.onGoal)
+            } else {
+                run = 0
+                states.append(.off)
+            }
+        }
+
+        var current = 0
+        for state in states.reversed() {
+            if state == .onGoal { current += 1 } else { break }
+        }
+
+        return ConsistencyStats(
+            days: states,
+            daysTracked: tracked,
+            daysOnGoal: onGoal,
+            bestStreak: best,
+            currentStreak: current,
+            totalMeals: meals
+        )
+    }
+}
+
 enum DailyBucketing {
     /// Buckets `logs` by local day for every day in the half-open range
     /// `[from, to)`, including empty days. Caller passes start-of-day-local for

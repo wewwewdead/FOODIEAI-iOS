@@ -64,6 +64,7 @@ struct PaywallView: View {
             .accessibilityLabel("Close")
         }
         .task {
+            AnalyticsService.shared.track(AnalyticsService.Event.paywallViewed)
             // Subscriptions bootstrap happens at app launch, but a cold
             // re-open of the paywall still benefits from a fresh
             // product fetch — StoreKit may have lost the cache.
@@ -211,11 +212,11 @@ struct PaywallView: View {
             .padding(AppSpacing.lg)
             .frame(maxWidth: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
                     .fill(Color.bgSurface)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
                     .stroke(badge != nil ? Color.brand : Color.borderHairline,
                             lineWidth: badge != nil ? 2 : 1)
             )

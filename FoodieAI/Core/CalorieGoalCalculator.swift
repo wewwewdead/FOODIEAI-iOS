@@ -155,12 +155,25 @@ enum CalorieGoalCalculator {
 
     // MARK: - Compute
 
+    /// Mifflin-St Jeor basal metabolic rate (kcal/day). Single source of the
+    /// formula — `compute` and the movement-energy earn-back credit both call
+    /// this so the BMR math never drifts between the two.
+    static func basalMetabolicRate(sex: BiologicalSex,
+                                   ageYears: Int,
+                                   heightCm: Double,
+                                   weightKg: Double) -> Double {
+        (10 * weightKg)
+            + (6.25 * heightCm)
+            - (5 * Double(ageYears))
+            + sex.bmrConstant
+    }
+
     static func compute(_ phys: Physiology) -> Goals {
         // Step 1 — Mifflin-St Jeor BMR.
-        let bmr = (10 * phys.weightKg)
-                + (6.25 * phys.heightCm)
-                - (5 * Double(phys.ageYears))
-                + phys.sex.bmrConstant
+        let bmr = basalMetabolicRate(sex: phys.sex,
+                                     ageYears: phys.ageYears,
+                                     heightCm: phys.heightCm,
+                                     weightKg: phys.weightKg)
 
         // Step 2 — TDEE via activity multiplier.
         let tdee = bmr * phys.activity.multiplier

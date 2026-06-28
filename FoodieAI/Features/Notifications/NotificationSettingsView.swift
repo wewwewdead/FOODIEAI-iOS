@@ -274,7 +274,7 @@ final class NotificationSettingsViewModel: ObservableObject {
     private let history: MealHistoryService
     private let scheduler: NotificationScheduler
 
-    init(profileService: ProfileService = ProfileService(),
+    init(profileService: ProfileService = ProfileService.shared,
          history: MealHistoryService = MealHistoryService(),
          scheduler: NotificationScheduler? = nil) {
         self.profileService = profileService

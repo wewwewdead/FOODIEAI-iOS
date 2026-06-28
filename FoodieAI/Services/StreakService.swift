@@ -8,24 +8,32 @@ import Foundation
 /// timestamp, which we already do for the Tracker's local-day bucketing
 /// in Phase 0. Keeping it client-side means one source of truth.
 ///
-/// Grace-day rule:
-///   - Starts at 1; capped at 2 by the DB check constraint.
-///   - Consumed when a 1-day gap is forgiven, preserving the streak.
-///   - Refilled by +1 every full week (current_streak % 7 == 0) where
-///     the current grace is below the soft cap of 1.
-///   - A genuine reset (gap ≥ 3 local days, or gap == 2 with no grace
-///     available) zeros the streak back to 1 and refills grace to 1.
+/// Grace-day ("streak freeze") rule:
+///   - Starts at 1; banked up to a soft cap of 2 (the DB check-constraint
+///     ceiling), +1 every full week without a miss (current_streak % 7 == 0).
+///   - A 1-day gap costs 1 freeze; a 2-day gap costs 2 (only if banked) — so
+///     a saved-up user can absorb a short lapse (e.g. a weekend off) without
+///     losing a long run. Research: streak-freeze mechanics materially cut
+///     churn vs. a punitive reset-to-zero.
+///   - A genuine reset (a gap beyond what's banked) zeros the streak back to
+///     1 and refills grace to 1.
 ///
 /// `recordLog` is best-effort: callers should `try?` the call and
 /// continue if it throws. The meal is already saved; a streak update
 /// failure must not back out the user's row.
 @MainActor
-final class StreakService {
+final class StreakService: ObservableObject {
     static let shared = StreakService()
 
     private let profileService: ProfileService
 
-    init(profileService: ProfileService = ProfileService()) {
+    /// Set when a save consumed a freeze to keep a live streak alive, so the
+    /// UI can surface a one-time, non-shaming "a freeze saved your streak"
+    /// moment. Cleared by the consumer (Today banner). In-memory only — a
+    /// freeze notice is ephemeral and shouldn't survive a relaunch.
+    @Published var pendingFreezeNotice: FreezeNotice?
+
+    init(profileService: ProfileService = ProfileService.shared) {
         self.profileService = profileService
     }
 
@@ -44,57 +52,25 @@ final class StreakService {
         let todayLocal = cal.startOfDay(for: eatenAt)
         let previousLocal = profile.lastLoggedLocalDate
 
-        var newStreak = profile.currentStreakDays
-        var newGrace  = profile.graceDaysRemaining
-        let outcome: StreakOutcome
+        // Local-day gap from the last logged day to today. Normalize the
+        // stored date to the user's current local day before subtracting —
+        // the column is `date` so its absolute midnight may sit in a
+        // different zone than today's. `nil` previous = first log ever.
+        let daysBetween: Int = {
+            guard let prev = previousLocal else { return 0 }
+            let previousStart = cal.startOfDay(for: prev)
+            return cal.dateComponents([.day], from: previousStart, to: todayLocal).day ?? 0
+        }()
 
-        if previousLocal == nil {
-            // First log ever — start the streak at 1, keep grace at the
-            // schema default. Going through the same DB path as every
-            // other case keeps the math in one place.
-            newStreak = 1
-            newGrace  = max(newGrace, 1)
-            outcome = .started
-        } else {
-            // Normalize the stored date to the user's current local day
-            // before subtracting — the column is `date` so its absolute
-            // Date midnight may sit in a different zone than today's.
-            let previousStart = cal.startOfDay(for: previousLocal!)
-            let daysBetween = cal.dateComponents(
-                [.day], from: previousStart, to: todayLocal
-            ).day ?? 0
-
-            switch daysBetween {
-            case ..<0:
-                // Backdated eatenAt — unusual, but treat as "already
-                // counted." Don't roll backward.
-                outcome = .alreadyToday
-
-            case 0:
-                outcome = .alreadyToday
-
-            case 1:
-                newStreak += 1
-                outcome = .extended
-                // Every full week without missing a day tops grace back
-                // up by 1, capped at 1. Without this, a long streak
-                // burns its single grace once and then runs raw.
-                if newStreak % 7 == 0 && newGrace < 1 {
-                    newGrace = 1
-                }
-
-            case 2 where newGrace > 0:
-                newStreak += 1
-                newGrace  -= 1
-                outcome = .savedByGrace
-
-            default:
-                // Gap of 2 with no grace, or any gap >= 3 → reset.
-                newStreak = 1
-                newGrace  = 1
-                outcome = .reset
-            }
-        }
+        let transition = StreakMath.transition(
+            previousLogged: previousLocal != nil,
+            daysBetween: daysBetween,
+            currentStreak: profile.currentStreakDays,
+            grace: profile.graceDaysRemaining
+        )
+        let newStreak = transition.streak
+        let newGrace  = transition.grace
+        let outcome   = transition.outcome
 
         let newLongest = max(profile.longestStreakDays, newStreak)
 
@@ -120,6 +96,19 @@ final class StreakService {
             graceDaysRemaining:  newGrace
         )
 
+        // A freeze just saved a live streak — surface it once so the user
+        // knows the buffer did its job (otherwise freezes work silently).
+        if outcome == .savedByGrace {
+            pendingFreezeNotice = FreezeNotice(streakDays: newStreak)
+        }
+        // A meaningful streak just reset (gap beyond freeze coverage) — offer a
+        // one-tap repair for a short window so the break isn't punitive.
+        // `profile.currentStreakDays` is the pre-reset value we'd restore to.
+        if outcome == .reset {
+            StreakRepairStore.shared.arm(brokenStreak: profile.currentStreakDays,
+                                         timeZone: timeZone)
+        }
+
         #if DEBUG
         NSLog("[Streak] outcome=%@ streak=%d grace=%d longest=%d",
               String(describing: outcome), newStreak, newGrace, newLongest)
@@ -130,6 +119,84 @@ final class StreakService {
             outcome: outcome,
             graceRemaining: newGrace
         )
+    }
+
+    /// Restore a just-broken streak the user opted to repair. Returns the
+    /// restored length, or nil when there's no live offer. The reset write
+    /// already advanced `lastLoggedLocalDate` to today, so we keep it and the
+    /// streak simply continues from the restored value on the next log.
+    /// Best-effort like `recordLog`; throws only on network/DB errors.
+    @discardableResult
+    func repair(profileStore: ProfileStore) async throws -> Int? {
+        guard let restored = StreakRepairStore.shared.offer else { return nil }
+        let profile = try await profileService.currentProfile()
+        let newLongest = max(profile.longestStreakDays, restored)
+        let updated = try await profileService.updateStreak(
+            currentStreakDays:   restored,
+            longestStreakDays:   newLongest,
+            lastLoggedLocalDate: profile.lastLoggedLocalDate ?? Date(),
+            graceDaysRemaining:  profile.graceDaysRemaining
+        )
+        profileStore.apply(updated)
+        StreakRepairStore.shared.consume()
+        AnalyticsService.shared.track(AnalyticsService.Event.streakRepaired,
+                                      ["restored": String(restored)])
+        #if DEBUG
+        NSLog("[Streak] repaired → restored=%d", restored)
+        #endif
+        return restored
+    }
+}
+
+/// Pure streak-transition math, extracted from `StreakService.recordLog`
+/// so the freeze/forgiveness rules are unit-testable without a network
+/// round-trip. No dates here — the caller reduces the calendar gap to a
+/// `daysBetween` integer first.
+enum StreakMath {
+    /// Banked "freeze" ceiling. The DB check constraint allows 2; we bank up
+    /// to that so a saved-up user can absorb a 1- or 2-day lapse.
+    static let graceSoftCap = 2
+
+    struct Transition: Equatable {
+        let streak: Int
+        let grace: Int
+        let outcome: StreakOutcome
+    }
+
+    /// Reduce (previous state, gap) → (new streak, new grace, outcome).
+    /// `daysBetween` is the local-day gap from the last logged day to today;
+    /// `previousLogged == false` means this is the user's first log ever.
+    static func transition(previousLogged: Bool,
+                           daysBetween: Int,
+                           currentStreak: Int,
+                           grace: Int) -> Transition {
+        guard previousLogged else {
+            return Transition(streak: 1, grace: max(grace, 1), outcome: .started)
+        }
+        switch daysBetween {
+        case ..<0, 0:
+            // Backdated or same-day re-log — already counted, don't move.
+            return Transition(streak: currentStreak, grace: grace, outcome: .alreadyToday)
+
+        case 1:
+            let s = currentStreak + 1
+            // Bank a freeze each full clean week, up to the soft cap.
+            let g = (s % 7 == 0 && grace < graceSoftCap) ? grace + 1 : grace
+            return Transition(streak: s, grace: g, outcome: .extended)
+
+        case 2 where grace >= 1:
+            // One missed day, covered by a single banked freeze.
+            return Transition(streak: currentStreak + 1, grace: grace - 1, outcome: .savedByGrace)
+
+        case 3 where grace >= graceSoftCap:
+            // Two missed days, covered by two banked freezes — a long run
+            // survives a short break when the user has saved up.
+            return Transition(streak: currentStreak + 1, grace: grace - graceSoftCap, outcome: .savedByGrace)
+
+        default:
+            // Gap beyond what's banked → genuine reset (today is day 1).
+            return Transition(streak: 1, grace: 1, outcome: .reset)
+        }
     }
 }
 
@@ -148,4 +215,12 @@ struct StreakUpdate: Equatable {
     let newStreak: Int
     let outcome: StreakOutcome
     let graceRemaining: Int
+}
+
+/// A one-time, ephemeral notice that a banked freeze kept a streak alive.
+/// `id` lets SwiftUI treat each occurrence as distinct so the banner
+/// re-animates even if two freezes fire in one session.
+struct FreezeNotice: Equatable, Identifiable {
+    let id = UUID()
+    let streakDays: Int
 }

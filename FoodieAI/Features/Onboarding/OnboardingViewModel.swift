@@ -80,7 +80,7 @@ final class OnboardingViewModel: ObservableObject {
     static let archetypeFallbackKey   = "phase19.onboardingArchetypeFallback"
 
     init(initialStep: Step = .hero,
-         service: ProfileService = ProfileService()) {
+         service: ProfileService = ProfileService.shared) {
         self.step = initialStep
         self.service = service
     }
@@ -95,7 +95,11 @@ final class OnboardingViewModel: ObservableObject {
         case .hero:           step = .archetype
         case .signIn:         step = .archetype
         case .archetype:      step = .physiology
-        case .physiology:     step = .coaches
+        // Physiology (skip or save) → completing — sign-in already happened up
+        // front. The rest of the survey (coaches/notifications/subscription)
+        // stays deferred. The physiology view calls `advance()`, so this is
+        // its single exit.
+        case .physiology:     step = .completing
         case .coaches:        step = .notifications
         case .notifications:  step = .subscription
         case .subscription:   step = .completing
@@ -115,17 +119,41 @@ final class OnboardingViewModel: ObservableObject {
         }
     }
 
-    /// Called when the user taps "Get started" on the hero. If signed
-    /// in already (e.g., a legacy account whose `onboarding_completed_at`
-    /// is NULL), skip the sign-in interrupt and go straight to archetype.
+    /// "Get started" on the hero. Sign-in comes first: a fresh user goes to the
+    /// sign-in interrupt, then into the goal + physiology setup. A legacy
+    /// already-signed-in account skips straight to the goal step.
     func startFromHero(isSignedIn: Bool) {
         step = isSignedIn ? .archetype : .signIn
     }
 
-    /// Called by the OnboardingFlow when it observes `auth.isSignedIn`
-    /// flip to true while we're parked at `.signIn`. Returning users
-    /// (`onboarding_completed_at != nil`) are routed past onboarding
-    /// by `RootView` directly; this hook only fires for fresh signups.
+    /// Reset to a clean first-run state. Called by `RootView` on sign-out so a
+    /// new account starts onboarding from the hero rather than inheriting the
+    /// previous user's answers (the model is now owned by RootView and
+    /// persists across sign-in/out).
+    func reset() {
+        step = .hero
+        archetype = nil
+        physiology = nil
+        preferredCoaches = []
+        orderedCoaches = []
+        notificationsAccepted = nil
+        completionError = nil
+    }
+
+    /// Continue from the goal screen to the physiology step, where age / height
+    /// / weight / sex / activity produce an accurate (Mifflin-St Jeor) calorie
+    /// target — the denominator of the whole goal-loop. Physiology then
+    /// completes onboarding (sign-in already happened first). `isSignedIn` is
+    /// unused here (kept for the call site).
+    func continueFromGoal(isSignedIn: Bool) {
+        step = .physiology
+    }
+
+    /// Called by `OnboardingFlow` when `auth.isSignedIn` flips to true (or on a
+    /// remount) while parked at `.signIn`. Sign-in is the FIRST onboarding step,
+    /// so completing it leads into the goal + physiology setup. Returning
+    /// accounts (`onboarding_completed_at != nil`) are routed past onboarding by
+    /// `RootView` and never reach here.
     func signInDidComplete() {
         guard step == .signIn else { return }
         step = .archetype
@@ -140,9 +168,9 @@ final class OnboardingViewModel: ObservableObject {
     /// Skip path on archetype screen — seeds `aware` (most generic
     /// defaults) so users who skip aren't penalized but also don't get
     /// macro goals tuned to a goal they haven't expressed.
-    func skipArchetype() {
+    func skipArchetype(isSignedIn: Bool) {
         if archetype == nil { archetype = .aware }
-        advance()
+        continueFromGoal(isSignedIn: isSignedIn)
     }
 
     func toggleCoach(_ name: String) {
@@ -183,6 +211,18 @@ final class OnboardingViewModel: ObservableObject {
         #endif
 
         let resolvedArchetype = archetype ?? .aware
+        // Map the up-front goal commitment to a weight-goal direction so the
+        // loop features (step goal, burn-off, eat-to-goal framing) are
+        // personalized from day one — even before full physiology. A completed
+        // physiology step wins when present.
+        let goalDirection: CalorieGoalCalculator.GoalDirection? = physiology?.goal ?? {
+            switch resolvedArchetype {
+            case .loseWeight:  return .lose
+            case .buildMuscle: return .gain
+            case .aware:       return .maintain
+            case .curious:     return nil
+            }
+        }()
         // Phase 20: if the user filled in physiology, recompute every
         // goal field from it and persist the inputs alongside. Otherwise
         // fall back to the archetype defaults so users who skip the
@@ -227,6 +267,7 @@ final class OnboardingViewModel: ObservableObject {
                 reminderLunch:        mealReminders,
                 reminderDinner:       mealReminders,
                 physiology:           physiology,
+                weightGoalDirection:  goalDirection,
                 completedAt:          now
             )
             #if DEBUG
@@ -234,6 +275,11 @@ final class OnboardingViewModel: ObservableObject {
                   updated.onboardingCompletedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "<nil>")
             #endif
             profileStore.apply(updated)
+            // Scan-first activation: `personalized=false` is the common path now
+            // (survey deferred); a later goals_personalized event closes the loop.
+            AnalyticsService.shared.track(
+                AnalyticsService.Event.onboardingCompleted,
+                ["personalized": physiology != nil ? "true" : "false"])
         } catch {
             #if DEBUG
             NSLog("[Onboarding] complete FAILED: %@", "\(error)")
