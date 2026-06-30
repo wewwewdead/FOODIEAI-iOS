@@ -14,7 +14,7 @@ import Foundation
 /// No UI code lives here. The service is intentionally side-effect-free
 /// at construction; everything happens through `recompute`, which is safe
 /// to call repeatedly (idempotent at the scheduler boundary — see
-/// `NotificationScheduler.scheduleUnderCalorieReminder`).
+/// `NotificationScheduler.scheduleCalorieBalanceReminder`).
 @MainActor
 final class CalorieReminderService {
     static let shared = CalorieReminderService()
@@ -51,7 +51,10 @@ final class CalorieReminderService {
     private var latestGeneration: UInt64 = 0
 
     private enum StatusFetchResult {
-        case status(DailyCalorieGoalStatus, streakDays: Int, loggedToday: Bool,
+        case status(DailyCalorieGoalStatus,
+                    direction: CalorieGoalCalculator.GoalDirection?,
+                    weightKg: Double?,
+                    streakDays: Int, loggedToday: Bool,
                     notificationsEnabled: Bool)
         case unavailable
     }
@@ -123,6 +126,8 @@ final class CalorieReminderService {
                 goal: Double(profile.dailyCalorieGoal)
             )
             return .status(status,
+                           direction: profile.weightGoalDirection,
+                           weightKg: profile.weightKg,
                            streakDays: profile.currentStreakDays,
                            loggedToday: !logs.isEmpty,
                            notificationsEnabled: profile.notificationsEnabled)
@@ -224,12 +229,14 @@ final class CalorieReminderService {
             }
 
             switch result {
-            case .status(let status, let streakDays, let loggedToday, let notifsEnabled):
+            case .status(let status, let direction, let weightKg,
+                         let streakDays, let loggedToday, let notifsEnabled):
                 // Streak is "at risk" only when it's live AND nothing has
                 // been logged today — a log today already keeps it alive.
                 let atRisk = loggedToday ? 0 : streakDays
                 await applyReminderDecision(
-                    status: status, streakAtRiskDays: atRisk,
+                    status: status, direction: direction, weightKg: weightKg,
+                    streakAtRiskDays: atRisk,
                     notificationsEnabled: notifsEnabled,
                     now: now, timeZone: timeZone
                 )
@@ -262,9 +269,11 @@ final class CalorieReminderService {
         #endif
         // Direct-data path has no profile in hand; it's only reached by callers
         // that already gate on the master toggle, so pass `true` (no extra gate)
-        // and let the fetch path enforce it authoritatively.
+        // and let the fetch path enforce it authoritatively. No direction/weight
+        // here → treated as maintain (the safe default) by the tone mapper.
         await applyReminderDecision(
-            status: status, streakAtRiskDays: 0, notificationsEnabled: true,
+            status: status, direction: nil, weightKg: nil,
+            streakAtRiskDays: 0, notificationsEnabled: true,
             now: now, timeZone: timeZone
         )
     }
@@ -276,10 +285,12 @@ final class CalorieReminderService {
     /// through identical logic — keeps the fetch and direct-data paths
     /// from drifting.
     ///
-    /// `scheduleUnderCalorieReminder` already removes any prior pending
+    /// `scheduleCalorieBalanceReminder` already removes any prior pending
     /// request with the same identifier before adding a new one, so
     /// repeated apply calls never spawn duplicates.
     private func applyReminderDecision(status: DailyCalorieGoalStatus,
+                                       direction: CalorieGoalCalculator.GoalDirection?,
+                                       weightKg: Double?,
                                        streakAtRiskDays: Int,
                                        notificationsEnabled: Bool,
                                        now: Date,
@@ -291,27 +302,67 @@ final class CalorieReminderService {
             return
         }
         guard status.hasValidGoal else {
-            // No goal → can't reason about "under"; cancel any stale
-            // pending notification so we don't ship the user a number
-            // they didn't ask for.
+            // No goal → can't reason about balance; cancel any stale pending
+            // notification so we don't ship the user a number they didn't ask for.
             scheduler.cancelUnderCalorieReminder()
             return
         }
 
-        // Reached goal → cancel; if user keeps consuming, no point
-        // pinging them about a goal they've already met.
-        guard status.warningState != .reached else {
+        // Goal-aware tone. `nil` means the day's balance is on-plan for this
+        // goal (a deficit on lose, a surplus on gain, or simply on-goal), so
+        // there's no calorie ping — only a streak-saver may still claim the slot.
+        let tone = Self.reminderTone(status: status, direction: direction, weightKg: weightKg)
+
+        // The single evening slot is shared with the streak-saver. With no
+        // calorie copy AND no streak worth protecting (>= 2), stay silent.
+        if tone == nil && streakAtRiskDays < 2 {
             scheduler.cancelUnderCalorieReminder()
             return
         }
 
-        // Under goal → schedule (one-shot for the next 22:00). When a live
-        // streak is unlogged today, the same slot carries streak-saver copy.
-        await scheduler.scheduleUnderCalorieReminder(
-            remaining: status.remaining,
+        await scheduler.scheduleCalorieBalanceReminder(
+            tone: tone,
             streakAtRiskDays: streakAtRiskDays,
             now: now,
             timeZone: timeZone
         )
+    }
+
+    /// Map today's status + goal direction to the evening reminder tone, or
+    /// `nil` when the day's balance is on-plan for that goal (no calorie ping).
+    /// Pure + testable. Mirrors `DayCalorieStanding`'s over/under/on-goal split
+    /// with the same tolerance so the ping and the in-app verdict never drift:
+    ///
+    ///   - lose + under     → nil  (a deficit is the plan; never nag to eat)
+    ///   - maintain + under → eat-to-steady
+    ///   - gain + under     → eat-to-build
+    ///   - gain + over      → nil  (a surplus is fuel)
+    ///   - lose/maintain + over → gentle, forward-looking move nudge
+    nonisolated static func reminderTone(status: DailyCalorieGoalStatus,
+                                         direction: CalorieGoalCalculator.GoalDirection?,
+                                         weightKg: Double?) -> NotificationScheduler.CalorieReminderTone? {
+        guard status.hasValidGoal else { return nil }
+        let tol = DayCalorieStanding.onGoalToleranceKcal
+
+        // OVER (surplus)
+        if status.exceededBy > tol {
+            switch direction ?? .maintain {
+            case .gain:            return nil // surplus is the plan — no nudge
+            case .lose, .maintain: return .overMove(exceededBy: status.exceededBy,
+                                                    weightKg: weightKg)
+            }
+        }
+
+        // UNDER (deficit)
+        if status.remaining > tol {
+            switch direction ?? .maintain {
+            case .lose:     return nil // deficit is the plan — don't nag to eat
+            case .maintain: return .underMaintain(remaining: status.remaining)
+            case .gain:     return .underGain(remaining: status.remaining)
+            }
+        }
+
+        // ON GOAL (within tolerance either side)
+        return nil
     }
 }

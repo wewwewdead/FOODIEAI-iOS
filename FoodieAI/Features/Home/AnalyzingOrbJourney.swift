@@ -16,6 +16,23 @@ import UIKit
 /// with travel/breathe/wobble applied as GPU transforms (`scaleEffect`/
 /// `position`), so nothing re-lays-out or re-blurs per frame.
 
+// MARK: - Shared timing
+
+/// Timing the rest of the analyze flow coordinates against, so the genie
+/// warp-back and the result reveal never drift apart.
+enum AnalyzingOrbTiming {
+    /// How long, after the orb starts its return, the warp reads as "landed"
+    /// (the orb has dissolved). The result content + typewriter hold this long
+    /// before flowing in, so the genie warp visibly plays *first* — then the
+    /// breakdown reveals as the orb finishes vanishing (a clean crossfade, no
+    /// text typing on top of a mid-warp orb).
+    ///
+    /// Tuned to `AnalyzingOrb.fallDuration` (1.05s): the orb's opacity
+    /// (`returnFade`) reaches ~0 around 0.85s into the descent, so the reveal
+    /// lands right as it disappears. Also covers the SPH-fluid return (0.9s).
+    static let returnSettleSeconds: TimeInterval = 0.85
+}
+
 // MARK: - Source-frame plumbing
 
 /// Captures the meal photo's on-screen frame (in GLOBAL coords) so the orb

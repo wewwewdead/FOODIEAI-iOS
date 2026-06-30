@@ -1569,15 +1569,17 @@ final class ReflectionLoader: ObservableObject {
     }
 
     func load() async {
-        async let p: [Pattern]? = try? history.patternsForToday()
+        async let inputs: (patterns: [Pattern], logs: [FoodLog])? =
+            try? history.reflectionInputsForToday()
         async let o: CoachObservation? = try? observations.todaysObservation()
         async let r: WeeklyRecap? = try? recapService.latest()
-        let resolvedPatterns = await p ?? []
+        let resolved = await inputs ?? ([], [])
         let observation = await o
-        self.patterns = resolvedPatterns
+        self.patterns = resolved.patterns
         self.activeObservation = observation
         self.latestRecap = await r
-        await generateObservationIfNeeded(patterns: resolvedPatterns,
+        await generateObservationIfNeeded(patterns: resolved.patterns,
+                                          logs: resolved.logs,
                                           hasExisting: observation != nil)
     }
 
@@ -1598,23 +1600,53 @@ final class ReflectionLoader: ObservableObject {
     /// safe to call repeatedly. Relocated here from the Tracker so reflection
     /// loads + generates in exactly one place.
     private func generateObservationIfNeeded(patterns: [Pattern],
+                                             logs: [FoodLog],
                                              hasExisting: Bool) async {
-        guard !hasExisting, !patterns.isEmpty else { return }
+        guard !hasExisting else { return }
         let profile = try? await profileService.currentProfile()
         let ageDays = profile.map { Self.daysSince($0.createdAt) } ?? 0
         guard ageDays >= Self.observationMinAccountAgeDays else { return }
+
+        // Multi-day calorie-trend card takes precedence over the editorial
+        // pattern card: a sustained drift from the user's goal ("you'll slowly
+        // lose on a maintain plan") is more actionable than "you've had pizza a
+        // lot", and both share the single daily coach slot. Computed locally
+        // (pure) so it's cheap to check before deciding whether to pay the
+        // model round-trip the pattern card needs.
+        let trendVerdict: CalorieTrendAnalyzer.Verdict? = {
+            guard let profile, profile.dailyCalorieGoal > 0 else { return nil }
+            let daily = CalorieTrendAnalyzer.loggedDayCalories(from: logs)
+            return CalorieTrendAnalyzer.verdict(
+                loggedDayCalories: daily,
+                goal: Double(profile.dailyCalorieGoal),
+                direction: profile.weightGoalDirection
+            )
+        }()
+
+        guard !patterns.isEmpty || trendVerdict != nil else { return }
 
         let preferred = profile?.preferredCoaches ?? []
         let observations = self.observations
         let recentMoods = (try? await history.recentMoodsForCoachContext()) ?? []
 
-        Task.detached { [weak self, observations, patterns, preferred, recentMoods] in
+        Task.detached { [weak self, observations, patterns, preferred, recentMoods, trendVerdict] in
             do {
-                let generated = try await observations.generateIfNeeded(
-                    patterns: patterns,
-                    preferredCoaches: preferred,
-                    recentMoods: recentMoods
-                )
+                // Try the local trend card first; fall back to the server-voiced
+                // pattern card when there's no trend (or it was deduped today).
+                let generated: CoachObservation?
+                if let trendVerdict,
+                   let trendCard = try await observations.generateCalorieTrendIfNeeded(
+                       verdict: trendVerdict, preferredCoaches: preferred) {
+                    generated = trendCard
+                } else if !patterns.isEmpty {
+                    generated = try await observations.generateIfNeeded(
+                        patterns: patterns,
+                        preferredCoaches: preferred,
+                        recentMoods: recentMoods
+                    )
+                } else {
+                    generated = nil
+                }
                 if let generated {
                     await MainActor.run { [weak self] in
                         self?.activeObservation = generated
@@ -1622,7 +1654,7 @@ final class ReflectionLoader: ObservableObject {
                 }
             } catch {
                 #if DEBUG
-                NSLog("[Insights] generateIfNeeded FAILED: %@", "\(error)")
+                NSLog("[Insights] generate observation FAILED: %@", "\(error)")
                 #endif
             }
         }

@@ -46,7 +46,7 @@ final class NotificationScheduler {
         /// End-of-day under-calorie reminder. One-shot, replaced each time
         /// the user saves/deletes a meal or changes their calorie goal. The
         /// identifier is stable across reschedules so cancel-and-replace
-        /// never spawns duplicates (see `scheduleUnderCalorieReminder`).
+        /// never spawns duplicates (see `scheduleCalorieBalanceReminder`).
         /// Doubles as the streak-at-risk nudge when a live streak is unlogged
         /// (same slot, streak-aware copy) so we never stack two evening pings.
         static let underCalorieReminder = "daily_under_calorie_reminder"
@@ -297,34 +297,58 @@ final class NotificationScheduler {
     /// room to log a missed meal without nagging during dinner.
     static let underCalorieReminderHour = 22
 
-    /// Schedule a one-shot under-calorie reminder at the next 22:00 local
-    /// time. Idempotent — any prior pending request with the same
+    /// What the single evening calorie ping should say, derived by
+    /// `CalorieReminderService` from the goal-aware `DayCalorieStanding`
+    /// verdict. The slot is shared with the streak-saver, so `nil` here means
+    /// "no calorie copy" — the slot is only taken when a streak needs saving.
+    ///
+    /// Note there is intentionally *no* "under on a lose plan" case: a deficit
+    /// is the whole point of a lose goal, so we never nudge a dieter to eat at
+    /// night. And "over on a gain plan" is fuel, so there's no case for it
+    /// either. Both directions simply pass `nil`.
+    enum CalorieReminderTone: Equatable {
+        /// Under a *maintain* goal — you'll drift toward losing; eat to steady.
+        case underMaintain(remaining: Double)
+        /// Under a *gain* target — close the gap to keep building.
+        case underGain(remaining: Double)
+        /// Over goal on a lose/maintain plan — gentle, forward-looking nudge.
+        case overMove(exceededBy: Double, weightKg: Double?)
+    }
+
+    /// Schedule the one evening calorie/streak reminder at the next 22:00
+    /// local time. Idempotent — any prior pending request with the same
     /// identifier is removed first so the user never sees duplicates.
     ///
-    /// `remaining` is plumbed into the body copy so the user sees a
-    /// concrete number, not a generic nudge. Caller is responsible for
-    /// only invoking this when the user is actually under goal; this
-    /// method does NOT re-evaluate the calorie status.
+    /// `tone` carries the goal-aware copy (or `nil` for "no calorie line").
+    /// `streakAtRiskDays >= 2` overrides the calorie copy with the gentle
+    /// streak-saver, so the single slot does double duty without a second
+    /// ping. When `tone == nil` and no streak is at risk there's nothing to
+    /// say, so we clear the slot instead of scheduling.
     ///
     /// If notification authorization isn't granted, this is a no-op
-    /// (UNUserNotificationCenter rejects `add` silently in that case
-    /// anyway, but the explicit check avoids spurious DEBUG noise).
-    /// `streakAtRiskDays > 0` switches the copy to a gentle streak-saver
-    /// ("keep your N-day run going") instead of the calorie line. The caller
-    /// passes this only when a live streak is genuinely unlogged today, so
-    /// the single evening reminder does double duty without a second ping.
-    func scheduleUnderCalorieReminder(remaining: Double,
-                                      streakAtRiskDays: Int = 0,
-                                      now: Date = Date(),
-                                      timeZone: TimeZone = .current) async {
+    /// (UNUserNotificationCenter rejects `add` silently in that case anyway,
+    /// but the explicit check avoids spurious DEBUG noise).
+    func scheduleCalorieBalanceReminder(tone: CalorieReminderTone?,
+                                        streakAtRiskDays: Int = 0,
+                                        now: Date = Date(),
+                                        timeZone: TimeZone = .current) async {
         // Authorization check — skip the work if we wouldn't be allowed
         // to deliver. `provisional` and `authorized` are both deliverable.
         let status = await authorizationStatus()
         guard status == .authorized || status == .provisional else {
             #if DEBUG
-            NSLog("[Notif] underCalorie: skip schedule — auth=%d", status.rawValue)
+            NSLog("[Notif] calorieBalance: skip schedule — auth=%d", status.rawValue)
             #endif
             // Make sure no stale request lingers from a previous grant.
+            center.removePendingNotificationRequests(
+                withIdentifiers: [Identifier.underCalorieReminder]
+            )
+            return
+        }
+
+        // Nothing worth saying (e.g. a lose user who's under, with no streak
+        // at risk) — clear any stale request and stop.
+        guard tone != nil || streakAtRiskDays >= 2 else {
             center.removePendingNotificationRequests(
                 withIdentifiers: [Identifier.underCalorieReminder]
             )
@@ -365,18 +389,20 @@ final class NotificationScheduler {
         )
 
         let content = UNMutableNotificationContent()
-        // Only lead with streak-saver copy once the streak is worth protecting
-        // (>= 2). Losing a 1-day "streak" isn't a compelling nudge, so a
-        // single-day run falls back to the plain under-calorie line.
+        // Streak-saver wins the slot once the run is worth protecting (>= 2);
+        // a 1-day "streak" isn't compelling, so it falls back to the tone copy.
         if streakAtRiskDays >= 2 {
             content.title = "Keep your \(streakAtRiskDays)-day streak"
             content.body  = Self.streakAtRiskBody(days: streakAtRiskDays)
+        } else if let tone {
+            let copy = Self.calorieToneCopy(tone)
+            content.title = copy.title
+            content.body  = copy.body
         } else {
-            content.title = "Still under your calorie goal"
-            content.body  = Self.underCalorieBody(remaining: remaining)
+            return // unreachable given the guard above; defensive.
         }
         content.sound = .default
-        content.userInfo = ["kind": "under_calorie_reminder"]
+        content.userInfo = ["kind": "calorie_balance_reminder"]
 
         let request = UNNotificationRequest(
             identifier: Identifier.underCalorieReminder,
@@ -387,12 +413,12 @@ final class NotificationScheduler {
         do {
             try await center.add(request)
             #if DEBUG
-            NSLog("[Notif] underCalorie scheduled for %@ (remaining=%.0f)",
-                  "\(fireDate)", remaining)
+            NSLog("[Notif] calorieBalance scheduled for %@ (tone=%@ streak=%d)",
+                  "\(fireDate)", "\(String(describing: tone))", streakAtRiskDays)
             #endif
         } catch {
             #if DEBUG
-            NSLog("[Notif] underCalorie schedule FAILED: %@", "\(error)")
+            NSLog("[Notif] calorieBalance schedule FAILED: %@", "\(error)")
             #endif
         }
     }
@@ -406,23 +432,30 @@ final class NotificationScheduler {
         )
     }
 
-    /// Round the remaining calories to a friendly multiple so the body
-    /// reads naturally. Avoids "423.7 calories left" while keeping the
-    /// number honest enough to be actionable.
-    private static func underCalorieBody(remaining: Double) -> String {
-        // Round to the nearest 10 above 100, nearest 5 below — picks a
-        // number a human would say out loud.
-        let value = max(0, remaining)
-        let rounded: Int
-        if value >= 100 {
-            rounded = Int((value / 10).rounded()) * 10
-        } else {
-            rounded = Int((value / 5).rounded()) * 5
+    /// Goal-aware copy for the evening calorie ping. Numbers round to a
+    /// friendly multiple (reusing the tracker's `roundKcal`) so the body reads
+    /// like something a person would say, not "423.7 calories left." Always
+    /// non-shaming and forward-looking — an over-goal day points at *tomorrow*,
+    /// never "go burn it off now."
+    private static func calorieToneCopy(_ tone: CalorieReminderTone) -> (title: String, body: String) {
+        switch tone {
+        case .underMaintain(let remaining):
+            let n = MealSuggestionEngine.roundKcal(remaining)
+            let amount = n > 0 ? "about \(n) calories" : "a little room"
+            return ("A bit under maintenance",
+                    "You've got \(amount) left today — a small bite keeps your weight steady.")
+        case .underGain(let remaining):
+            let n = MealSuggestionEngine.roundKcal(remaining)
+            let amount = n > 0 ? "About \(n) calories" : "A little room"
+            return ("Still short of your target",
+                    "\(amount) left toward your goal — one more bite helps you build.")
+        case .overMove(let exceededBy, let weightKg):
+            let n = MealSuggestionEngine.roundKcal(exceededBy)
+            let walk = ActivityBurnEstimator.walkMinutes(toBurn: exceededBy, weightKg: weightKg)
+            let over = n > 0 ? "about \(n) calories over" : "a little over"
+            return ("A little over today",
+                    "You're \(over) — no worries, a \(walk)-min walk tomorrow evens it out.")
         }
-        if rounded <= 0 {
-            return "You still have room left today. Want to log your last meal?"
-        }
-        return "You have about \(rounded) calories left today. Want to log your last meal?"
     }
 
     /// Gentle streak-saver copy — no guilt, no "you'll lose everything," just

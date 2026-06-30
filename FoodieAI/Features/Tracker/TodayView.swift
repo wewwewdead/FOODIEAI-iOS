@@ -2488,11 +2488,16 @@ private struct DailyLoopHeroView: View {
             }
             .transition(.opacity)
         case .over:
+            // For a gain goal a surplus is the plan working, not a slip —
+            // affirm it instead of the gentle lose/maintain "fresh start" line.
+            let isGain = profile?.weightGoalDirection == .gain
             VStack(spacing: 2) {
-                Text("A little over today")
+                Text(isGain ? "Surplus logged today" : "A little over today")
                     .appFont(.caption)
                     .foregroundStyle(Color.inkMute)
-                Text("No big deal — tomorrow's a fresh start.")
+                Text(isGain
+                     ? "That extra fuel is what builds — nice work."
+                     : "No big deal — tomorrow's a fresh start.")
                     .appFont(.caption)
                     .foregroundStyle(Color.inkLight)
                     .multilineTextAlignment(.center)

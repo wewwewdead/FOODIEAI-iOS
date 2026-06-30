@@ -233,9 +233,18 @@ actor MealHistoryService {
     /// phase. It's a pure function of `[FoodLog]` so future phases can
     /// move it server-side without touching the call site.
     func patternsForToday(now: Date = Date()) async throws -> [Pattern] {
+        try await reflectionInputsForToday(now: now).patterns
+    }
+
+    /// The last 14 days of logs *and* the patterns derived from them, in a
+    /// single fetch. Lets the Insights loader build both the pattern cards and
+    /// the calorie-trend coach (`CalorieTrendAnalyzer`) off one round-trip
+    /// instead of two — the same rows feed both, so there's no extra egress.
+    func reflectionInputsForToday(now: Date = Date())
+        async throws -> (patterns: [Pattern], logs: [FoodLog]) {
         let cal = Calendar.current
         guard let cutoff = cal.date(byAdding: .day, value: -14, to: now) else {
-            return []
+            return ([], [])
         }
         let logs: [FoodLog] = try await client
             .from("food_logs")
@@ -245,7 +254,7 @@ actor MealHistoryService {
             .execute()
             .value
 
-        return Self.analyzePatterns(logs: logs, now: now, calendar: cal)
+        return (Self.analyzePatterns(logs: logs, now: now, calendar: cal), logs)
     }
 
     /// Phase 17 — patterns for an arbitrary closed range. Used by the

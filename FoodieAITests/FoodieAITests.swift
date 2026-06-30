@@ -5573,15 +5573,41 @@ final class DayCalorieStandingTests: XCTestCase {
         XCTAssertNil(standing(2000, 0, .maintain))
     }
 
-    func test_maintain_under_showsAmountAndFoodRec() {
+    func test_maintain_under_nudgesToEatBackToSteady() {
+        // Under on a *maintain* plan is a (gentle) miss: you'll dip below the
+        // level that holds your weight, so the copy nudges to eat — not the
+        // old direction-blind "under your goal" affirmation.
         let r = standing(2000, 2300, .maintain)
         XCTAssertEqual(r?.kind, .under)
         XCTAssertEqual(r?.amount, 300)
         XCTAssertTrue(r?.headline.contains("300") ?? false)
         XCTAssertTrue(r?.headline.contains("under") ?? false)
-        XCTAssertTrue(r?.headline.contains("goal") ?? false)
+        XCTAssertTrue(r?.headline.contains("maintenance") ?? false)
         XCTAssertTrue(r?.recommendation?.contains("Room for") ?? false)
+        XCTAssertTrue(r?.recommendation?.contains("steady") ?? false)
         XCTAssertEqual(r?.isWarning, false)
+    }
+
+    func test_lose_under_isAffirmed_noEatNudge() {
+        // A deficit is the whole point of a lose plan — affirm it and DON'T
+        // tell the user to eat (the bug we fixed). Normal-sized gap.
+        let r = standing(2000, 2300, .lose) // 300 under, below largeDeficit
+        XCTAssertEqual(r?.kind, .under)
+        XCTAssertTrue(r?.headline.contains("goal") ?? false)
+        XCTAssertEqual(r?.isWarning, false)
+        let rec = r?.recommendation?.lowercased() ?? ""
+        XCTAssertTrue(rec.contains("fat-loss"))
+        XCTAssertFalse(rec.contains("room for")) // never nudge a dieter to eat
+    }
+
+    func test_lose_excessiveDeficit_cautionsUnderEating() {
+        // Way under even the (already-reduced) lose goal → swap the affirmation
+        // for a gentle eat-a-little-more caution. 800 under > largeDeficitKcal.
+        let r = standing(1500, 2300, .lose)
+        XCTAssertEqual(r?.kind, .under)
+        XCTAssertEqual(r?.isWarning, false) // brand stays non-shaming
+        let rec = r?.recommendation?.lowercased() ?? ""
+        XCTAssertTrue(rec.contains("too little") || rec.contains("stall"))
     }
 
     func test_maintain_over_showsBurnOff() {
@@ -5622,6 +5648,165 @@ final class DayCalorieStandingTests: XCTestCase {
     func test_withinTolerance_countsAsOnGoal() {
         XCTAssertEqual(standing(2350, 2300, .maintain)?.kind, .onGoal) // 50 over
         XCTAssertEqual(standing(2250, 2300, .maintain)?.kind, .onGoal) // 50 under
+    }
+}
+
+// MARK: - End-of-day reminder tone (goal-aware direction matrix)
+
+final class CalorieReminderToneTests: XCTestCase {
+    typealias Tone = NotificationScheduler.CalorieReminderTone
+
+    private func tone(_ cals: Double, _ goal: Double,
+                      _ dir: CalorieGoalCalculator.GoalDirection?,
+                      weight: Double? = 70) -> Tone? {
+        let status = DailyCalorieGoalStatus.compute(consumed: cals, goal: goal)
+        return CalorieReminderService.reminderTone(
+            status: status, direction: dir, weightKg: weight
+        )
+    }
+
+    func test_lose_under_isSilent_neverNagsToEat() {
+        // The bug we fixed: a dieter under goal at night must NOT be told to eat.
+        XCTAssertNil(tone(1800, 2300, .lose))
+        // Even a big deficit stays silent on the calorie axis.
+        XCTAssertNil(tone(1200, 2300, .lose))
+    }
+
+    func test_maintain_under_eatToSteady() {
+        guard case .underMaintain(let remaining)? = tone(2000, 2300, .maintain) else {
+            return XCTFail("expected .underMaintain")
+        }
+        XCTAssertEqual(remaining, 300, accuracy: 0.001)
+    }
+
+    func test_gain_under_eatToBuild() {
+        guard case .underGain? = tone(2000, 2300, .gain) else {
+            return XCTFail("expected .underGain")
+        }
+    }
+
+    func test_gain_over_isSilent_surplusIsFuel() {
+        XCTAssertNil(tone(2600, 2300, .gain))
+    }
+
+    func test_maintain_over_movesTomorrow() {
+        guard case .overMove(let by, let kg)? = tone(2600, 2300, .maintain) else {
+            return XCTFail("expected .overMove")
+        }
+        XCTAssertEqual(by, 300, accuracy: 0.001)
+        XCTAssertEqual(kg, 70)
+    }
+
+    func test_lose_over_movesTomorrow() {
+        guard case .overMove? = tone(2600, 2300, .lose) else {
+            return XCTFail("expected .overMove")
+        }
+    }
+
+    func test_nilDirection_treatedAsMaintain() {
+        // Direct-data path passes nil → maintain semantics.
+        guard case .underMaintain? = tone(2000, 2300, nil) else {
+            return XCTFail("expected .underMaintain for nil direction")
+        }
+    }
+
+    func test_onGoal_isSilent() {
+        XCTAssertNil(tone(2300, 2300, .maintain))
+        XCTAssertNil(tone(2350, 2300, .lose))  // within tolerance
+    }
+
+    func test_invalidGoal_isSilent() {
+        XCTAssertNil(tone(2000, 0, .maintain))
+    }
+}
+
+// MARK: - Multi-day calorie trend
+
+final class CalorieTrendAnalyzerTests: XCTestCase {
+    typealias Dir = CalorieGoalCalculator.GoalDirection
+
+    private func verdict(_ days: [Double], goal: Double, _ dir: Dir?)
+        -> CalorieTrendAnalyzer.Verdict? {
+        CalorieTrendAnalyzer.verdict(loggedDayCalories: days, goal: goal, direction: dir)
+    }
+    private func rep(_ v: Double, _ n: Int) -> [Double] { Array(repeating: v, count: n) }
+
+    // --- maintain ---
+    func test_maintain_persistentDeficit_flagsUnderMaintain() {
+        let v = verdict(rep(2000, 7), goal: 2300, .maintain)
+        XCTAssertEqual(v?.drift, .underMaintain)
+        XCTAssertEqual(v?.avgDeviationKcal, -300)
+        XCTAssertEqual(v?.subject, "maintain-deficit")
+    }
+    func test_maintain_persistentSurplus_flagsOverMaintain() {
+        XCTAssertEqual(verdict(rep(2600, 7), goal: 2300, .maintain)?.drift, .overMaintain)
+    }
+    func test_maintain_smallDeviation_isNil() {
+        XCTAssertNil(verdict(rep(2250, 7), goal: 2300, .maintain)) // 50 under, under threshold
+    }
+    func test_maintain_mixedDaysAverageOut_isNil() {
+        // 6 days 300 under, 4 days 300 over → under-majority but avg only −60.
+        XCTAssertNil(verdict(rep(2000, 6) + rep(2600, 4), goal: 2300, .maintain))
+    }
+
+    // --- lose: under is the plan, over/way-under are the misses ---
+    func test_lose_eatingAboveGoal_flagsStalled() {
+        XCTAssertEqual(verdict(rep(2600, 7), goal: 2300, .lose)?.drift, .loseStalled)
+    }
+    func test_lose_normalDeficit_isNil_onPlan() {
+        XCTAssertNil(verdict(rep(2000, 7), goal: 2300, .lose)) // 300 under = the plan
+    }
+    func test_lose_bigDeficit_flagsUndereating() {
+        XCTAssertEqual(verdict(rep(1600, 7), goal: 2300, .lose)?.drift, .loseUndereating) // 700 under
+    }
+
+    // --- gain: over is the plan, under is the miss ---
+    func test_gain_underTarget_flagsStalled() {
+        XCTAssertEqual(verdict(rep(2000, 7), goal: 2300, .gain)?.drift, .gainStalled)
+    }
+    func test_gain_surplus_isNil_onPlan() {
+        XCTAssertNil(verdict(rep(2600, 7), goal: 2300, .gain))
+    }
+
+    // --- guards ---
+    func test_tooFewLoggedDays_isNil() {
+        XCTAssertNil(verdict(rep(2000, 4), goal: 2300, .maintain)) // < minLoggedDays
+    }
+    func test_invalidGoal_isNil() {
+        XCTAssertNil(verdict(rep(2000, 7), goal: 0, .maintain))
+    }
+    func test_nilDirection_treatedAsMaintain() {
+        XCTAssertEqual(verdict(rep(2000, 7), goal: 2300, nil)?.drift, .underMaintain)
+    }
+
+    // --- bucketing: today (partial) and unlogged days are excluded ---
+    func test_loggedDayCalories_excludesTodayAndEmptyDays() {
+        let logs = [
+            Self.kcalLog(800, daysAgo: 0),  // today → excluded (partial)
+            Self.kcalLog(700, daysAgo: 0),  // today → excluded
+            Self.kcalLog(500, daysAgo: 1),
+            Self.kcalLog(600, daysAgo: 2),
+        ]
+        XCTAssertEqual(CalorieTrendAnalyzer.loggedDayCalories(from: logs).sorted(),
+                       [500, 600])
+    }
+    func test_loggedDayCalories_sumsMultipleLogsPerDay() {
+        let logs = [Self.kcalLog(300, daysAgo: 1), Self.kcalLog(450, daysAgo: 1)]
+        XCTAssertEqual(CalorieTrendAnalyzer.loggedDayCalories(from: logs), [750])
+    }
+
+    private static func kcalLog(_ kcal: Double, daysAgo: Int) -> FoodLog {
+        var comps = DateComponents(); comps.day = -daysAgo
+        let base = Calendar.current.date(byAdding: comps, to: Date())!
+        let dt = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: base)!
+        return FoodLog(
+            id: UUID(), userId: UUID(), foodName: "x",
+            imagePath: nil, imageThumbPath: nil,
+            calories: kcal, carbsG: 0, sugarG: 0, proteinG: nil, fatG: 0, fiberG: 0,
+            benefits: [], drawbacks: [], nutrients: [],
+            coachName: nil, coachAdvice: nil,
+            eatenAt: dt, createdAt: dt, origin: .analyzed, sourceLogId: nil, mood: nil
+        )
     }
 }
 

@@ -505,6 +505,12 @@ enum DayCalorieStanding {
     /// doesn't need to hit the number to the calorie to be a win.
     static let onGoalToleranceKcal: Double = 75
 
+    /// A deficit beyond this many kcal under goal on a *lose* plan tips from
+    /// "good deficit" into "eating too little" — we swap the affirmation for a
+    /// gentle eat-a-little-more caution. Generous so we never nag a normal
+    /// dieting day (the lose goal already bakes in a ~500 kcal deficit).
+    static let largeDeficitKcal: Double = 600
+
     static func compute(dayCalories: Double,
                         goal: Double,
                         direction: CalorieGoalCalculator.GoalDirection?,
@@ -538,18 +544,49 @@ enum DayCalorieStanding {
             )
         }
 
-        // UNDER
+        // UNDER — what a deficit *means* flips with the goal direction:
+        //   - lose:     a deficit is the whole plan. Affirm it; only caution
+        //               when the gap is so big it tips into under-eating.
+        //   - maintain: you've dipped below the level that holds your weight,
+        //               so you'll slowly lose. Nudge to eat back to steady.
+        //   - gain:     the meaningful gap to close — eat up to keep building.
         if status.remaining > onGoalToleranceKcal {
             let under = MealSuggestionEngine.roundKcal(status.remaining)
-            let goalWord = isGain ? "target" : "goal"
-            return Result(
-                kind: .under, amount: under,
-                headline: "\(under) cal under your \(goalWord)",
-                headlineImage: "target",
-                recommendation: MealSuggestionEngine.compactLine(remaining: status.remaining),
-                recommendationImage: "fork.knife",
-                isWarning: false
-            )
+            let room = MealSuggestionEngine.compactLine(remaining: status.remaining)
+            switch direction ?? .maintain {
+            case .lose:
+                let runningLow = status.remaining > largeDeficitKcal
+                return Result(
+                    kind: .under, amount: under,
+                    headline: "\(under) cal under your goal",
+                    headlineImage: runningLow ? "target" : "checkmark.seal.fill",
+                    recommendation: runningLow
+                        ? "A big gap — eating too little can stall fat loss. A protein-forward bite helps."
+                        : "Right where a fat-loss day should land.",
+                    recommendationImage: runningLow ? "fork.knife" : "arrow.down.right.circle.fill",
+                    isWarning: false
+                )
+            case .gain:
+                return Result(
+                    kind: .under, amount: under,
+                    headline: "\(under) cal under your target",
+                    headlineImage: "target",
+                    recommendation: room.map { "\($0) Keep building." }
+                        ?? "Room for another meal to keep building.",
+                    recommendationImage: "fork.knife",
+                    isWarning: false
+                )
+            case .maintain:
+                return Result(
+                    kind: .under, amount: under,
+                    headline: "\(under) cal under maintenance",
+                    headlineImage: "target",
+                    recommendation: room.map { "\($0) Eating it keeps you steady." }
+                        ?? "A little more keeps you steady.",
+                    recommendationImage: "fork.knife",
+                    isWarning: false
+                )
+            }
         }
 
         // ON GOAL (within tolerance either side)
@@ -561,5 +598,155 @@ enum DayCalorieStanding {
             recommendationImage: "sparkles",
             isWarning: false
         )
+    }
+}
+
+// MARK: - Multi-day calorie trend
+
+/// Detects a *sustained* drift from the goal's target over the last couple of
+/// weeks — the signal a single off-day can't give. Pure + local: the caller
+/// hands in per-(logged-)day calorie totals, the goal, and the direction; the
+/// analyzer decides whether the drift is worth a gentle coach note.
+///
+/// Deliberately conservative about movement: it compares intake to the *base*
+/// calorie goal (which already bakes in the user's typical activity via TDEE)
+/// and does NOT add back the day's extra steps. On an active maintain day the
+/// real deficit is therefore *larger* than what we measure here, so we may
+/// under-detect a "you'll lose" trend but will never invent one. Folding in
+/// HealthKit per-day active energy is a clean future upgrade.
+enum CalorieTrendAnalyzer {
+    enum Drift: Equatable {
+        /// Maintain goal, persistent deficit — you'll gradually lose.
+        case underMaintain
+        /// Maintain goal, persistent surplus — you'll gradually gain.
+        case overMaintain
+        /// Lose goal, eating at/above goal most days — the deficit never opens.
+        case loseStalled
+        /// Lose goal, very large deficit most days — under-eating territory.
+        case loseUndereating
+        /// Gain goal, under target most days — the surplus never opens.
+        case gainStalled
+
+        /// Stable key for the coach-observation dedup (`patternSubject`).
+        var subject: String {
+            switch self {
+            case .underMaintain:   return "maintain-deficit"
+            case .overMaintain:    return "maintain-surplus"
+            case .loseStalled:     return "lose-stalled"
+            case .loseUndereating: return "lose-undereating"
+            case .gainStalled:     return "gain-stalled"
+            }
+        }
+    }
+
+    struct Verdict: Equatable {
+        let drift: Drift
+        /// Signed average of (consumed − goal) over the considered days,
+        /// rounded. Negative = under, positive = over.
+        let avgDeviationKcal: Int
+        /// How many logged days fed the verdict.
+        let loggedDays: Int
+        var subject: String { drift.subject }
+    }
+
+    // MARK: Tunables
+
+    /// Look back this many *completed* days (today is excluded — a partial day
+    /// would read as a false deficit).
+    static let windowDays = 14
+    /// Need at least this many logged days in the window to trust the signal.
+    static let minLoggedDays = 5
+    /// Average daily deviation (kcal) needed to call a maintain drift or a
+    /// lose/gain stall — below this the trend isn't meaningful.
+    static let driftThresholdKcal: Double = 250
+    /// A *lose* day this far under goal, sustained, is under-eating worth a
+    /// gentle caution (the lose goal already bakes in ~500 kcal of deficit).
+    static let undereatingThresholdKcal: Double = 600
+    /// Fraction of logged days that must drift the same way to count as a trend
+    /// (so one or two outliers don't flip the verdict).
+    static let majorityFraction: Double = 0.6
+
+    /// Bucket raw logs into per-day calorie totals for the completed days in
+    /// the window. Only days with at least one log are returned — an unlogged
+    /// day is missing data, not a zero-calorie day, and counting it as a deep
+    /// deficit would be wrong.
+    static func loggedDayCalories(from logs: [FoodLog],
+                                  now: Date = Date(),
+                                  timeZone: TimeZone = .current,
+                                  windowDays: Int = windowDays) -> [Double] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let today = cal.startOfDay(for: now)
+        guard let cutoff = cal.date(byAdding: .day, value: -windowDays, to: today) else {
+            return []
+        }
+        var byDay: [Date: [FoodLog]] = [:]
+        for log in logs {
+            let day = cal.startOfDay(for: log.eatenAt)
+            guard day >= cutoff, day < today else { continue } // exclude today
+            byDay[day, default: []].append(log)
+        }
+        return byDay.values.map { LocalDailyTotals.sum($0).totalCalories }
+    }
+
+    /// The trend verdict, or `nil` when there's no meaningful drift (or too
+    /// little data). `direction == nil` is treated as maintain.
+    static func verdict(loggedDayCalories: [Double],
+                        goal: Double,
+                        direction: CalorieGoalCalculator.GoalDirection?) -> Verdict? {
+        guard goal.isFinite, goal > 0 else { return nil }
+        let days = loggedDayCalories.filter { $0.isFinite && $0 >= 0 }
+        guard days.count >= minLoggedDays else { return nil }
+
+        let tol = DayCalorieStanding.onGoalToleranceKcal
+        let deviations = days.map { $0 - goal }          // + over, − under
+        let n = Double(days.count)
+        let avg = deviations.reduce(0, +) / n
+        let underDays = deviations.filter { $0 < -tol }.count
+        let overDays  = deviations.filter { $0 >  tol }.count
+        let underMajority = Double(underDays) >= majorityFraction * n
+        let overMajority  = Double(overDays)  >= majorityFraction * n
+
+        func make(_ drift: Drift) -> Verdict {
+            Verdict(drift: drift, avgDeviationKcal: Int(avg.rounded()),
+                    loggedDays: days.count)
+        }
+
+        switch direction ?? .maintain {
+        case .maintain:
+            if avg < -driftThresholdKcal, underMajority { return make(.underMaintain) }
+            if avg >  driftThresholdKcal, overMajority  { return make(.overMaintain) }
+            return nil
+        case .lose:
+            if avg < -undereatingThresholdKcal, underMajority { return make(.loseUndereating) }
+            if avg >  driftThresholdKcal, overMajority        { return make(.loseStalled) }
+            return nil
+        case .gain:
+            if avg < -driftThresholdKcal, underMajority { return make(.gainStalled) }
+            return nil
+        }
+    }
+}
+
+/// Composes the gentle, goal-aware, non-shaming coach copy for a calorie
+/// trend. Kept separate from the analyzer so the wording can evolve without
+/// touching the detection thresholds. Local (no model round-trip), so it's
+/// deterministic and costs no egress — see the note on `CalorieTrendAnalyzer`.
+enum CalorieTrendCoach {
+    static func body(for verdict: CalorieTrendAnalyzer.Verdict) -> String {
+        let perDay = MealSuggestionEngine.roundKcal(Double(abs(verdict.avgDeviationKcal)))
+        let days = verdict.loggedDays
+        switch verdict.drift {
+        case .underMaintain:
+            return "Heads up — across most of your last \(days) logged days you've landed about \(perDay) kcal/day under your maintenance calories. Keep that up and you'll slowly lose weight. If holding steady is the aim, a bit more at dinner does it — or switch your goal to 'lose' so the targets match."
+        case .overMaintain:
+            return "Over your last \(days) logged days you've run about \(perDay) kcal/day above maintenance. That trends toward slow weight gain. A slightly lighter plate, or a few more steps, brings it back to level — no crash needed."
+        case .loseStalled:
+            return "You're aiming to lose, but across your last \(days) logged days you've eaten about \(perDay) kcal/day above your goal, so the deficit that drives weight loss hasn't really opened up. Even a small trim or a daily walk restarts it."
+        case .loseUndereating:
+            return "You've been eating about \(perDay) kcal/day under your goal lately. Big deficits can backfire — energy dips and muscle gets burned alongside fat. A little more food, especially protein, actually helps the loss stick."
+        case .gainStalled:
+            return "To build you need a surplus, but across your last \(days) logged days you've come in about \(perDay) kcal/day under your target. An extra snack or a bigger dinner gets the gain moving again."
+        }
     }
 }

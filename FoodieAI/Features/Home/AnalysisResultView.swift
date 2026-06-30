@@ -85,6 +85,13 @@ struct AnalysisResultView: View {
     /// Motion off), so the meal photo becomes the matched-geometry
     /// destination and its corner radius settles from near-circular.
     var morphNamespace: Namespace.ID? = nil
+    /// Seconds to hold the content reveal (cascade + typewriters) after the
+    /// view appears, so the genie warp-back can play *first*. The parent passes
+    /// `AnalyzingOrbTiming.returnSettleSeconds` when the orb journey is active
+    /// and `0` otherwise (Reduce Motion / feature off / revisits) — so every
+    /// non-warp call site keeps today's instant reveal. The whole choreography
+    /// shifts by this one offset, preserving the tuned per-element stagger.
+    var revealDelay: TimeInterval = 0
     let onSave: () -> Void
     let onCancel: () -> Void
 
@@ -118,6 +125,11 @@ struct AnalysisResultView: View {
     /// by a single state flag (not a per-element Task) so SwiftUI handles
     /// the timeline via per-modifier `.delay()`; nothing to cancel.
     @State private var cascadeOn: Bool = false
+    /// Guards the one-shot reveal scheduling so a re-render (e.g. the
+    /// typewriter ticking, or a save state change) never re-arms the delayed
+    /// cascade. Separate from `cascadeOn` because the flip is now deferred by
+    /// `revealDelay`, so we can't use `cascadeOn` itself as the latch.
+    @State private var cascadeScheduled: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Phase 15 — repeat detection. Populated by a non-blocking
@@ -260,10 +272,17 @@ struct AnalysisResultView: View {
             }
         }
         .onAppear {
-            // Idempotent: only flips on once, so re-renders (e.g. the
-            // typewriter ticking) don't re-fire the cascade.
-            guard !cascadeOn else { return }
-            cascadeOn = true
+            // Idempotent: arm exactly once. When the orb journey is active the
+            // parent passes a `revealDelay` so the breakdown holds until the
+            // genie warp has landed; otherwise it's 0 and the cascade fires
+            // immediately, exactly as before.
+            guard !cascadeScheduled else { return }
+            cascadeScheduled = true
+            guard revealDelay > 0 else { cascadeOn = true; return }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(revealDelay * 1_000_000_000))
+                cascadeOn = true
+            }
         }
         .task(id: analysis.food ?? "") {
             await loadPriorOccurrences()
@@ -1462,7 +1481,7 @@ struct AnalysisResultView: View {
                 text: advice,
                 attribution: response.coach,
                 typewriter: true,
-                startDelay: 0.4
+                startDelay: revealDelay + 0.4
             )
         }
     }
@@ -1495,7 +1514,7 @@ struct AnalysisResultView: View {
                     items: nutrients,
                     startsExpanded: true,
                     typewriter: true,
-                    startDelay: 0.5
+                    startDelay: revealDelay + 0.5
                 )
             }
             if !benefits.isEmpty {
@@ -1505,7 +1524,7 @@ struct AnalysisResultView: View {
                     items: benefits,
                     startsExpanded: true,
                     typewriter: true,
-                    startDelay: 0.7
+                    startDelay: revealDelay + 0.7
                 )
             }
             if !drawbacks.isEmpty {
@@ -1515,7 +1534,7 @@ struct AnalysisResultView: View {
                     items: drawbacks,
                     startsExpanded: true,
                     typewriter: true,
-                    startDelay: 0.9
+                    startDelay: revealDelay + 0.9
                 )
             }
         }

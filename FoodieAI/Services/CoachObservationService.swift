@@ -182,6 +182,64 @@ actor CoachObservationService {
         return inserted
     }
 
+    /// Surface a multi-day calorie-trend coach note, if one is warranted and we
+    /// haven't already spoken about the same drift this week. Unlike
+    /// `generateIfNeeded`, the copy is composed **locally** (`CalorieTrendCoach`)
+    /// and inserted directly — no `/coach-observation` round-trip — because the
+    /// trend message is formulaic, must stay strictly non-shaming, and the
+    /// server isn't aware of the `"calorieTrend"` pattern kind. It still rides
+    /// the same guardrails as the editorial cards: one active card per day
+    /// (shared slot) and a 7-day dedup by `(kind, subject)`.
+    ///
+    /// Returns the existing card when one is already active today, the new card
+    /// when inserted, or `nil` when deduped.
+    func generateCalorieTrendIfNeeded(
+        verdict: CalorieTrendAnalyzer.Verdict,
+        preferredCoaches: [String]
+    ) async throws -> CoachObservation? {
+        // Guardrail 1: already an active card for today — don't stack a second.
+        if let existing = try await todaysObservation() {
+            return existing
+        }
+
+        // Guardrail 2: dedup — same drift already spoken about in the last 7 days.
+        let subject = verdict.subject
+        let prior = try await recentObservationsMatching(
+            kind: Self.calorieTrendKind, subject: subject
+        )
+        guard prior.isEmpty else {
+            #if DEBUG
+            NSLog("[CoachObs] skip trend — %d prior for %@:%@",
+                  prior.count, Self.calorieTrendKind, subject)
+            #endif
+            return nil
+        }
+
+        let draft = NewCoachObservation(
+            coachName: Self.pickCoach(preferredCoaches),
+            body: CalorieTrendCoach.body(for: verdict),
+            patternKind: Self.calorieTrendKind,
+            patternSubject: subject
+        )
+        let inserted = try await insert(draft)
+        #if DEBUG
+        NSLog("[CoachObs] inserted trend id=%@ subject=%@",
+              inserted.id.uuidString, subject)
+        #endif
+        return inserted
+    }
+
+    /// The `pattern_kind` value for locally-composed calorie-trend cards.
+    static let calorieTrendKind = "calorieTrend"
+
+    /// Attribute the trend card to the user's first starred coach so it sits
+    /// alongside their other cards; fall back to a neutral label when they
+    /// haven't starred anyone (the server-voiced cards pick from the full pool,
+    /// but this path is intentionally local).
+    private static func pickCoach(_ preferred: [String]) -> String {
+        AnalyzeService.sanitizePreferredCoaches(preferred).first ?? "Your coach"
+    }
+
     // MARK: - Server round-trip
 
     /// POST the patterns + preferences to `/coach-observation` and

@@ -1687,6 +1687,11 @@ struct CaptureView: View {
                     // Declared after onFoodNameCorrected, so it must appear
                     // here (before onSave) to match memberwise-init order.
                     morphNamespace: photoResultHandoffActive ? mealMorph : nil,
+                    // Hold the breakdown reveal until the genie warp lands, so
+                    // the warp plays first and the text doesn't type over a
+                    // mid-flight orb. Zero when the orb journey is off (Reduce
+                    // Motion / feature flag / non-DI) → today's instant reveal.
+                    revealDelay: orbJourneyActive ? AnalyzingOrbTiming.returnSettleSeconds : 0,
                     onSave:   { handleSaveTapped() },
                     onCancel: { handleCancelTapped() }
                 )
