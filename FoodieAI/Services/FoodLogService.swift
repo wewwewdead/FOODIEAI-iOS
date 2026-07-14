@@ -139,6 +139,13 @@ actor FoodLogService {
     ///   - we'd rather succeed at the user's stated goal (remove the log
     ///     from their day) than fail the whole operation over a
     ///     transient storage hiccup.
+    ///
+    /// Phase 23: the same stored photo can be shared — a meal saved to the
+    /// Vault reuses this log's path, and Quick Re-log reuses a source
+    /// log's path. So we delete via `deleteUnreferenced`, which removes a
+    /// storage object only when no `food_logs` or `vault_items` row still
+    /// points at it. Without this, deleting one entry breaks the photo of
+    /// its vault copy / re-logged sibling.
     func delete(_ log: FoodLog,
                 imageService: FoodImageService = FoodImageService()) async throws {
         try await delete(log.id)
@@ -148,7 +155,7 @@ actor FoodLogService {
         if let p = log.imageThumbPath, !p.isEmpty { paths.append(p) }
         if !paths.isEmpty {
             do {
-                try await imageService.delete(paths: paths)
+                try await imageService.deleteUnreferenced(paths: paths)
             } catch {
                 #if DEBUG
                 NSLog("[Delete] storage cleanup FAILED for %d path(s): %@",

@@ -108,7 +108,7 @@ struct SubscriptionInfoView: View {
             )
             comparisonRow(
                 label: "Cancel anytime",
-                free: "—",
+                free: "-",
                 pro: "Yes"
             )
         }
@@ -173,7 +173,7 @@ struct SubscriptionInfoView: View {
             Text("Most people never hit the free limit.")
                 .appFont(.title1)
                 .foregroundStyle(Color.ink)
-            Text("Pro is for the days you scan every meal — you get unlimited photo scans so you can keep going without rationing photos. The rest of the app (insights, recaps, FoodOS) is the same.")
+            Text("Pro is for the days you scan every meal, you get unlimited photo scans so you can keep going without rationing photos. The rest of the app (insights, recaps, FoodOS) is the same.")
                 .appFont(.bodyV2)
                 .foregroundStyle(Color.inkMute)
         }
@@ -191,10 +191,12 @@ struct SubscriptionInfoView: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             statusRow(label: "Plan", value: "Pro")
             // Pro reads as unlimited — never expose the silent safety cap
-            // as "X of N". Fall back to the count only if the server
-            // hasn't reported the unlimited flag (older build / offline).
+            // as "X of N". Gate on tier, not just the server `isUnlimited`
+            // flag: this block only renders for Pro, and a Pro response that
+            // omits the flag must still read "Unlimited" (the flag defaults
+            // false), never the count.
             statusRow(label: "Today",
-                      value: subscriptions.isUnlimited
+                      value: (subscriptions.isUnlimited || subscriptions.tier == .pro)
                           ? "Unlimited"
                           : "\(subscriptions.scansUsedToday) of \(subscriptions.dailyLimit) scans")
             if let expiry = subscriptions.proExpiresAt {

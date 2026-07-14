@@ -61,7 +61,7 @@ struct MoodPulseSheet: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Skip — don't record a mood")
+                .accessibilityLabel("Skip, don't record a mood")
                 .padding(.bottom, AppSpacing.md)
             }
             .frame(maxWidth: .infinity)

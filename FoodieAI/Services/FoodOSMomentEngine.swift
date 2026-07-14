@@ -24,7 +24,7 @@ struct FoodOSMoment: Equatable {
         case nudge         // small, opt-in suggestion based on pattern
         case celebration   // consistency / logging cadence improved
         case experiment    // small, safe, time-boxed prompt
-        case reflection    // gentle fallback — calm, never empty
+        case reflection    // gentle fallback, calm, never empty
         case revelation    // uncanny cross-variable connection
     }
 
@@ -62,6 +62,17 @@ struct FoodOSMoment: Equatable {
     /// non-value branches don't need to spell out `reveal: nil`.
     let reveal: Reveal?
 
+    /// The engine's structured subtype key for a `.revelation` moment
+    /// (e.g. "timeOfDay:morning", "macroTrend:protein") set at construction
+    /// straight from the paired-belief candidate's `repeatKey`. When present it
+    /// makes `revelationRepeatKey` / `momentTag` deterministic instead of
+    /// reverse-engineering the subtype from display copy — a copy tweak used to
+    /// be able to silently re-route feedback to a different learning bucket.
+    /// Optional + defaulted: moments (and tests) that don't set it fall back to
+    /// the copy-based derivation, so the struct stays tag-agnostic unless the
+    /// engine opts in.
+    let authoritativeRepeatKey: String?
+
     init(kind: Kind,
          title: String,
          body: String?,
@@ -70,7 +81,8 @@ struct FoodOSMoment: Equatable {
          actionLabel: String?,
          priorityScore: Double,
          generatedAt: Date,
-         reveal: Reveal? = nil) {
+         reveal: Reveal? = nil,
+         authoritativeRepeatKey: String? = nil) {
         self.kind = kind
         self.title = title
         self.body = body
@@ -80,6 +92,7 @@ struct FoodOSMoment: Equatable {
         self.priorityScore = priorityScore
         self.generatedAt = generatedAt
         self.reveal = reveal
+        self.authoritativeRepeatKey = authoritativeRepeatKey
     }
 }
 
@@ -599,6 +612,7 @@ enum FoodOSMomentEngine {
         struct Adjusted {
             let moment: FoodOSMoment
             let index: Int
+            let delta: Double
             let adjustedScore: Double
         }
         var adjusted: [Adjusted] = []
@@ -611,12 +625,26 @@ enum FoodOSMomentEngine {
             adjusted.append(Adjusted(
                 moment: moment,
                 index: i,
+                delta: delta,
                 adjustedScore: moment.priorityScore + delta
             ))
         }
         adjusted.sort { a, b in
             if a.adjustedScore != b.adjustedScore {
                 return a.adjustedScore > b.adjustedScore
+            }
+            // Tie on adjusted score — let the bandit's intent break it. The
+            // engine's tiers are 10 pts apart, so a +10 boost lands EXACTLY on
+            // the adjacent-higher tier's score; without this the original index
+            // won the tie and the boost was silently inert (never promoted, and
+            // a −10 suppress never yielded). Breaking ties by delta makes the
+            // documented "flip one adjacent tier" behavior real, and never
+            // leapfrogs two tiers (a tie only wins the tier it equals). With an
+            // all-zero adjustment vector every delta is equal, so this falls
+            // straight through to the index tie-break and reproduces the
+            // priority-chain order byte-for-byte.
+            if a.delta != b.delta {
+                return a.delta > b.delta
             }
             return a.index < b.index
         }
@@ -718,7 +746,8 @@ enum FoodOSMomentEngine {
                 after:        candidate.afterValue,
                 unit:         candidate.unit,
                 deltaPercent: candidate.deltaPercent
-            )
+            ),
+            authoritativeRepeatKey: candidate.repeatKey
         )
         guard Self.passesSafety(moment) else { return nil }
         return (moment, candidate.repeatKey)
@@ -765,7 +794,8 @@ enum FoodOSMomentEngine {
             confidence:   belief.confidence,
             actionLabel:  nil,
             priorityScore: 95 + min(belief.surpriseScore * 10, 4),
-            generatedAt:   now
+            generatedAt:   now,
+            authoritativeRepeatKey: belief.repeatKey
         )
     }
 
@@ -905,7 +935,7 @@ enum FoodOSMomentEngine {
             return FoodOSMoment(
                 kind:         .reflection,
                 title:        "Some recent meals have felt tougher.",
-                body:         "Worth noticing — patterns shift slowly and gently.",
+                body:         "Worth noticing, patterns shift slowly and gently.",
                 evidenceLine: evidence,
                 confidence:   confidence,
                 actionLabel:  nil,

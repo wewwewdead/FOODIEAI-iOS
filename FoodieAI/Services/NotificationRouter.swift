@@ -69,9 +69,13 @@ extension NotificationRouter: UNUserNotificationCenterDelegate {
             AnalyticsService.shared.track(
                 AnalyticsService.Event.notificationOpened, ["kind": kind ?? "unknown"])
             switch kind {
-            case "reminder", "under_calorie_reminder", "comeback":
-                // Meal nudge, streak/under-calorie nudge, and the dormancy
-                // comeback all want the user on Home/Capture so they can log.
+            case "reminder", "calorie_balance_reminder", "under_calorie_reminder", "comeback":
+                // Meal nudge, the nightly goal-aware calorie/streak nudge, and
+                // the dormancy comeback all want the user on Home/Capture so
+                // they can log. `calorie_balance_reminder` is the kind the
+                // scheduler actually emits (NotificationScheduler.scheduleCalorieBalanceReminder);
+                // `under_calorie_reminder` is kept only for stale notifications
+                // scheduled by pre-rename builds.
                 self.requestedTab = 0
             case "recap":
                 // Recap moved to the Insights tab (index 2).

@@ -107,7 +107,11 @@ enum ActivityBurnEstimator {
 ///      (breakfast 04–09, lunch 10–14, dinner 15–23 local).
 ///   2. **Meal-aware** — has the user already logged that meal today?
 ///      Inferred from each log's `eatenAt` hour (FoodLog has no meal-type
-///      column), the same windowing `EatingTimeInference` uses.
+///      column) via `MealSlot.forHour`. NOTE: these windows are deliberately
+///      NOT identical to `EatingTimeInference`'s — dinner here stretches to
+///      23:00 so a late meal still counts as "dinner" for a suggestion, while
+///      the reminder inference caps dinner at 21:00. Different jobs (logged
+///      coverage vs. reminder timing), so the two are intentionally separate.
 ///      - The current meal isn't logged yet  → suggest *that meal*,
 ///        sized to the calories left ("Dinner is still open").
 ///      - It's evening and every meal is logged but they're still under
@@ -274,7 +278,7 @@ enum MealSuggestionEngine {
         return Suggestion(
             slot: meal,
             headline: "\(meal.noun.capitalized) is still open",
-            detail: "You've got about \(budget) kcal left toward your \(goalWord) — "
+            detail: "You've got about \(budget) kcal left toward your \(goalWord), "
                 + "room for \(sizeWord(budget)) \(meal.noun).",
             ideas: ideas,
             proteinNote: proteinNote(proteinFocus: proteinFocus,
@@ -295,7 +299,7 @@ enum MealSuggestionEngine {
             slot: .snack,
             headline: "You're almost at your goal",
             detail: "About \(budget) kcal to go and you haven't logged "
-                + "\(meal.noun) yet — a light bite covers it.",
+                + "\(meal.noun) yet, a light bite covers it.",
             ideas: ideas,
             proteinNote: proteinNote(proteinFocus: proteinFocus,
                                      proteinRemaining: proteinRemaining),
@@ -388,7 +392,7 @@ enum MealSuggestionEngine {
                                     proteinRemaining: Double) -> String? {
         guard proteinFocus, proteinRemaining.isFinite else { return nil }
         let g = Int(proteinRemaining.rounded())
-        return "You're about \(g)g under on protein too — these lean protein-forward."
+        return "You're about \(g)g under on protein too, these lean protein-forward."
     }
 
     /// A one-line, budget-only nudge for *glanceable* surfaces (the Home
@@ -561,7 +565,7 @@ enum DayCalorieStanding {
                     headline: "\(under) cal under your goal",
                     headlineImage: runningLow ? "target" : "checkmark.seal.fill",
                     recommendation: runningLow
-                        ? "A big gap — eating too little can stall fat loss. A protein-forward bite helps."
+                        ? "A big gap, eating too little can stall fat loss. A protein-forward bite helps."
                         : "Right where a fat-loss day should land.",
                     recommendationImage: runningLow ? "fork.knife" : "arrow.down.right.circle.fill",
                     isWarning: false
@@ -738,13 +742,13 @@ enum CalorieTrendCoach {
         let days = verdict.loggedDays
         switch verdict.drift {
         case .underMaintain:
-            return "Heads up — across most of your last \(days) logged days you've landed about \(perDay) kcal/day under your maintenance calories. Keep that up and you'll slowly lose weight. If holding steady is the aim, a bit more at dinner does it — or switch your goal to 'lose' so the targets match."
+            return "Heads up, across most of your last \(days) logged days you've landed about \(perDay) kcal/day under your maintenance calories. Keep that up and you'll slowly lose weight. If holding steady is the aim, a bit more at dinner does it, or switch your goal to 'lose' so the targets match."
         case .overMaintain:
-            return "Over your last \(days) logged days you've run about \(perDay) kcal/day above maintenance. That trends toward slow weight gain. A slightly lighter plate, or a few more steps, brings it back to level — no crash needed."
+            return "Over your last \(days) logged days you've run about \(perDay) kcal/day above maintenance. That trends toward slow weight gain. A slightly lighter plate, or a few more steps, brings it back to level, no crash needed."
         case .loseStalled:
             return "You're aiming to lose, but across your last \(days) logged days you've eaten about \(perDay) kcal/day above your goal, so the deficit that drives weight loss hasn't really opened up. Even a small trim or a daily walk restarts it."
         case .loseUndereating:
-            return "You've been eating about \(perDay) kcal/day under your goal lately. Big deficits can backfire — energy dips and muscle gets burned alongside fat. A little more food, especially protein, actually helps the loss stick."
+            return "You've been eating about \(perDay) kcal/day under your goal lately. Big deficits can backfire, energy dips and muscle gets burned alongside fat. A little more food, especially protein, actually helps the loss stick."
         case .gainStalled:
             return "To build you need a surplus, but across your last \(days) logged days you've come in about \(perDay) kcal/day under your target. An extra snack or a bigger dinner gets the gain moving again."
         }

@@ -226,8 +226,10 @@ struct DayDetailSheet: View {
     /// the tap is fully owned by the card itself.
     private func handleDelete(_ log: FoodLog) {
         Task {
+            var deleted = false
             do {
                 try await logService.delete(log)
+                deleted = true
             } catch {
                 #if DEBUG
                 NSLog("[DayDetail] delete FAILED for %@: %@",
@@ -235,6 +237,12 @@ struct DayDetailSheet: View {
                 #endif
             }
             await MainActor.run {
+                // Deletion is a food-log change — notify the app (Home "left
+                // today" card, widget, Mirror) so they refresh, not just this
+                // sheet's parent. Posted on the main actor for safe delivery.
+                if deleted {
+                    NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
+                }
                 onDeleted?()
                 // If the bucket had a single log, the parent's refresh
                 // will repopulate to an empty bucket; close the sheet

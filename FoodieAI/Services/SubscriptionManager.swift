@@ -57,6 +57,13 @@ final class SubscriptionManager: ObservableObject {
     @Published private(set) var isPurchasing: Bool = false
     @Published var lastPurchaseError: String?
 
+    /// Whether THIS user is eligible for the yearly plan's introductory free
+    /// trial. StoreKit tracks eligibility per subscription group / Apple ID —
+    /// false once a trial has been consumed, and false when no intro offer is
+    /// configured yet (i.e. before the App Store Connect offer exists, the
+    /// paywall silently falls back to the plain price). Phase 23.
+    @Published private(set) var isEligibleForYearlyTrial = false
+
     var scansRemainingToday: Int {
         max(0, dailyLimit - scansUsedToday)
     }
@@ -89,6 +96,7 @@ final class SubscriptionManager: ObservableObject {
     /// `Transaction.updates`, and syncs entitlement from the server.
     func bootstrap() async {
         await loadProducts()
+        await refreshTrialEligibility()
         if updatesTask == nil {
             updatesTask = Task.detached { [weak self] in
                 for await update in Transaction.updates {
@@ -157,6 +165,84 @@ final class SubscriptionManager: ObservableObject {
     var monthlyProduct: Product? { products.first { $0.id == Self.monthlyProductID } }
     var yearlyProduct:  Product? { products.first { $0.id == Self.yearlyProductID  } }
 
+    /// The yearly plan's introductory offer (e.g. a 3-day free trial), if
+    /// configured in App Store Connect / the local .storekit. nil until the
+    /// offer exists — callers must degrade gracefully to the plain price.
+    var yearlyIntroOffer: Product.SubscriptionOffer? {
+        yearlyProduct?.subscription?.introductoryOffer
+    }
+
+    /// True when the yearly intro offer is specifically a free trial (vs a
+    /// discounted intro price) AND the user is eligible for it.
+    var offersYearlyFreeTrial: Bool {
+        isEligibleForYearlyTrial && yearlyIntroOffer?.paymentMode == .freeTrial
+    }
+
+    /// Recompute yearly-trial eligibility. Cheap StoreKit call; safe to run
+    /// after products load and whenever the paywall appears.
+    func refreshTrialEligibility() async {
+        guard let sub = yearlyProduct?.subscription else {
+            isEligibleForYearlyTrial = false
+            #if DEBUG
+            NSLog("[Trial] yearlyProduct/subscription is nil — products loaded: %d (%@)",
+                  products.count, products.map { $0.id }.joined(separator: ","))
+            #endif
+            return
+        }
+        guard let offer = sub.introductoryOffer else {
+            isEligibleForYearlyTrial = false
+            #if DEBUG
+            NSLog("[Trial] yearly product HAS NO introductoryOffer — the App Store Connect offer hasn't propagated yet (or you're not in sandbox/TestFlight). Prices load; trial won't show until the offer reaches StoreKit.")
+            #endif
+            return
+        }
+        let eligible = await sub.isEligibleForIntroOffer
+        isEligibleForYearlyTrial = eligible
+        #if DEBUG
+        NSLog("[Trial] introductoryOffer FOUND: paymentMode=%@ period=%d unit=%@ eligible=%@ → %@",
+              String(describing: offer.paymentMode),
+              offer.period.value,
+              String(describing: offer.period.unit),
+              eligible ? "true" : "false",
+              (eligible && offer.paymentMode == .freeTrial) ? "TRIAL WILL SHOW" : "trial hidden")
+        #endif
+    }
+
+    /// "3-day" / "1-week" style adjective label for an intro offer's period.
+    static func trialDurationText(_ offer: Product.SubscriptionOffer) -> String {
+        let n = offer.period.value
+        return "\(n)-\(periodUnitWord(offer.period.unit))"
+    }
+
+    /// "3 days" / "1 week" style noun phrase for an intro offer's period.
+    static func trialLengthPhrase(_ offer: Product.SubscriptionOffer) -> String {
+        let n = offer.period.value
+        let unit = periodUnitWord(offer.period.unit)
+        return "\(n) \(unit)\(n == 1 ? "" : "s")"
+    }
+
+    /// Approximate whole days in the trial period, for the timeline markers.
+    static func trialDayCount(_ offer: Product.SubscriptionOffer) -> Int {
+        let n = offer.period.value
+        switch offer.period.unit {
+        case .day:   return n
+        case .week:  return n * 7
+        case .month: return n * 30
+        case .year:  return n * 365
+        @unknown default: return n
+        }
+    }
+
+    private static func periodUnitWord(_ unit: Product.SubscriptionPeriod.Unit) -> String {
+        switch unit {
+        case .day:   return "day"
+        case .week:  return "week"
+        case .month: return "month"
+        case .year:  return "year"
+        @unknown default: return "day"
+        }
+    }
+
     // MARK: - Purchase / restore
 
     enum PurchaseOutcome {
@@ -164,15 +250,31 @@ final class SubscriptionManager: ObservableObject {
         case userCancelled
         case pending
         case failed(String)
+        /// StoreKit succeeded but our server refused the receipt: the user paid
+        /// and is now blocked. Distinct from `failed` so the funnel can flag a
+        /// validation outage separately from ordinary StoreKit errors.
+        case validationFailed(String)
     }
 
     func purchase(_ product: Product) async -> PurchaseOutcome {
         isPurchasing = true
         defer { isPurchasing = false }
         lastPurchaseError = nil
+        // Capture before the purchase — a successful yearly buy while eligible
+        // means the user is starting the free trial (StoreKit applies the
+        // intro offer automatically), which we report as `trial_started`.
+        let startingTrial = product.id == Self.yearlyProductID && offersYearlyFreeTrial
 
         do {
-            let result = try await product.purchase()
+            // Tag the purchase with the user's id so App Store Server
+            // Notifications V2 can map lifecycle events (trial→paid, expiry,
+            // refund) back to this account server-side even when the app is
+            // closed. Renewals inherit the same token as the original buy.
+            var options: Set<Product.PurchaseOption> = []
+            if let uid = await currentUserID() {
+                options.insert(.appAccountToken(uid))
+            }
+            let result = try await product.purchase(options: options)
             switch result {
             case .success(let verification):
                 switch verification {
@@ -181,13 +283,23 @@ final class SubscriptionManager: ObservableObject {
                     let ok = await validateOnServer(jws: jws)
                     await transaction.finish()
                     if ok {
-                        AnalyticsService.shared.track(
-                            AnalyticsService.Event.proPurchased, ["product": product.id])
+                        // Keep the funnel honest: starting a FREE trial isn't
+                        // revenue, so it fires `trial_started` only. A direct
+                        // (no-trial) purchase is real money → `pro_purchased`.
+                        // The trial→paid conversion is logged server-side as
+                        // `subscription_renewed` on the app-closed DID_RENEW.
+                        if startingTrial {
+                            AnalyticsService.shared.track(
+                                AnalyticsService.Event.trialStarted, ["product": product.id])
+                        } else {
+                            AnalyticsService.shared.track(
+                                AnalyticsService.Event.proPurchased, ["product": product.id])
+                        }
                         return .success
                     } else {
                         let msg = "Server couldn't verify the purchase. Try Restore."
                         lastPurchaseError = msg
-                        return .failed(msg)
+                        return .validationFailed(msg)
                     }
                 case .unverified(_, let err):
                     let msg = "Purchase couldn't be verified: \(err.localizedDescription)"
@@ -288,6 +400,18 @@ final class SubscriptionManager: ObservableObject {
         do {
             let session = try await client.auth.session
             return session.accessToken
+        } catch {
+            return nil
+        }
+    }
+
+    /// The signed-in user's id, used as StoreKit's `appAccountToken` so
+    /// server notifications can be attributed to this account. nil when not
+    /// signed in (purchase still proceeds, just without the mapping token).
+    private func currentUserID() async -> UUID? {
+        do {
+            let session = try await client.auth.session
+            return session.user.id
         } catch {
             return nil
         }

@@ -172,9 +172,9 @@ struct FoodPatternInsightService {
         case 2...3:
             return "You've logged \(foodName) \(belief.observations) times so far."
         case 4...6:
-            return "\(foodName) is becoming one of your regulars — \(belief.observations) logs."
+            return "\(foodName) is becoming one of your regulars, \(belief.observations) logs."
         default:
-            return "\(foodName) is a staple of your week — \(belief.observations) logs."
+            return "\(foodName) is a staple of your week, \(belief.observations) logs."
         }
     }
 

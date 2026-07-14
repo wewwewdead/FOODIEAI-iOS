@@ -93,7 +93,7 @@ struct QuantityClarificationSheet: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Keep the original analysis — looks about right")
+                    .accessibilityLabel("Keep the original analysis, looks about right")
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.top, AppSpacing.lg)

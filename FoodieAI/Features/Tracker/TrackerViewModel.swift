@@ -131,6 +131,10 @@ final class TrackerViewModel: ObservableObject {
     func deleteLog(_ log: FoodLog) async {
         do {
             try await logService.delete(log)
+            // Deletion is a food-log change like a save — tell the rest of the
+            // app (Home "left today" card, widget, Mirror) so they refresh
+            // instead of showing stale totals until the next app launch.
+            NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
         } catch {
             #if DEBUG
             NSLog("[Tracker] delete FAILED for %@: %@",

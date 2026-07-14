@@ -57,9 +57,14 @@ struct FoodieAIApp: App {
                 .environmentObject(profileStore)
                 .environmentObject(NotificationRouter.shared)
                 .environmentObject(FavoritesStore.shared)
+                .environmentObject(VaultStore.shared)
                 .environmentObject(subscriptions)
                 .task { await auth.bootstrap() }
                 .task { await subscriptions.bootstrap() }
+                // Resolve which Apple Search Ads keyword drove this install and
+                // attach it to analytics, so trial/purchase events are
+                // attributable per keyword. First-party, best-effort, once.
+                .task { await SearchAdsAttribution.syncOnLaunch() }
                 .onChange(of: auth.isSignedIn) { _, signedIn in
                     // Phase 17: kick the foreground orchestrator the
                     // first time we observe a signed-in user. Subsequent
@@ -76,6 +81,12 @@ struct FoodieAIApp: App {
                             // scan count from the server now that we
                             // have a JWT. Idempotent.
                             await subscriptions.refreshStatusFromServer()
+                            // Phase 23 — warm the Vault so `isInVault`
+                            // state is correct on the result screen and
+                            // Tracker rows without a per-view fetch.
+                            // Idempotent; fail-open if migration 022
+                            // hasn't run.
+                            await VaultStore.shared.loadIfNeeded()
                             await AppForegroundOrchestrator.shared
                                 .runOnForeground(caller: "auth.isSignedIn→true")
                         }
@@ -85,6 +96,9 @@ struct FoodieAIApp: App {
                         // the next sign-in re-hydrates from the right
                         // user.
                         profileStore.clear()
+                        // Phase 23 — drop the previous user's vault so
+                        // the next account doesn't briefly see it.
+                        VaultStore.shared.clear()
                     }
                 }
                 .onChange(of: scenePhase) { _, phase in
@@ -110,7 +124,6 @@ struct FoodieAIApp: App {
     @ViewBuilder
     private func ax5View(mode: String) -> some View {
         switch mode {
-        case "landing":  LandingView(onContinue: {})
         case "tracker":  TrackerView()
         case "profile":  ProfileView().environmentObject(auth)
         case "capture":  CaptureView()
@@ -272,12 +285,25 @@ struct RootView: View {
     /// half breath cycles of the logo animation.
     private static let minSplashDuration: UInt64 = 1_800_000_000
 
+    /// Device-level flag: has anyone ever signed in on this install? Set the
+    /// first time a session lands. When a returning user's session lapses
+    /// (expired + a failed token refresh — usually transient network), we send
+    /// them straight to sign-in instead of back through the full onboarding.
+    /// Genuine first installs (flag false) still get the value-first flow.
+    @AppStorage("auth.hasSignedInBefore") private var hasSignedInBefore = false
+
     var body: some View {
         Group {
             if shouldShowSplash {
                 LaunchView()
             } else if !auth.isSignedIn {
-                OnboardingFlow(vm: onboardingVM)
+                if hasSignedInBefore {
+                    // Returning user, session lapsed → "welcome back" sign-in,
+                    // NOT the onboarding quiz.
+                    SignInView(context: .returning)
+                } else {
+                    OnboardingFlow(vm: onboardingVM)
+                }
             } else if let profile = profileStore.profile {
                 if profile.onboardingCompletedAt != nil
                     || OnboardingViewModel.hasLocalFallbackGate() {
@@ -304,9 +330,15 @@ struct RootView: View {
             minSplashElapsed = true
         }
         .onChange(of: auth.isSignedIn) { _, signedIn in
-            // Sign-out → reset the persisted onboarding model so the next
-            // account starts from the hero rather than inheriting answers.
-            if !signedIn { onboardingVM.reset() }
+            if signedIn {
+                // Remember this device has a real account, so a future lapsed
+                // session routes to sign-in instead of onboarding.
+                hasSignedInBefore = true
+            } else {
+                // Sign-out → reset the persisted onboarding model so the next
+                // account starts from the hero rather than inheriting answers.
+                onboardingVM.reset()
+            }
         }
         // Smooth cross-fade when auth state flips, so we don't pop hard from
         // the launch screen into a tab bar.
@@ -684,6 +716,10 @@ struct MainTabView: View {
             }
             Haptics.tap()
         }
+        // Phase 23 — host the save-to-vault celebration above every tab so
+        // the flight + confirmation fire from the result screen AND the
+        // Tracker meal cards.
+        .vaultCelebrationHost()
     }
 
     private func selectTab(_ rawValue: Int) {

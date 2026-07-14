@@ -114,6 +114,53 @@ actor FoodImageService {
         for p in paths { signedURLCache.removeValue(forKey: p) }
     }
 
+    /// Delete each path from storage ONLY when no `food_logs` or
+    /// `vault_items` row still references it (in `image_path` or
+    /// `image_thumb_path`). Two rows can point at the same stored photo —
+    /// a meal saved to the Vault reuses the log's path, and Quick Re-log
+    /// reuses the source's path — so a blind delete would break the photo
+    /// for the sibling that still needs it.
+    ///
+    /// Call AFTER the owning DB row is deleted, so it no longer counts as
+    /// a reference. RLS scopes the counts to the current user. Safe by
+    /// construction: if a reference check can't be determined (network
+    /// error), the path is *kept* — a harmless orphan beats deleting a
+    /// photo another entry still shows.
+    func deleteUnreferenced(paths: [String]) async throws {
+        let candidates = paths.filter { !$0.isEmpty }
+        guard !candidates.isEmpty else { return }
+
+        var orphaned: [String] = []
+        for path in candidates {
+            let stillReferenced = (try? await isReferenced(path)) ?? true
+            if stillReferenced {
+                #if DEBUG
+                NSLog("[Delete] keeping shared image (still referenced): %@", path)
+                #endif
+            } else {
+                orphaned.append(path)
+            }
+        }
+        try await delete(paths: orphaned)
+    }
+
+    /// True if any `food_logs` or `vault_items` row references `path` in
+    /// either image column.
+    private func isReferenced(_ path: String) async throws -> Bool {
+        if try await referenceCount(in: "food_logs", path: path) > 0 { return true }
+        if try await referenceCount(in: "vault_items", path: path) > 0 { return true }
+        return false
+    }
+
+    private func referenceCount(in table: String, path: String) async throws -> Int {
+        let response = try await client
+            .from(table)
+            .select("id", head: true, count: .exact)
+            .or("image_path.eq.\(path),image_thumb_path.eq.\(path)")
+            .execute()
+        return response.count ?? 0
+    }
+
     /// Short-lived signed URL for displaying a private image.
     func signedUrl(for path: String, expiresIn seconds: Int = 60 * 60) async throws -> URL {
         try await client.storage

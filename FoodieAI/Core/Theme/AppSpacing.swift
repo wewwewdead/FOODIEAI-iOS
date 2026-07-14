@@ -26,11 +26,11 @@ enum AppSpacing {
     // The new `space3` (12pt) is genuinely new; everything else aliases.
     static let space1: CGFloat = 4    // = xs
     static let space2: CGFloat = 8    // = sm
-    static let space3: CGFloat = 12   // (new step — between sm and md)
+    static let space3: CGFloat = 12   // (new step, between sm and md)
     static let space4: CGFloat = 16   // = md
     static let space5: CGFloat = 24   // = lg
     static let space6: CGFloat = 32   // = xl
-    static let space7: CGFloat = 48   // = xl2 — section-to-section breathing room
+    static let space7: CGFloat = 48   // = xl2, section-to-section breathing room
     static let space8: CGFloat = 64   // = xl3
     static let space9: CGFloat = 96   // = xl4
 }

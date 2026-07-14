@@ -65,7 +65,7 @@ private struct BrandCardButtonStyle<Content: View>: ButtonStyle {
                 Text("Why I Built This").appFont(.displayMD).foregroundStyle(Color.textPrimary)
                 Text("After tracking macros by hand for years, I wanted a phone-camera shortcut. Foodie is that shortcut.")
                     .appFont(.body).foregroundStyle(Color.textBody)
-                Text("→ Tap me — I'm a button")
+                Text("→ Tap me, I'm a button")
                     .appFont(.body)
                     .fontWeight(.bold)
                     .foregroundStyle(Color.greenCalorie)

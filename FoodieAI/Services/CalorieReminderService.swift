@@ -120,6 +120,16 @@ final class CalorieReminderService {
         do {
             let logs = try await logsTask
             let profile = try await profileTask
+            // Causal Nudges (NOVEL_DIRECTIONS Idea 3): score any nudge whose
+            // outcome window has closed against today's meal timestamps and fold
+            // the result into the uplift model. Reuses the logs already fetched
+            // here, so it adds zero egress.
+            let resolved = await NudgeOutcomeTracker.shared.resolve(
+                logDates: logs.map(\.eatenAt), now: now)
+            for r in resolved {
+                await NudgeUpliftStore.shared.record(
+                    kind: r.kind, context: r.context, sent: r.sent, logged: r.logged)
+            }
             let consumed = LocalDailyTotals.sum(logs).totalCalories
             let status = DailyCalorieGoalStatus.compute(
                 consumed: consumed,
@@ -238,6 +248,7 @@ final class CalorieReminderService {
                     status: status, direction: direction, weightKg: weightKg,
                     streakAtRiskDays: atRisk,
                     notificationsEnabled: notifsEnabled,
+                    canDecideUplift: true,      // fetch path has full context
                     now: now, timeZone: timeZone
                 )
             case .unavailable:
@@ -274,6 +285,7 @@ final class CalorieReminderService {
         await applyReminderDecision(
             status: status, direction: nil, weightKg: nil,
             streakAtRiskDays: 0, notificationsEnabled: true,
+            canDecideUplift: false,     // direct-data path only honors a committed decision
             now: now, timeZone: timeZone
         )
     }
@@ -293,6 +305,7 @@ final class CalorieReminderService {
                                        weightKg: Double?,
                                        streakAtRiskDays: Int,
                                        notificationsEnabled: Bool,
+                                       canDecideUplift: Bool,
                                        now: Date,
                                        timeZone: TimeZone) async {
         // Respect the in-app master toggle — OS permission alone isn't consent.
@@ -320,12 +333,78 @@ final class CalorieReminderService {
             return
         }
 
+        // Causal Nudges (NOVEL_DIRECTIONS Idea 3): let the learned uplift policy
+        // gate delivery. Fail-open — this can only SUPPRESS a reminder the tone
+        // logic already wanted to send, never create one. Committed once per day
+        // so repeated recomputes don't re-randomize and toggle the reminder.
+        if await upliftWithholds(canDecide: canDecideUplift,
+                                 streakAtRiskDays: streakAtRiskDays,
+                                 now: now, timeZone: timeZone) {
+            scheduler.cancelUnderCalorieReminder()
+            return
+        }
+
         await scheduler.scheduleCalorieBalanceReminder(
             tone: tone,
             streakAtRiskDays: streakAtRiskDays,
             now: now,
             timeZone: timeZone
         )
+    }
+
+    /// Causal-Nudges gate. Returns true when the learned uplift policy says to
+    /// withhold today's calorie reminder. Fail-open: only ever returns true
+    /// (suppress), and only for a committed/decided withhold. `canDecide` is
+    /// true on the fetch path (full context available to make a fresh decision);
+    /// the direct-data path only honors an already-committed decision.
+    private func upliftWithholds(canDecide: Bool,
+                                 streakAtRiskDays: Int,
+                                 now: Date, timeZone: TimeZone) async -> Bool {
+        let dayKey = Self.dayKey(now, timeZone)
+        let tracker = NudgeOutcomeTracker.shared
+        if let committed = await tracker.todaysDecision(kind: .calorieBalance, dayKey: dayKey) {
+            return committed == false
+        }
+        guard canDecide else { return false }   // no decision yet → never suppress
+        let ctx = NudgeContext(
+            dayPart: NudgeContext.dayPart(forHour: Self.inAppReminderStartHour),
+            isWeekend: Self.isWeekend(now, timeZone),
+            streakAtRisk: streakAtRiskDays >= 2
+        )
+        let decision = await NudgeUpliftStore.shared.decision(
+            for: .calorieBalance, context: ctx, controlRate: 0.15,
+            roll: Double.random(in: 0..<1), coin: Double.random(in: 0..<1))
+        await tracker.commit(
+            kind: .calorieBalance, context: ctx, dayKey: dayKey,
+            sent: decision.shouldSend,
+            firedAt: Self.fireDate(now: now, timeZone: timeZone), windowHours: 2)
+        #if DEBUG
+        NSLog("[CausalNudge] calorieBalance %@ dayKey=%@ (reason=%@)",
+              decision.shouldSend ? "SEND" : "WITHHOLD", dayKey, "\(decision)")
+        #endif
+        return decision.shouldSend == false
+    }
+
+    // MARK: - Causal Nudges helpers
+
+    private static func dayKey(_ date: Date, _ timeZone: TimeZone) -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let c = cal.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    private static func isWeekend(_ date: Date, _ timeZone: TimeZone) -> Bool {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        return cal.isDateInWeekend(date)
+    }
+
+    private static func fireDate(now: Date, timeZone: TimeZone) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        return cal.date(bySettingHour: inAppReminderStartHour,
+                        minute: 0, second: 0, of: now) ?? now
     }
 
     /// Map today's status + goal direction to the evening reminder tone, or
@@ -347,7 +426,7 @@ final class CalorieReminderService {
         // OVER (surplus)
         if status.exceededBy > tol {
             switch direction ?? .maintain {
-            case .gain:            return nil // surplus is the plan — no nudge
+            case .gain:            return nil // surplus is the plan, no nudge
             case .lose, .maintain: return .overMove(exceededBy: status.exceededBy,
                                                     weightKg: weightKg)
             }
@@ -356,7 +435,7 @@ final class CalorieReminderService {
         // UNDER (deficit)
         if status.remaining > tol {
             switch direction ?? .maintain {
-            case .lose:     return nil // deficit is the plan — don't nag to eat
+            case .lose:     return nil // deficit is the plan, don't nag to eat
             case .maintain: return .underMaintain(remaining: status.remaining)
             case .gain:     return .underGain(remaining: status.remaining)
             }

@@ -57,11 +57,6 @@ struct CaptureView: View {
     /// analyzing hero. Runtime toggle; always bypassed under Reduce Motion (the
     /// in-card aura then carries the analyzing state). See `AnalyzingOrbJourney`.
     @AppStorage("orbNotchJourneyEnabled") private var orbNotchJourneyEnabled = true
-    /// Analyzing animation: OFF = the Metal genie-warp shader + orb in the
-    /// Dynamic Island (the default). ON = the experimental GPU particle-fluid
-    /// ("dust") simulation. Kept behind the flag so it can be re-enabled, but
-    /// the genie warp is the shipping look. See `Genie.metal` / `FluidParticleView`.
-    @AppStorage("sphFluidEnabled") private var sphFluidEnabled = false
     /// Single namespace shared by the capture-side photo and the result-
     /// screen meal photo. Declared on the parent that hosts BOTH the
     /// `emptyOrPickedFlow` and `resultFlow` branches — it must live above
@@ -80,10 +75,26 @@ struct CaptureView: View {
     /// `showingRecentMeals` but with the favorites filter applied so the
     /// user sees only hearted meals.
     @State private var showingFavoriteMeals = false
+    /// Phase 23 — Vault browser presentation flag. Distinct from the
+    /// recent/favorites pickers: the Vault is the durable saved-foods
+    /// library, sourced from `vault_items` rather than recent logs.
+    @State private var showingVault = false
+    /// Set when the user taps "Add → Scan a new meal" in the Vault; the
+    /// scan is kicked off in the sheet's `onDismiss` (can't present the
+    /// picker while the vault sheet is still dismissing).
+    @State private var pendingScanAfterVault = false
+    /// Vault size the user has already seen. When the live count exceeds it,
+    /// the top-bar Vault pill surfaces an "unseen" badge + glow to draw the
+    /// eye; opening the vault marks the current count as seen.
+    @AppStorage("vault.lastSeenCount") private var lastSeenVaultCount = 0
     /// Observed so the favorite-shortcut affordance hides itself the
     /// moment the user un-hearts every meal — no stale "Quick log
     /// favorite" link sitting on Home with no targets.
     @StateObject private var favoritesStore = FavoritesStore.shared
+    /// Phase 23 — observed so the "Vault" quick-log chip appears/hides
+    /// with vault contents and the result-screen button reflects live
+    /// membership.
+    @StateObject private var vaultStore = VaultStore.shared
     /// Phase 16 — one-time coach picker after the user's first save.
     /// Driven by `CoachPickerOnboardingSheet.didSee`; flipped on close
     /// so subsequent saves never re-present.
@@ -589,8 +600,7 @@ struct CaptureView: View {
             palette: foodPalette,
             isPro: subscriptions.tier == .pro,
             isActive: isActive,
-            enabled: orbJourneyActive,
-            useFluid: sphFluidEnabled
+            enabled: orbJourneyActive
         )
         // Phase 15 — Quick Re-log picker sheet.
         .sheet(isPresented: $showingRecentMeals) {
@@ -611,21 +621,37 @@ struct CaptureView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
+        // Phase 23 — Vault browser. Re-logs a durable saved food into
+        // today via the same insert engine as Quick Re-log.
+        .onChange(of: showingVault) { _, showing in
+            // Opening (or closing) the vault marks the current count as seen,
+            // so the pill's "unseen" badge + glow rest.
+            if showing { lastSeenVaultCount = vaultStore.totalCount }
+        }
+        .sheet(isPresented: $showingVault, onDismiss: {
+            // Re-mark seen on close so anything added while browsing (e.g.
+            // pick-from-logs) doesn't re-trigger the badge.
+            lastSeenVaultCount = vaultStore.totalCount
+            // If the user chose "Scan a new meal", start the scan now that
+            // the sheet is gone.
+            if pendingScanAfterVault {
+                pendingScanAfterVault = false
+                requestScan()
+            }
+        }) {
+            VaultSheet(
+                onPicked: { picked in
+                    Task { await viewModel.relogFromVault(picked) }
+                },
+                onScanNew: { pendingScanAfterVault = true }
+            )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
         // Phase 16 — one-time coach picker after the first save. Fires
         // on the .saved transition; the gate is the local UserDefaults
         // flag inside `CoachPickerOnboardingSheet`. We don't fire on
         // re-logs (which also flip into `.saved` cousins) because
-        // `state.isSaved` is true only for the analyze→save path —
-        // a re-log goes through `relogToast`, not the `.saved` state.
-        .onChange(of: viewModel.state.isSaved) { _, isSaved in
-            guard isSaved, !CoachPickerOnboardingSheet.didSee else { return }
-            // Defer so the SavedConfirmationSheet's appear animation
-            // doesn't race with our sheet present. SwiftUI can only
-            // present one sheet at a time; we let the success sheet
-            // dismiss first via discardSaved, then ride that exit.
-            // Implementation: trigger after the user closes the
-            // success sheet (state goes saved → idle).
-        }
         .onChange(of: viewModel.state.image != nil) { _, hasImage in
             // First-scan magic — kicks in only when a lifetime-empty
             // user picks their first image. `rhythm.totalLoggedDays`
@@ -831,7 +857,7 @@ struct CaptureView: View {
         // done.
         .confirmationDialog(
             viewModel.questCompleted
-                ? "Quest done — want to log more?"
+                ? "Quest done, want to log more?"
                 : "How would you like to log it?",
             isPresented: $showingQuestActionSheet,
             titleVisibility: .visible
@@ -1029,11 +1055,33 @@ struct CaptureView: View {
 
     // MARK: - Top bar (wordmark + avatar)
 
+    /// Kick off the save-to-vault celebration (app-level, so the same flight
+    /// + modal fire from the Tracker too) and perform the save. Idempotent —
+    /// the save no-ops if already vaulted; the celebration debounces itself.
+    private func beginVaultSave(image: UIImage?, name: String) {
+        VaultCelebration.shared.celebrate(image: image, foodName: name, from: nil)
+        Task { await viewModel.saveCurrentToVault() }
+    }
+
     private var topBar: some View {
         HStack(alignment: .center) {
             Text("foodie.")
                 .appFont(.title1)
                 .foregroundStyle(Color.ink)
+
+            // Phase 23 — permanent Vault entry, next to the wordmark.
+            // A pantry-cabinet tile: the Vault is the shelf of go-to
+            // meals you keep on hand. Always visible so the library is
+            // discoverable even when empty (the sheet's empty state
+            // explains how to fill it; its setup state flags a missing
+            // migration).
+            VaultNavButton(
+                count: vaultStore.totalCount,
+                hasUnseen: vaultStore.totalCount > lastSeenVaultCount
+            ) {
+                showingVault = true
+            }
+            .vaultPillTarget()
 
             Spacer()
 
@@ -1125,7 +1173,7 @@ struct CaptureView: View {
                         .foregroundStyle(Color.brand)
                 }
             }
-            Text("Snap a meal — we'll break it down.")
+            Text("Snap a meal, we'll break it down.")
                 .appFont(.bodyEmphasis)
                 .foregroundStyle(Color.inkMute)
         }
@@ -1534,6 +1582,8 @@ struct CaptureView: View {
                         showingFavoriteMeals = true
                     }
                 }
+                // Vault has a permanent entry in the top bar (see topBar),
+                // so it isn't duplicated here among the re-log chips.
             }
         }
     }
@@ -1560,7 +1610,7 @@ struct CaptureView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(title) — re-log a meal without a photo")
+        .accessibilityLabel("\(title), re-log a meal without a photo")
     }
 
     private var hintChip: some View {
@@ -1693,10 +1743,27 @@ struct CaptureView: View {
                     // Motion / feature flag / non-DI) → today's instant reveal.
                     revealDelay: orbJourneyActive ? AnalyzingOrbTiming.returnSettleSeconds : 0,
                     onSave:   { handleSaveTapped() },
-                    onCancel: { handleCancelTapped() }
+                    onCancel: { handleCancelTapped() },
+                    // Phase 23 — Save to Vault sits alongside "Save to
+                    // today." Independent of logging; membership is read
+                    // live off VaultStore so the button flips to "Saved
+                    // to Vault" the moment it lands.
+                    onSaveToVault: vaultStore.isUnavailable
+                        ? nil
+                        : {
+                            beginVaultSave(
+                                image: payload.image,
+                                name: viewModel.editedFoodName
+                                    ?? payload.response.analysis.food ?? "Meal"
+                            )
+                        },
+                    isInVault: vaultStore.isInVault(
+                        foodName: viewModel.editedFoodName
+                            ?? payload.response.analysis.food ?? ""
+                    )
                 )
                 if let err = saveFailedError {
-                    Text(err.localizedDescription)
+                    Text(CaptureViewModel.friendlySaveMessage(for: err))
                         .appFont(.bodyEmphasis)
                         .foregroundStyle(Color.error)
                         .multilineTextAlignment(.center)
@@ -1888,19 +1955,19 @@ struct CaptureView: View {
     /// Title / body / action labels for the calorie-goal warning dialog.
     /// Static so `CalorieScanWarningModifier` can reuse them without a
     /// view-instance reference.
-    fileprivate static func scanWarningTitle(_ kind: ScanWarningKind) -> String {
+    static func scanWarningTitle(_ kind: ScanWarningKind) -> String {
         switch kind {
         case .reached:     return "You've reached today's goal."
         case .approaching: return "You're close to today's goal."
         }
     }
 
-    fileprivate static func scanWarningMessage(_ kind: ScanWarningKind) -> String {
+    static func scanWarningMessage(_ kind: ScanWarningKind) -> String {
         switch kind {
         case .reached:
-            return "Log gently from here — this one will tip you over."
+            return "Log gently from here, this one will tip you over."
         case .approaching:
-            return "Still room for this one — just a friendly heads up."
+            return "Still room for this one, just a friendly heads up."
         }
     }
 
@@ -1923,7 +1990,7 @@ struct CaptureView: View {
         // particular. "View today" is the natural follow-up.
         if lifetimeDays <= 1 {
             return NextStepHint(
-                message: "Nice — your first day is started.",
+                message: "Nice, your first day is started.",
                 actionLabel: "View today",
                 action: .viewTracker
             )
@@ -2022,2908 +2089,437 @@ struct CaptureView: View {
     }
 }
 
-// MARK: - Breathing camera halo
 
-/// Phase 14 delight: the empty-state camera icon with a gentle breathing
-/// scale loop on the brand-soft halo and a subtle counter-bob on the
-/// camera glyph itself. The motion is slow (2.4s period) and small in
-/// amplitude (±4%) so it feels alive without being distracting.
+
+
+
+/// Phase 23 — the Vault entry in the Home top bar.
 ///
-/// Animation kicks off on first appear via `.appBreathing` (an autoreversing
-/// `.easeInOut` repeating forever, defined in `AppAnimation.swift`).
-private struct BreathingCameraHalo: View {
-    @State private var breathing: Bool = false
+/// A labeled pill (two-tone archive-box glyph + "Vault") in the brand's
+/// chip family — same Capsule + hairline as `quickLogChip` / the scan
+/// chip — so it reads as its own control sitting beside the wordmark, not
+/// as part of it. Lifted a touch above the flat chips (warm gradient fill,
+/// catch-light top edge, small floating shadow) since it's the permanent
+/// doorway into the saved-foods library.
+///
+/// Delight: `MorphingPressStyle` gives the press a felt scale + soft
+/// haptic, and the box plays a discrete `.bounce` whenever `count`
+/// changes, so returning to Home after saving a food lands a small "it
+/// dropped into the vault" reward. Reduce Motion drops the bounce; the
+/// press style already self-adjusts.
+private struct VaultNavButton: View {
+    /// Current vault size. A change drives the "a food just landed" bounce.
+    let count: Int
+    /// True when foods were added since the vault was last opened. Surfaces
+    /// the count badge in a solid brand fill and a gentle breathing glow so
+    /// the pill quietly invites a look — then rests the moment it's opened.
+    let hasUnseen: Bool
+    let action: () -> Void
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var breath: CGFloat = 0
+
+    private var shape: Capsule { Capsule(style: .continuous) }
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(LinearGradient(
-                    colors: [Color.brandSoft,
-                             Color(red: 232/255, green: 239/255, blue: 194/255)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                ))
-                .frame(width: 88, height: 88)
-                .scaleEffect(breathing ? 1.04 : 1.0)
-
-            Image(systemName: "camera.fill")
-                .font(.system(size: 36, weight: .regular))
-                .foregroundStyle(Color.brand)
-                // Counter-direction bob so the camera glyph "floats"
-                // rather than scaling with the halo.
-                .scaleEffect(breathing ? 0.98 : 1.0)
-        }
-        .onAppear {
-            // Reduce Motion: don't start the breathing loop. Halo stays
-            // at rest; the camera icon still reads as the affordance.
-            guard !reduceMotion else { return }
-            withAnimation(.appBreathing) {
-                breathing = true
+        Button(action: action) {
+            HStack(spacing: 5) {
+                glyph
+                Text("Vault")
+                    .appFont(.captionStrong)
+                    .foregroundStyle(Color.brandDeep)
+                if count > 0 { countBadge }
             }
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-// MARK: - Daily Check-in card
-
-/// Retention-polish replacement for the prior `TodayPulseCard`. Combines:
-///
-///   1. **Primary check-in copy** — deterministic, count-aware, never
-///      shaming. Mirrors the design contract:
-///          0 meals → "Start today with one photo."
-///          1 meal  → "Nice start — 1 meal logged today."
-///          2 meals → "You're building today's picture."
-///         3+ meals → "Today is well tracked."
-///      The 0-meal branch is personalized when the local rhythm store
-///      knows the user logged recently:
-///          yesterdayLogged → "Back from yesterday — start today with one photo."
-///          last log ≤ 30d  → "Your last log was {Friday|date}. Ready for today's first meal?"
-///
-///   2. **Secondary sub-line (optional)** — combined with the count when
-///      a valid daily calorie goal exists. Examples:
-///          "2 meals logged · about 420 calories left"
-///          "3 meals logged · goal reached"
-///      Or, on the empty path, a rhythm cue:
-///          "First check-in logged." / "You're on a 4-day logging rhythm."
-///
-///   3. **End-of-day return hook** — inline footer, only visible after
-///      20:00 local *and* at least one meal logged today. Quiet, no
-///      modal, no notification, no infinite animation:
-///          "Your day is almost complete. Come back tomorrow for a fresh pulse."
-///
-/// All inputs are pure data caches owned by the parent — there is no
-/// polling, no timer, no retained `Task`. Repeated renders produce
-/// identical copy for the same inputs (deterministic).
-/// The always-on "Today" scoreboard on Home — a glanceable mini calorie
-/// ring + the running headline ("1,240 left today" / "180 over today")
-/// against the daily goal. The first beat of the goal loop made persistent:
-/// you see where you stand without having to scan. Taps through to Tracker.
-private struct TodayGoalCard: View {
-    let status: DailyCalorieGoalStatus
-    /// Goal direction + body weight power the "earn it back" line — same
-    /// rule as the result screen: only for lose/maintain, never gain, and
-    /// the minutes are personalized to the user's weight.
-    var goalDirection: CalorieGoalCalculator.GoalDirection? = nil
-    var bodyWeightKg: Double? = nil
-    let onTap: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var isOver: Bool {
-        status.exceededBy > 0 || status.warningState == .reached
-    }
-    /// Show the walk/jog burn-off only when genuinely over budget and the
-    /// goal isn't to gain (where a surplus is the point).
-    private var showBurnOff: Bool {
-        status.exceededBy > 0 && goalDirection != .gain
-    }
-    private var clamped: Double { min(max(status.progress, 0), 1) }
-    private var ringColor: Color { isOver ? Color.error : Color.brand }
-
-    /// Headline figure, rounded to the nearest 10 for a calm read and
-    /// grouped (1,240) by locale.
-    private var headline: String {
-        let value = isOver ? status.exceededBy : status.remaining
-        let n = Int((value / 10).rounded() * 10)
-        return isOver ? "\(n.formatted()) over today"
-                      : "\(n.formatted()) left today"
-    }
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: AppSpacing.md) {
-                ZStack {
-                    Circle()
-                        .stroke(Color.borderHairline, lineWidth: 6)
-                    Circle()
-                        .trim(from: 0, to: clamped)
-                        .stroke(ringColor,
-                                style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .animation(reduceMotion ? nil
-                                   : .spring(response: 0.6, dampingFraction: 0.85),
-                                   value: clamped)
-                }
-                .frame(width: 46, height: 46)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(headline)
-                        .appFont(.title2)
-                        .foregroundStyle(isOver ? Color.error : Color.ink)
-                    Text("of \(Int(status.goal).formatted()) kcal goal")
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkLight)
-
-                    if showBurnOff {
-                        let walk = ActivityBurnEstimator.walkMinutes(
-                            toBurn: status.exceededBy, weightKg: bodyWeightKg)
-                        let jog = ActivityBurnEstimator.jogMinutes(
-                            toBurn: status.exceededBy, weightKg: bodyWeightKg)
-                        HStack(spacing: 5) {
-                            Image(systemName: "figure.walk")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(Color.brandDeep)
-                            Text("\(walk)-min walk or \(jog)-min jog to burn it off")
-                                .appFont(.caption)
-                                .foregroundStyle(Color.inkMute)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.top, 2)
-                    } else if let eatLine = MealSuggestionEngine.compactLine(
-                                remaining: status.remaining) {
-                        // Under goal → one calm line on what fits. The
-                        // headline already carries the number.
-                        HStack(spacing: 5) {
-                            Image(systemName: "fork.knife")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(Color.brandDeep)
-                            Text(eatLine)
-                                .appFont(.caption)
-                                .foregroundStyle(Color.inkMute)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.top, 2)
-                    }
-                }
-
-                Spacer(minLength: 0)
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Color.inkLight)
-            }
-            .padding(AppSpacing.md)
-            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
             .background(
-                RoundedRectangle(cornerRadius: AppRadius.lg)
-                    .fill(Color.bgSurface)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppRadius.lg)
-                            .strokeBorder(Color.borderHairline, lineWidth: 1)
+                shape.fill(
+                    LinearGradient(
+                        colors: [Color.brandCream, Color.brandSoft],
+                        startPoint: .top, endPoint: .bottom
                     )
+                )
             )
-            .appShadow(.shadowCard)
-            .contentShape(RoundedRectangle(cornerRadius: AppRadius.lg))
+            .overlay(
+                shape.strokeBorder(
+                    Color.brand.opacity(hasUnseen ? 0.6 : 0.32),
+                    lineWidth: hasUnseen ? 1.4 : 1
+                )
+            )
+            // Catch-light along the top edge so the pill reads as a lit
+            // surface, a hair richer than the flat sibling chips.
+            .overlay(
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.6), Color.clear],
+                        startPoint: .top, endPoint: .center
+                    ),
+                    lineWidth: 1
+                )
+            )
+            .appShadow(.shadowFloating)
+            // Attention glow — brand-tinted, softly breathing, ONLY while
+            // there are unseen foods. Quiet, purposeful, self-resolving.
+            .shadow(color: Color.brand.opacity(glowOpacity), radius: glowRadius)
+            .scaleEffect(1 + breathScale)
+            .contentShape(shape)
         }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(headline)
-        .accessibilityHint("Opens today's tracker")
-    }
-}
-
-private struct DailyCheckInCard: View {
-    let mealCount: Int
-    let rhythm: LoggingRhythmStore.Rhythm
-    let status: DailyCalorieGoalStatus?
-    let now: Date
-
-    /// Local hour above which the end-of-day return hook is permitted.
-    /// Lives here (not in a service) because the hook is purely a UI
-    /// concern — there is no notification or scheduler involved.
-    private static let endOfDayHourLocal: Int = 20
-
-    private var hasGoal: Bool {
-        status?.hasValidGoal == true
-    }
-
-    private var isEndOfDay: Bool {
-        Calendar.current.component(.hour, from: now) >= Self.endOfDayHourLocal
-    }
-
-    private var primaryText: String {
-        switch mealCount {
-        case 0:
-            // Personalize the empty state when the rhythm store knows
-            // the user has logged recently. Falls through to the
-            // generic copy if there's no usable history.
-            if rhythm.yesterdayLogged {
-                return "Back from yesterday — start today with one photo."
-            }
-            if let last = rhythm.lastLoggedDate {
-                return "Your last log was \(Self.relativeDayPhrase(for: last, now: now)). Ready for today's first meal?"
-            }
-            return "Start today with one photo."
-        case 1:
-            return "Nice start — 1 meal logged today."
-        case 2:
-            return "You're building today's picture."
-        default:
-            return "Today is well tracked."
-        }
-    }
-
-    /// Optional sub-line. Order of precedence:
-    ///   1. End-of-day hook (already-logged users in the 20:00+ window).
-    ///   2. Calorie hint, combined with the count, when there's a goal
-    ///      and at least one meal.
-    ///   3. Calorie hint alone (empty state, valid goal).
-    ///   4. Rhythm copy (first-ever check-in / multi-day rhythm).
-    ///   5. Nothing.
-    private var secondaryText: String? {
-        if isEndOfDay, mealCount >= 1 {
-            return "Your day is almost complete. Come back tomorrow for a fresh pulse."
-        }
-        // Calorie standing now lives in the always-on TodayGoalCard above,
-        // so this card stays focused on rhythm/encouragement and doesn't
-        // echo the same "X calories left" number twice on one screen.
-        if let status, status.hasValidGoal, mealCount == 0 {
-            // Empty state with a goal set — keep the calorie sub-line
-            // quiet (we don't want to greet the user with their target
-            // before they've logged anything). Surface rhythm instead
-            // if it exists.
-            if rhythm.consecutiveDays >= 2 {
-                return "You're on a \(rhythm.consecutiveDays)-day logging rhythm."
-            }
-            return nil
-        }
-        if rhythm.todayLogged, rhythm.totalLoggedDays == 1 {
-            return "First check-in logged."
-        }
-        if rhythm.consecutiveDays >= 2 {
-            return "You're on a \(rhythm.consecutiveDays)-day logging rhythm."
-        }
-        return nil
-    }
-
-    /// Combined first line: meal-count copy with the calorie cue
-    /// inlined when both are present. Example: "2 meals logged · about
-    /// 420 calories left". Kept as a derived view of `primaryText` +
-    /// `secondaryText` for the count-with-calorie variant only; all
-    /// other states render the two lines stacked.
-    private var combinedPrimary: String? {
-        guard let status, status.hasValidGoal, mealCount >= 1 else { return nil }
-        let countPhrase: String = {
-            switch mealCount {
-            case 1: return "1 meal logged"
-            default: return "\(mealCount) meals logged"
-            }
-        }()
-        let caloriePhrase: String
-        if status.warningState == .reached || status.exceededBy > 0 {
-            caloriePhrase = "goal reached"
-        } else {
-            caloriePhrase = "about \(Int(status.remaining.rounded())) calories left"
-        }
-        return "\(countPhrase) · \(caloriePhrase)"
-    }
-
-    private var iconName: String {
-        if isEndOfDay, mealCount >= 1 { return "moon.stars.fill" }
-        switch mealCount {
-        case 0:  return "sun.max.fill"
-        case 1:  return "leaf.fill"
-        case 2:  return "leaf.fill"
-        default: return "checkmark.seal.fill"
-        }
-    }
-
-    private var iconAccent: Color {
-        if mealCount >= 3 { return .brandDeep }
-        return .brand
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .top, spacing: AppSpacing.sm) {
-                ZStack {
-                    Circle()
-                        .fill(Color.brandSoft)
-                        .frame(width: 28, height: 28)
-                    Image(systemName: iconName)
-                        .font(.system(size: 13, weight: .heavy))
-                        .foregroundStyle(iconAccent)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(combinedPrimary ?? primaryText)
-                        .appFont(.bodyEmphasis)
-                        .foregroundStyle(Color.ink)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if combinedPrimary == nil, let secondary = secondaryText {
-                        Text(secondary)
-                            .appFont(.caption)
-                            .foregroundStyle(Color.inkMute)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, AppSpacing.sm)
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-        .appShadow(.shadowCard)
-        .accessibilityElement(children: .combine)
+        .buttonStyle(MorphingPressStyle(scale: 0.94))
+        .onAppear(perform: startBreath)
+        .onChange(of: hasUnseen) { _, _ in startBreath() }
         .accessibilityLabel(accessibilityText)
+        .accessibilityHint("Opens your saved foods")
+    }
+
+    /// Number of saved foods. A quiet outlined chip normally; a solid brand
+    /// chip (like an unread badge) when there's something new to see.
+    private var countBadge: some View {
+        Text("\(count)")
+            .font(.system(size: 11, weight: .heavy))
+            .monospacedDigit()
+            .foregroundStyle(hasUnseen ? Color.brandCream : Color.brandDeep)
+            .padding(.horizontal, 5)
+            .frame(minWidth: 18, minHeight: 18)
+            .background(
+                Capsule().fill(hasUnseen ? Color.brand : Color.brand.opacity(0.16))
+            )
+            .overlay {
+                if !hasUnseen {
+                    Capsule().strokeBorder(Color.brand.opacity(0.35), lineWidth: 0.8)
+                }
+            }
+    }
+
+    private var glowOpacity: Double {
+        hasUnseen ? 0.3 + Double(breath) * 0.3 : 0
+    }
+    private var glowRadius: CGFloat {
+        hasUnseen ? 7 + breath * 5 : 0
+    }
+    private var breathScale: CGFloat {
+        (hasUnseen && !reduceMotion) ? breath * 0.02 : 0
+    }
+
+    private func startBreath() {
+        guard hasUnseen, !reduceMotion else { return }
+        breath = 0
+        withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+            breath = 1
+        }
     }
 
     private var accessibilityText: String {
-        if let combined = combinedPrimary { return combined }
-        if let secondary = secondaryText {
-            return "\(primaryText) \(secondary)"
-        }
-        return primaryText
+        if count == 0 { return "Vault" }
+        return hasUnseen
+            ? "Vault, \(count) saved foods, new items"
+            : "Vault, \(count) saved foods"
     }
 
-    /// Compact phrasing of a recent past date relative to `now`. Mirrors
-    /// the rhythm store's 30-day cap; older dates would never land here.
-    private static func relativeDayPhrase(for date: Date,
-                                          now: Date,
-                                          calendar: Calendar = .current) -> String {
-        let dayDelta = calendar.dateComponents(
-            [.day],
-            from: calendar.startOfDay(for: date),
-            to: calendar.startOfDay(for: now)
-        ).day ?? 0
-        if dayDelta <= 1 { return "yesterday" }
-        if dayDelta < 7 {
-            let f = DateFormatter()
-            f.locale = .current
-            f.dateFormat = "EEEE"
-            return f.string(from: date)
-        }
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = "MMM d"
-        return f.string(from: date)
-    }
-}
-
-// MARK: - Change-photo floating button
-
-/// Small floating "swap photo" button overlaid on the captured image
-/// so the user can re-pick from camera or library without the whole
-/// "tap-the-card" affordance being invisible. Visual:
-///   - 32pt circle, ultra-thin material fill — stays legible over any
-///     food photo, light or dark
-///   - white hairline stroke for edge contrast
-///   - SF Symbol `arrow.triangle.2.circlepath` (the conventional swap
-///     glyph) in ink color
-///   - soft drop shadow, press-scale to 0.88× tied to `.appPress`
-private struct ChangePhotoButton: View {
-    let action: () -> Void
-    @State private var pressed: Bool = false
-
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                Circle()
-                    .strokeBorder(Color.white.opacity(0.5), lineWidth: 1)
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 14, weight: .heavy))
-                    .foregroundStyle(Color.ink)
-            }
-            .frame(width: 32, height: 32)
-            .shadow(color: Color.ink.opacity(0.22), radius: 6, x: 0, y: 2)
-            .scaleEffect(pressed ? 0.88 : 1)
-        }
-        .buttonStyle(.plain)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if !pressed {
-                        withAnimation(.appPress) { pressed = true }
-                    }
-                }
-                .onEnded { _ in
-                    withAnimation(.appPress) { pressed = false }
-                }
-        )
-        .accessibilityLabel("Change photo")
-        .accessibilityHint("Pick a different photo from camera or library")
-    }
-}
-
-private struct RemovePhotoButton: View {
-    let action: () -> Void
-    @State private var pressed: Bool = false
-
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                Circle()
-                    .strokeBorder(Color.white.opacity(0.5), lineWidth: 1)
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(Color.ink)
-            }
-            .frame(width: 32, height: 32)
-            .shadow(color: Color.ink.opacity(0.22), radius: 6, x: 0, y: 2)
-            .scaleEffect(pressed ? 0.88 : 1)
-        }
-        .buttonStyle(.plain)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if !pressed {
-                        withAnimation(.appPress) { pressed = true }
-                    }
-                }
-                .onEnded { _ in
-                    withAnimation(.appPress) { pressed = false }
-                }
-        )
-        .accessibilityLabel("Remove photo")
-        .accessibilityHint("Return to the empty scan card")
-    }
-}
-
-// MARK: - Delightful image entrance
-
-/// Duolingo-style "land" choreography for a freshly captured or picked
-/// image. Three coordinated beats:
-///
-///   1. **Drop in** (`.appBouncy`, 0–~0.55s): the image enters at
-///      0.55× scale with a slight −6° tilt and zero opacity. The
-///      `appBouncy` spring (response 0.55, damping 0.55) overshoots
-///      its target before settling, so the photo "bounces" into place
-///      instead of fading in flat.
-///   2. **Land haptic** (~0.32s): a soft impact fires just before the
-///      bounce settles. Paired with the visual overshoot it reads as
-///      the photo physically thudding onto the card.
-///   3. **Stamp pulse** (~0.40s, then `.appPress`): a quick 1.0 → 1.04
-///      → 1.0 scale pop confirms the moment and gives the card a
-///      heartbeat — the same cue the analyze-result hero number uses.
-///
-/// The view is keyed by `ObjectIdentifier(image)` at the call site so
-/// SwiftUI tears it down and rebuilds it whenever the user picks a new
-/// photo, which re-runs the whole choreography from the top.
-private struct DelightfulImageEntry: View {
-    let image: UIImage
-    /// When true, skip the bounce-in entirely and render at identity. Used
-    /// during the bubble→result morph so the matched-geometry effect owns
-    /// the photo's transform instead of this entrance fighting it.
-    var suppressEntrance: Bool = false
-    @State private var landed: Bool = false
-    @State private var stamping: Bool = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// Treat the photo as fully landed (no transform) whenever the entrance
-    /// is suppressed — derived rather than written to @State so there's no
-    /// opacity-0 flash before `onAppear` would otherwise run.
-    private var effectiveLanded: Bool { suppressEntrance || landed }
-
-    var body: some View {
-        Image(uiImage: image)
-            .resizable()
-            .scaledToFill()
-            // Without this frame cap, a tall input UIImage reports its
-            // intrinsic pixel size as its layout size and the parent
-            // photo card grows to fit, blowing past the screen. The
-            // frame forces the image to accept the parent's proposed
-            // size; `.clipped()` enforces the bounds in layout terms
-            // before the rounded-rect clip handles the visual edge.
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl2))
-            .scaleEffect(scale)
-            // Reduce Motion: skip the rotation tilt so the image fades in
-            // straight rather than swinging into place.
-            .rotationEffect(.degrees(reduceMotion ? 0 : (effectiveLanded ? 0 : -6)))
-            .opacity(effectiveLanded ? 1 : 0)
-            .onAppear {
-                guard !suppressEntrance else { return }
-                runEntrance()
-            }
-    }
-
-    private var scale: CGFloat {
-        if suppressEntrance { return 1.0 }
-        if reduceMotion { return 1.0 }
-        if !landed { return 0.55 }
-        return stamping ? 1.04 : 1.0
-    }
-
-    private func runEntrance() {
-        // Reduce Motion: opacity-only entrance, no bounce, no stamp, no
-        // haptic — keeps the user oriented but quiet.
+    @ViewBuilder
+    private var glyph: some View {
+        // Two-tone: dark-olive box body + brand-lime lid, so the box has
+        // depth against the pale pill and the lid pops.
+        let base = Image(systemName: "archivebox.fill")
+            .font(.system(size: 13, weight: .semibold))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(Color.brandDeep, Color.brand)
         if reduceMotion {
-            withAnimation(.appReduced) { landed = true }
-            return
-        }
-        // Beat 1 — bounce in.
-        withAnimation(.appBouncy) {
-            landed = true
-        }
-        Task {
-            // Cancellation-aware: if the view is torn down mid-entrance
-            // (the photo card was rebuilt with a different image), bail
-            // immediately rather than firing late haptics + state writes
-            // against a defunct @State storage.
-            do {
-                // Beat 2 — soft land haptic just before the bounce settles.
-                try await Task.sleep(nanoseconds: 320_000_000)
-                await MainActor.run { Haptics.soft() }
-
-                // Beat 3 — stamp pulse, then release back to identity.
-                try await Task.sleep(nanoseconds:  80_000_000)
-                await MainActor.run {
-                    withAnimation(.appStamp) { stamping = true }
-                }
-                try await Task.sleep(nanoseconds: 180_000_000)
-                await MainActor.run {
-                    withAnimation(.appPress) { stamping = false }
-                }
-            } catch {
-                return
-            }
+            base
+        } else {
+            base.symbolEffect(.bounce, value: count)
         }
     }
 }
 
-// MARK: - First-scan celebratory glow
+// MARK: - Phase 23: Save-to-Vault celebration
 
-/// Lifetime-first-scan delight. A brand-tinted ring fades in around the
-/// photo card, scales up slightly, then fades out — under a second from
-/// start to finish. Owns its own lifecycle via SwiftUI's `.task`, which
-/// SwiftUI cancels automatically when the view leaves the tree, so the
-/// host doesn't have to retain a delayed `Task` to cancel.
-///
-/// Reduce Motion path: opacity-only crossfade, no scale, same duration
-/// budget. No haptic — DelightfulImageEntry already fires the land
-/// haptic and stacking a second would double-tap the user.
-private struct FirstScanGlow: View {
-    let onDone: () -> Void
-    @State private var opacity: Double = 0
-    @State private var scale: CGFloat = 0.92
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+/// App-level coordinator for the "Saved to Vault" celebration. Any surface
+/// (the analyze result screen, a Tracker meal card) calls `celebrate(...)`;
+/// a single overlay hosted at the tab-view root via `.vaultCelebrationHost()`
+/// renders the flying chip + confirmation modal above whatever tab is
+/// showing, so the animation works everywhere. Visual only — the caller
+/// still performs the actual save into `VaultStore`.
+@MainActor
+final class VaultCelebration: ObservableObject {
+    static let shared = VaultCelebration()
 
-    var body: some View {
-        RoundedRectangle(cornerRadius: AppRadius.xl2)
-            .strokeBorder(Color.brand, lineWidth: 3)
-            .scaleEffect(scale)
-            .opacity(opacity)
-            .accessibilityHidden(true)
-            .task {
-                do {
-                    if reduceMotion {
-                        withAnimation(.appReduced) { opacity = 0.55 }
-                        try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 700)
-                        try Task.checkCancellation()
-                        withAnimation(.appReduced) { opacity = 0 }
-                        try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 220)
-                    } else {
-                        withAnimation(.easeOut(duration: 0.45)) {
-                            opacity = 0.75
-                            scale = 1.08
-                        }
-                        try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 520)
-                        try Task.checkCancellation()
-                        withAnimation(.easeIn(duration: 0.32)) {
-                            opacity = 0
-                        }
-                        try await Task.sleep(nanoseconds: NSEC_PER_MSEC * 340)
+    @Published fileprivate var flight: Flight?
+    @Published fileprivate var savedName: String?
+
+    /// The vault pill's global frame — the flight target. Published by the
+    /// pill (`vaultPillTarget()`); valid across tabs because the Home tab
+    /// stays mounted. `.zero` until first laid out (then a fallback is used).
+    fileprivate var pillFrame: CGRect = .zero
+
+    private init() {}
+
+    struct Flight: Identifiable {
+        let id = UUID()
+        let image: UIImage?
+        let foodName: String
+        /// Global center of the tapped element; the chip launches from here.
+        let source: CGPoint?
+    }
+
+    /// Fly a chip to the vault pill, then pop the confirmation modal.
+    /// Debounced so a second trigger mid-celebration is ignored.
+    func celebrate(image: UIImage?, foodName: String, from source: CGPoint?) {
+        guard flight == nil, savedName == nil else { return }
+        let trimmed = foodName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? "Meal" : trimmed
+        Haptics.tap()
+        flight = Flight(image: image, foodName: name, source: source)
+        // Modal after the flight, driven here so it always shows.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 720_000_000)
+            flight = nil
+            savedName = name
+        }
+    }
+
+    fileprivate func setPillFrame(_ rect: CGRect) {
+        if rect != .zero { pillFrame = rect }
+    }
+}
+
+extension View {
+    /// Publish this view's global frame as the vault-flight target (the pill).
+    func vaultPillTarget() -> some View {
+        background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { VaultCelebration.shared.setPillFrame(geo.frame(in: .global)) }
+                    .onChange(of: geo.frame(in: .global)) { _, f in
+                        VaultCelebration.shared.setPillFrame(f)
                     }
-                    try Task.checkCancellation()
-                } catch {
-                    return
-                }
-                onDone()
             }
+        )
+    }
+
+    /// Host the vault celebration overlay (flight chip + confirmation modal).
+    /// Apply once, at the tab-view root, so it renders above every tab.
+    func vaultCelebrationHost() -> some View {
+        modifier(VaultCelebrationHostModifier())
     }
 }
 
-// MARK: - Analyzing image aura
+private struct VaultCelebrationHostModifier: ViewModifier {
+    @StateObject private var c = VaultCelebration.shared
 
-/// Siri-inspired analyzing state for the selected image. The effect uses
-/// the same ingredients common to Siri-like recreations: layered color,
-/// blur, blend modes, and continuously shifting sine-wave ribbons. It is
-/// decorative only; the actual analyze state remains driven by
-/// `CaptureViewModel.State.analyzing`.
-///
-/// `isPro` swaps the underlying palettes to champagne/gold without
-/// touching the motion — same fluid recipe, premium colorway. We don't
-/// surface this as a marketing line; it's a quiet daily moment that
-/// belongs to Pro users.
-private struct AnalyzingImageAura: View {
-    var isPro: Bool = false
-    /// Food-derived tint for the free path, sampled once per scan by the
-    /// photo card and threaded straight into the fluid glow + ribbons.
-    /// Empty → the subviews use their default rainbow palette. Ignored on
-    /// the Pro path (champagne override) and under Reduce Motion (static
-    /// aura draws no blobs).
-    var foodPalette: [Color] = []
-    /// Pauses the per-frame metaball `TimelineView` when the Home tab isn't
-    /// active (e.g. the user switches tabs mid-analyze) — the inactive tab
-    /// stays alive in the TabView and would otherwise keep redrawing the
-    /// Canvas every frame.
-    var isActive: Bool = true
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        Group {
-            if reduceMotion {
-                // Static aura: a quiet dim + the analyzing badge. No
-                // TimelineView, no continuous redraw — the Siri-style
-                // motion is purely decorative and the analyzing state
-                // is communicated by the badge.
+    func body(content: Content) -> some View {
+        content.overlay {
+            GeometryReader { proxy in
                 ZStack {
-                    Color.black.opacity(0.22)
-                    LinearGradient(
-                        colors: [Color.clear, Color.ink.opacity(0.34)],
-                        startPoint: .center, endPoint: .bottom
-                    )
-                    analyzingBadge
-                        .padding(AppSpacing.md)
-                        .frame(maxWidth: .infinity,
-                               maxHeight: .infinity,
-                               alignment: .bottomTrailing)
-                }
-            } else {
-                TimelineView(.animation(paused: !isActive)) { timeline in
-                    let seconds = timeline.date.timeIntervalSinceReferenceDate
-
-                    ZStack {
-                        Color.black.opacity(0.16)
-
-                        // Outer blur is intentionally lighter than the
-                        // pre-metaball recipe (was 26): the Canvas now emits
-                        // a defined fused silhouette, so a softer halo keeps
-                        // the liquid edge legible instead of diffusing the
-                        // bubble back into a vague glow.
-                        SiriFluidGlow(time: seconds, isPro: isPro,
-                                      palette: foodPalette)
-                            .blur(radius: 14)
-                            .opacity(0.82)
-                            .blendMode(.screen)
-
-                        SiriWaveRibbons(time: seconds, isPro: isPro,
-                                        palette: foodPalette)
-                            .blendMode(.screen)
-
-                        LinearGradient(
-                            colors: [
-                                Color.clear,
-                                Color.ink.opacity(0.34)
-                            ],
-                            startPoint: .center,
-                            endPoint: .bottom
-                        )
-
-                        analyzingBadge
-                            .padding(AppSpacing.md)
-                            .frame(maxWidth: .infinity,
-                                   maxHeight: .infinity,
-                                   alignment: .bottomTrailing)
+                    if let flight = c.flight {
+                        let target = c.pillFrame != .zero
+                            ? CGPoint(x: c.pillFrame.midX, y: c.pillFrame.midY)
+                            : CGPoint(x: 74, y: 68)
+                        let source = flight.source
+                            ?? CGPoint(x: proxy.size.width / 2, y: proxy.size.height * 0.72)
+                        VaultFlyChip(start: source, end: target, image: flight.image, onComplete: {})
+                            .allowsHitTesting(false)
+                    }
+                    if let name = c.savedName {
+                        VaultSavedModal(foodName: name) { c.savedName = nil }
                     }
                 }
             }
+            .ignoresSafeArea()
         }
-        .accessibilityHidden(true)
-    }
-
-    private var analyzingBadge: some View {
-        HStack(spacing: 6) {
-            ForEach(0..<3, id: \.self) { index in
-                AnalyzingDot(delay: Double(index) * 0.16)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(
-            Capsule()
-                .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
-        )
     }
 }
 
-private struct AnalyzingDot: View {
-    let delay: Double
-    @State private var isLifted = false
+/// A meal-photo chip that arcs from the Save button up to the vault pill,
+/// shrinking as it "drops into" the vault. Driven by a per-frame
+/// `TimelineView` clock (same approach as the analyzing orb) so the arc is
+/// smooth. Calls `onComplete` when it lands.
+private struct VaultFlyChip: View {
+    let start: CGPoint
+    let end: CGPoint
+    let image: UIImage?
+    let onComplete: () -> Void
+
+    @State private var startDate = Date()
+    @State private var done = false
+    private let duration: TimeInterval = 0.72
+
+    var body: some View {
+        TimelineView(.animation) { tl in
+            let elapsed = tl.date.timeIntervalSince(startDate)
+            let raw = min(1, max(0, elapsed / duration))
+            let p = Self.easeInOut(CGFloat(raw))
+            chip(size: size(p))
+                .position(position(p))
+                .opacity(opacity(p))
+        }
+        .allowsHitTesting(false)
+        .onAppear {
+            startDate = Date()
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+                guard !done else { return }
+                done = true
+                onComplete()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func chip(size: CGFloat) -> some View {
+        let radius = max(6, size * 0.28)
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                ZStack {
+                    Color.brandSoft
+                    Image(systemName: "fork.knife")
+                        .font(.system(size: size * 0.4, weight: .semibold))
+                        .foregroundStyle(Color.brand)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Color.white.opacity(0.85), lineWidth: 1.5))
+        .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
+    }
+
+    private func size(_ p: CGFloat) -> CGFloat { 84 + (26 - 84) * p }
+    private func opacity(_ p: CGFloat) -> Double {
+        p < 0.85 ? 1 : Double(max(0, (1 - p) / 0.15))
+    }
+    private func position(_ p: CGFloat) -> CGPoint {
+        // Quadratic bezier with a control point lifted above the path so the
+        // chip arcs up and over into the vault.
+        let ctrl = CGPoint(x: (start.x + end.x) / 2, y: min(start.y, end.y) - 120)
+        return Self.bezier(start, ctrl, end, p)
+    }
+
+    private static func bezier(_ a: CGPoint, _ c: CGPoint, _ b: CGPoint, _ t: CGFloat) -> CGPoint {
+        let u = 1 - t
+        return CGPoint(
+            x: u * u * a.x + 2 * u * t * c.x + t * t * b.x,
+            y: u * u * a.y + 2 * u * t * c.y + t * t * b.y
+        )
+    }
+    private static func easeInOut(_ x: CGFloat) -> CGFloat {
+        x < 0.5 ? 2 * x * x : 1 - pow(-2 * x + 2, 2) / 2
+    }
+}
+
+/// Confirmation modal shown after the flight lands: a centered card with an
+/// archive-box + checkmark pop, a radial burst, brand confetti, the food
+/// name, and an auto-dismiss. Reuses `SavedConfirmationSheet`'s celebration
+/// language, scaled to a compact modal.
+private struct VaultSavedModal: View {
+    let foodName: String
+    var autoDismiss: Bool = true
+    let onDismiss: () -> Void
+
+    @State private var appeared = false
+    @State private var iconScale: CGFloat = 0.3
+    @State private var burstScale: CGFloat = 0.5
+    @State private var burstOpacity: Double = 1
+    @State private var confetti = false
+    @State private var dismissed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Circle()
-            .fill(Color.white)
-            .frame(width: 6, height: 6)
-            .scaleEffect(reduceMotion ? 1.0 : (isLifted ? 1.35 : 0.75))
-            .opacity(reduceMotion ? 0.85 : (isLifted ? 1 : 0.48))
-            .animation(
-                reduceMotion
-                    ? nil
-                    : .easeInOut(duration: 0.62)
-                        .repeatForever(autoreverses: true)
-                        .delay(delay),
-                value: isLifted
-            )
-            .onAppear {
-                guard !reduceMotion else { return }
-                isLifted = true
-            }
-    }
-}
-
-private struct SiriFluidGlow: View {
-    let time: TimeInterval
-    var isPro: Bool = false
-    /// Food-derived tint for the bubble. When non-empty (the caller
-    /// guarantees ≥ 2 colors before passing it through) its dominant hue
-    /// tints the fused silhouette; empty falls back to the classic Siri
-    /// cyan. Only the *first* color is read now that the four blobs fuse
-    /// into a single metaball — per-blob color is discarded by the alpha
-    /// threshold, so multi-hue richness comes from the ribbons drawn over
-    /// the bubble instead.
-    var palette: [Color] = []
-
-    /// Number of orbiting blobs fused into the bubble. Held at 4 — the
-    /// metaball Canvas (blur + alpha-threshold) is the expensive part, so
-    /// the blob count stays put for performance regardless of palette size.
-    private static let blobCount = 4
-
-    private static let freeColors: [Color] = [
-        Color(red: 0.15, green: 0.86, blue: 1.00),
-        Color(red: 0.90, green: 0.21, blue: 1.00),
-        Color(red: 1.00, green: 0.63, blue: 0.18),
-        Color.brandBright,
-    ]
-
-    /// Single fill + threshold color for the fused bubble. Pro keeps its
-    /// champagne body; otherwise the dominant food hue tints the bubble,
-    /// falling back to the classic Siri cyan when no palette was sampled.
-    private var bubbleTint: Color {
-        if isPro { return ProGold.cream }
-        return palette.first ?? Self.freeColors[0]
-    }
-
-    var body: some View {
-        GeometryReader { proxy in
-            let side = min(proxy.size.width, proxy.size.height)
-            // Bubble breathing: a gentle ±4% sin pulse on the blob radius,
-            // driven off the same `time` the orbit uses, so the fused shape
-            // feels alive while analyzing. This scales the *drawn* blobs,
-            // never the blur/threshold parameters — the metaball recipe
-            // stays static per frame.
-            let breathe = 1 + 0.04 * sin(time * 1.6)
-
-            Canvas { context, size in
-                // Gooey metaball fusion. The four orbiting blobs are drawn
-                // into one transparency layer, blurred, then alpha-
-                // thresholded so their soft fields merge into a single
-                // liquid silhouette wherever they overlap — instead of four
-                // separate orbs floating apart.
-                //
-                // Filter order is deliberate: SwiftUI applies the most
-                // recently added filter first, so adding the threshold
-                // *first* and the blur *last* means the blur runs on the raw
-                // blobs (building the gooey field) and the threshold runs on
-                // the blurred result (cutting the crisp fused edge). Both
-                // filter parameters are constant — only `position(for:)`
-                // animates the orbit — so the recipe never re-tunes per
-                // frame.
-                context.addFilter(.alphaThreshold(min: 0.45, color: bubbleTint))
-                context.addFilter(.blur(radius: 18))
-                context.drawLayer { layer in
-                    for index in 0..<Self.blobCount {
-                        let diameter = side * blobScale(index) * breathe
-                        let center = position(for: index, in: size)
-                        let rect = CGRect(
-                            x: center.x - diameter / 2,
-                            y: center.y - diameter / 2,
-                            width: diameter,
-                            height: diameter
-                        )
-                        layer.fill(
-                            Path(ellipseIn: rect),
-                            with: .radialGradient(
-                                Gradient(stops: [
-                                    .init(color: bubbleTint.opacity(0.95),
-                                          location: 0.0),
-                                    .init(color: bubbleTint.opacity(0.90),
-                                          location: 0.45),
-                                    .init(color: bubbleTint.opacity(0.0),
-                                          location: 1.0),
-                                ]),
-                                center: center,
-                                startRadius: 0,
-                                endRadius: diameter * 0.5
-                            )
-                        )
-                    }
-                }
-            }
-            // Flatten the metaball into a single Metal-backed layer so the
-            // blur + threshold compose once per frame rather than against
-            // the parent's blend.
-            .drawingGroup()
+        ZStack {
+            Color.black.opacity(appeared ? 0.32 : 0)
+                .ignoresSafeArea()
+                .onTapGesture { dismiss() }
+            card
+                .scaleEffect(appeared ? 1 : 0.86)
+                .opacity(appeared ? 1 : 0)
         }
+        .onAppear(perform: animateIn)
     }
 
-    private func blobScale(_ index: Int) -> CGFloat {
-        [0.72, 0.62, 0.54, 0.48][index]
-    }
-
-    private func position(for index: Int, in size: CGSize) -> CGPoint {
-        let phase = time * (0.48 + Double(index) * 0.08) + Double(index) * 1.7
-        let x = size.width * (0.5 + 0.27 * cos(phase))
-        let y = size.height * (0.5 + 0.24 * sin(phase * 1.17))
-        return CGPoint(x: x, y: y)
-    }
-}
-
-private struct SiriWaveRibbons: View {
-    let time: TimeInterval
-    var isPro: Bool = false
-    /// Food-derived tint for the free path. When non-empty it's expanded
-    /// into the same 3-ribbon × 3-stop shape the hardcoded
-    /// `freeRibbonColors` uses, so the wave geometry below is untouched —
-    /// only the colors change. Empty falls back to the default rainbow.
-    var palette: [Color] = []
-
-    private static let freeRibbonColors: [[Color]] = [
-        [
-            Color(red: 0.22, green: 0.92, blue: 1.00),
-            Color(red: 0.73, green: 0.35, blue: 1.00),
-            Color(red: 1.00, green: 0.53, blue: 0.28)
-        ],
-        [
-            Color.brandBright,
-            Color(red: 0.98, green: 0.30, blue: 0.92),
-            Color(red: 0.18, green: 0.78, blue: 1.00)
-        ],
-        [
-            Color.white.opacity(0.95),
-            Color(red: 0.45, green: 0.86, blue: 1.00),
-            Color(red: 1.00, green: 0.79, blue: 0.22)
-        ]
-    ]
-
-    // Pro palette: each ribbon walks the gold→cream→rose triad with a
-    // hint of white on the top ribbon for sparkle. Same three rows so
-    // the wave/blur geometry below stays identical.
-    private static let proRibbonColors: [[Color]] = [
-        [
-            ProGold.warm,
-            ProGold.cream,
-            ProGold.rose,
-        ],
-        [
-            ProGold.cream,
-            ProGold.warm,
-            ProGold.edgeDark,
-        ],
-        [
-            Color.white.opacity(0.95),
-            ProGold.cream,
-            ProGold.rose,
-        ],
-    ]
-
-    private var ribbonColors: [[Color]] {
-        if isPro { return Self.proRibbonColors }
-        return palette.isEmpty ? Self.freeRibbonColors : Self.ribbons(from: palette)
-    }
-
-    /// Expand a flat food palette into 3 ribbons of 3 stops, keeping the
-    /// existing 3-ribbon geometry (drawWaves centers its vertical offset
-    /// on index 1, so the count must stay 3). Each ribbon walks the
-    /// palette from a different offset for variety; a white top-stop on
-    /// the first ribbon preserves the sparkle `freeRibbonColors` had.
-    private static func ribbons(from palette: [Color]) -> [[Color]] {
-        let n = palette.count
-        func c(_ i: Int) -> Color { palette[((i % n) + n) % n] }
-        return [
-            [c(0), c(1), c(2)],
-            [c(1), c(2), c(0)],
-            [Color.white.opacity(0.9), c(0), c(2)],
-        ]
-    }
-
-    var body: some View {
-        Canvas { context, size in
-            var softenedContext = context
-            softenedContext.addFilter(.blur(radius: 9))
-            drawWaves(in: &softenedContext, size: size, softened: true)
-
-            drawWaves(in: &context, size: size, softened: false)
-        }
-        .drawingGroup()
-    }
-
-    private func drawWaves(in context: inout GraphicsContext,
-                           size: CGSize,
-                           softened: Bool) {
-        let baseY = size.height * 0.52
-        let width = max(size.width, 1)
-        let height = max(size.height, 1)
-
-        for index in ribbonColors.indices {
-            var path = Path()
-            let phase = time * (1.22 + Double(index) * 0.18)
-                + Double(index) * 1.35
-            let amplitude = height * (softened ? 0.055 : 0.042)
-                * (1 + 0.22 * sin(time * 1.4 + Double(index)))
-            let frequency = 1.55 + Double(index) * 0.38
-            let verticalOffset = CGFloat(index - 1) * height * 0.065
-
-            for step in 0...120 {
-                let progress = CGFloat(step) / 120
-                let x = progress * width
-                let envelope = sin(Double(progress) * .pi)
-                let primary = sin(Double(progress) * .pi * 2 * frequency + phase)
-                let secondary = sin(Double(progress) * .pi * 4.2 + phase * 0.72)
-                let y = baseY + verticalOffset
-                    + CGFloat((primary + secondary * 0.34) * envelope) * amplitude
-
-                if step == 0 {
-                    path.move(to: CGPoint(x: x, y: y))
-                } else {
-                    path.addLine(to: CGPoint(x: x, y: y))
-                }
-            }
-
-            let gradient = Gradient(colors: ribbonColors[index])
-            let shading = GraphicsContext.Shading.linearGradient(
-                gradient,
-                startPoint: CGPoint(x: 0, y: baseY - height * 0.14),
-                endPoint: CGPoint(x: width, y: baseY + height * 0.14)
-            )
-
-            context.stroke(
-                path,
-                with: shading,
-                style: StrokeStyle(
-                    lineWidth: softened ? height * 0.075 : height * 0.018,
-                    lineCap: .round,
-                    lineJoin: .round
-                )
-            )
-        }
-    }
-}
-
-/// Transition-only blur for the analyzing aura's "lock-in" collapse — the
-/// glow softens slightly as it contracts toward center. Kept as a
-/// dedicated modifier so the blur can animate via `.modifier(active:
-/// identity:)` inside the asymmetric removal transition.
-private struct AuraCollapseBlur: ViewModifier {
-    let radius: CGFloat
-    func body(content: Content) -> some View {
-        content.blur(radius: radius)
-    }
-}
-
-/// Transition-only blur for the result reveal's "focus-pull": the analysis
-/// content lands diffuse (blur ~16) and resolves to crisp (blur 0) as the
-/// analyzing bubble collapses inward — the analysis "comes into focus."
-/// Driven by the same `.appMorph` spring already animating the idle↔result
-/// switch; the call site degrades to a plain opacity fade (no blur ramp)
-/// under Reduce Motion.
-private struct FocusPullBlur: ViewModifier {
-    let radius: CGFloat
-    func body(content: Content) -> some View {
-        content.blur(radius: radius)
-    }
-}
-
-// MARK: - Experimental bubble → result-photo morph
-
-/// Gate + constants for the experimental "analyzing bubble physically
-/// morphs into the result meal photo" handoff. The morph replaces the
-/// capture→result crossfade with a single matched-geometry travel of the
-/// photo (position + size + corner radius).
-///
-/// Two locks, both required to engage (plus Reduce Motion off, checked at
-/// the call site): this compile-time `isAvailable` constant, and the
-/// `@AppStorage("bubbleMorphEnabled")` runtime toggle (default off). Flip
-/// `isAvailable` to false to strip the matched-geometry path entirely
-/// without touching persisted user defaults. `internal` (not `private`)
-/// so `AnalysisResultView` in its own file can share the same `matchID`.
-enum BubbleMorphFeature {
-    static let isAvailable = true
-    /// Separate, currently-off gate for the matched-geometry photo→result
-    /// handoff (capture photo flying into `AnalysisResultView`). Decoupled
-    /// from the analyzing-bubble effect because the mandatory `.confirmingName`
-    /// step sits between `.analyzing` and `.ready`, so a clean bubble→result
-    /// morph isn't possible without state-logic changes. Left in place
-    /// (gated off) rather than deleted so it can be revisited.
-    static let resultHandoffAvailable = false
-    /// Geometry id shared by the capture-side source photo and the
-    /// result-side destination photo. Must appear on exactly those two
-    /// views and never on two simultaneously-mounted *sources*.
-    static let matchID = "mealPhoto"
-    /// Near-circular corner radius the result photo starts the morph at,
-    /// rounding down to the thumbnail radius as it settles. Large enough
-    /// that `RoundedRectangle` clamps it to a circle on the bubble-sized
-    /// starting frame.
-    static let circularRadius: CGFloat = 200
-}
-
-/// Applies the shared meal-photo matched-geometry effect when a namespace
-/// is provided; a no-op otherwise, so the flag-off / Reduce-Motion path is
-/// structurally identical to today's tree (no matched geometry attached).
-struct MealMorphMatch: ViewModifier {
-    let namespace: Namespace.ID?
-    let isSource: Bool
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if let namespace {
-            content.matchedGeometryEffect(
-                id: BubbleMorphFeature.matchID,
-                in: namespace,
-                isSource: isSource
-            )
-        } else {
-            content
-        }
-    }
-}
-
-/// Applies `BubbleMorphMask` only when the morph is engaged for this view;
-/// otherwise passes content through untouched, so the flag-off path keeps
-/// the photo's plain rounded-rect clip (no mask, no extra redraws).
-struct ConditionalBubbleMask: ViewModifier {
-    let active: Bool
-    let progress: CGFloat
-    let cornerRadius: CGFloat
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if active {
-            content.modifier(BubbleMorphMask(
-                progress: progress,
-                cornerRadius: cornerRadius
-            ))
-        } else {
-            content
-        }
-    }
-}
-
-/// Masks a view into a living "jelly" that embodies what the app does while
-/// it works: the meal photo melts out of its card into a glossy blob that
-/// rhythmically **loosens into lobes and re-fuses** — a visual "we're
-/// breaking your meal down" — while it **jiggles** with elastic squash-and-
-/// stretch and carries a drifting **wet sheen**. Morphs between a full
-/// rounded-rect (progress 0 — the photo card) and the formed jelly
-/// (progress 1), un-forming back to the card as analysis ends.
-///
-/// Three motions, each serving the brief:
-///  - Split & merge: the metaball lobes' separation breathes, so the blob
-///    gently parts into pieces and rejoins — the decomposition the analyzer
-///    is performing, made tactile.
-///  - Squash & stretch: anisotropic x/y wobble (out of phase) gives the
-///    elastic, edible jiggle that matches the app's bouncy character.
-///  - Sheen: a soft white highlight drifts across the surface (overlaid on
-///    the photo, masked along with it) so the jelly reads as wet/appetizing.
-///
-/// Conforms to `Animatable` so `progress` interpolates frame-by-frame; the
-/// metaball blur scales with `progress` so progress 0 is a crisp full card
-/// (matching the normal photo) and only the formed jelly is gooey.
-struct BubbleMorphMask: ViewModifier, Animatable {
-    /// 0 = full rounded-rect card; 1 = formed jelly.
-    var progress: CGFloat
-    /// Card corner radius the silhouette starts from at progress 0.
-    var cornerRadius: CGFloat
-
-    var animatableData: CGFloat {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func body(content: Content) -> some View {
-        let p = max(0, min(1, progress))
-        return content
-            // Wet sheen — a soft, slowly drifting highlight. It sits over the
-            // photo and is clipped by the same jelly mask below, so it only
-            // shows on the blob. Fades in with `p`; gone at rest.
-            .overlay {
-                if p > 0.02 {
-                    TimelineView(.animation) { timeline in
-                        let t = timeline.date.timeIntervalSinceReferenceDate
-                        GeometryReader { geo in
-                            let w = geo.size.width
-                            let h = geo.size.height
-                            let r = min(w, h) * 0.42
-                            let cx = w * (0.34 + 0.05 * CGFloat(sin(t * 0.7)))
-                            let cy = h * (0.28 + 0.04 * CGFloat(cos(t * 0.6)))
-                            Circle()
-                                .fill(
-                                    RadialGradient(
-                                        colors: [.white.opacity(0.75 * p),
-                                                 .white.opacity(0.18 * p),
-                                                 .white.opacity(0.0)],
-                                        center: .center,
-                                        startRadius: 0,
-                                        endRadius: r
-                                    )
-                                )
-                                .frame(width: r * 2, height: r * 2)
-                                .position(x: cx, y: cy)
-                                .blendMode(.screen)
-                        }
-                        .allowsHitTesting(false)
-                    }
-                }
-            }
-            .mask {
-                // Paused when flat so an idle/picked photo card doesn't drive
-                // a continuous redraw; runs while the jelly forms or lives.
-                TimelineView(.animation(paused: p <= 0.001)) { timeline in
-                    let t = timeline.date.timeIntervalSinceReferenceDate
-                    Canvas { ctx, size in
-                        // Gooey fusion: blur then alpha-threshold (threshold
-                        // added first → applied last, since SwiftUI applies
-                        // the most recently added filter first). A small base
-                        // blur even at progress 0 keeps the rounded-card edge
-                        // anti-aliased; it ramps up as the jelly forms.
-                        ctx.addFilter(.alphaThreshold(min: 0.5, color: .white))
-                        ctx.addFilter(.blur(radius: 0.5 + 17 * p))
-                        ctx.drawLayer { layer in
-                            let w = size.width
-                            let h = size.height
-                            let center = CGPoint(x: w / 2, y: h / 2)
-                            let side = min(w, h)
-
-                            // Elastic jiggle: width and height wobble out of
-                            // phase so the body widens-then-heightens like
-                            // settling jelly (subsumes the old uniform breath).
-                            let jiggleX = 1 + 0.05 * sin(t * 2.0) * p
-                            let jiggleY = 1 + 0.05 * sin(t * 2.0 + .pi) * p
-
-                            // Body: full card → ~58% rounded core as it forms,
-                            // corner rounding all the way to a circle. Smaller
-                            // core lets the lobes read as distinct pieces.
-                            let bodyScale = 1 - 0.42 * p
-                            let bw = w * bodyScale * jiggleX
-                            let bh = h * bodyScale * jiggleY
-                            let circleCorner = min(bw, bh) / 2
-                            let corner = cornerRadius
-                                + (circleCorner - cornerRadius) * p
-                            let bodyRect = CGRect(x: center.x - bw / 2,
-                                                  y: center.y - bh / 2,
-                                                  width: bw, height: bh)
-                            layer.fill(
-                                Path(roundedRect: bodyRect, cornerRadius: corner),
-                                with: .color(.white.opacity(0.98))
-                            )
-
-                            guard p > 0.02 else { return }
-
-                            // Split & merge: separation breathes (~5.7s cycle)
-                            // so the lobes gently part — "breaking it down" —
-                            // and re-fuse. 0 = merged, 1 = most separated.
-                            let split = 0.5 + 0.5 * sin(t * 1.1)
-                            let sep = (0.10 + 0.22 * split) * p
-                            let scales: [CGFloat] = [0.6, 0.54, 0.48, 0.42]
-                            for i in 0..<4 {
-                                let phase = t * (0.5 + Double(i) * 0.08)
-                                    + Double(i) * 1.7
-                                let ox = CGFloat(cos(phase)) * w * sep * jiggleX
-                                let oy = CGFloat(sin(phase * 1.13)) * h * sep * jiggleY
-                                let bx = center.x + ox
-                                let by = center.y + oy
-                                let d = side * scales[i] * p
-                                    * (jiggleX + jiggleY) / 2
-                                guard d > 0.5 else { continue }
-                                let r = CGRect(x: bx - d / 2, y: by - d / 2,
-                                               width: d, height: d)
-                                layer.fill(Path(ellipseIn: r),
-                                           with: .color(.white.opacity(0.98)))
-                            }
-                        }
-                    }
-                    .drawingGroup()
-                }
-            }
-    }
-}
-
-/// The analyzing "dots" badge, extracted so bubble mode can float it over
-/// the photo bubble. Mirrors the badge `AnalyzingImageAura` draws.
-private struct AnalyzingDotsBadge: View {
-    var body: some View {
-        HStack(spacing: 6) {
-            ForEach(0..<3, id: \.self) { index in
-                AnalyzingDot(delay: Double(index) * 0.16)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(
-            Capsule().strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
-        )
-    }
-}
-
-// MARK: - No-food and Failed states
-
-/// Shown when the server returns `analysis.fallback` (no food detected).
-private struct NoFoodView: View {
-    let onTryAnother: () -> Void
-
-    var body: some View {
-        VStack(spacing: AppSpacing.md) {
-            Image(systemName: "questionmark.circle")
-                .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(Color.inkLight)
-            Text("No food detected")
-                .appFont(.display2)
+    private var card: some View {
+        VStack(spacing: AppSpacing.sm) {
+            iconBlock.frame(height: 96)
+            Text("Saved to Vault")
+                .appFont(.title1)
                 .foregroundStyle(Color.ink)
-                .multilineTextAlignment(.center)
-            Text("Try a clearer photo of a meal, snack, or drink.")
-                .appFont(.bodyV2)
+            Text(foodName)
+                .appFont(.bodyEmphasis)
                 .foregroundStyle(Color.inkMute)
                 .multilineTextAlignment(.center)
-            PrimaryButton(title: "Try another photo",
-                          leadingSystemImage: "camera.fill",
-                          action: onTryAnother)
-                .padding(.top, AppSpacing.md)
+                .lineLimit(2)
         }
-        .padding(AppSpacing.lg)
-        .frame(maxWidth: .infinity)
-    }
-}
-
-/// Shown when `AnalyzeService.analyze` throws.
-private struct FailedView: View {
-    let error: AnalyzeError
-    let onRetry: () -> Void
-    let onTryAnother: () -> Void
-
-    /// HTTP 400 from `/analyze` typically means Gemini couldn't get a
-    /// structured response off the photo (server bodies look like
-    /// "No structured response received" / "Failed to analyze image").
-    /// That's a photo-quality problem, not a backend outage — surface
-    /// copy the user can act on instead of the generic message, and
-    /// flip the CTA priority so picking a *different* photo is the
-    /// primary action (retrying the same broken image is futile).
-    private var isUnreadablePhoto: Bool {
-        if case .serverError(let status, _) = error, status == 400 {
-            return true
-        }
-        return false
-    }
-
-    private var title: String {
-        isUnreadablePhoto ? "We couldn't read this photo" : "Something went wrong"
-    }
-
-    private var detail: String {
-        if isUnreadablePhoto {
-            return "We couldn't read this photo clearly. Try a brighter shot or a different angle?"
-        }
-        return error.errorDescription ?? "Please try again."
-    }
-
-    var body: some View {
-        VStack(spacing: AppSpacing.md) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(Color.error.opacity(0.85))
-            Text(title)
-                .appFont(.display2)
-                .foregroundStyle(Color.ink)
-                .multilineTextAlignment(.center)
-            Text(detail)
-                .appFont(.bodyV2)
-                .foregroundStyle(Color.inkMute)
-                .multilineTextAlignment(.center)
-
-            // Unreadable-photo path: picking a different photo is the
-            // useful action; retrying the same broken upload is the
-            // fallback. Genuine network errors keep "Try again" as
-            // primary because the same image will probably succeed
-            // once connectivity is back.
-            if isUnreadablePhoto {
-                PrimaryButton(title: "Try another photo",
-                              leadingSystemImage: "camera.fill",
-                              action: onTryAnother)
-                    .padding(.top, AppSpacing.md)
-                Button(action: onRetry) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 12, weight: .heavy))
-                        Text("Try again with this photo")
-                            .appFont(.captionStrong)
-                    }
-                    .foregroundStyle(Color.inkMute)
-                }
-                .buttonStyle(.plain)
-            } else {
-                PrimaryButton(title: "Try again",
-                              leadingSystemImage: "arrow.clockwise",
-                              action: onRetry)
-                    .padding(.top, AppSpacing.md)
-                Button(action: onTryAnother) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 12, weight: .heavy))
-                        Text("Pick a different photo")
-                            .appFont(.captionStrong)
-                    }
-                    .foregroundStyle(Color.inkMute)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(AppSpacing.lg)
-        .frame(maxWidth: .infinity)
-    }
-}
-
-// MARK: - Quantity Clarification sheet modifier
-
-/// Quantity Clarification — extracted ViewModifier so the new sheet
-/// presentation doesn't bloat the main CaptureView body's modifier
-/// chain past the Swift type-checker's budget. Same behavior as an
-/// inline `.sheet`: presents whenever `state == .clarifying(...)`,
-/// dismissal routes through `acceptOriginalAnalysis` so the user is
-/// never stuck with no usable analysis after closing.
-/// Phase 20 calorie-goal scan warning, lifted out of CaptureView's main
-/// modifier chain so the type-checker doesn't have to thread three more
-/// closures + a presenting-binding through the rest of the body.
-private struct CalorieScanWarningModifier: ViewModifier {
-    @Binding var kind: CaptureView.ScanWarningKind?
-    let onScanAnyway: () -> Void
-
-    func body(content: Content) -> some View {
-        content.confirmationDialog(
-            kind.map(CaptureView.scanWarningTitle) ?? "",
-            isPresented: Binding(
-                get: { kind != nil },
-                set: { presented in
-                    if !presented { kind = nil }
-                }
-            ),
-            titleVisibility: .visible,
-            presenting: kind
-        ) { _ in
-            Button("Scan anyway") {
-                kind = nil
-                onScanAnyway()
-            }
-            Button("View tracker") {
-                kind = nil
-                NotificationRouter.shared.requestTab(1)
-            }
-            Button("Cancel", role: .cancel) {
-                kind = nil
-            }
-        } message: { kind in
-            Text(CaptureView.scanWarningMessage(kind))
-        }
-    }
-}
-
-/// Phase 15 re-log toast overlay + auto-fade Task, extracted so the
-/// trailing `.overlay { … }` + `.animation` modifiers no longer count
-/// against CaptureView's main expression complexity budget.
-private struct RelogToastModifier: ViewModifier {
-    @ObservedObject var viewModel: CaptureViewModel
-
-    func body(content: Content) -> some View {
-        content
-            .overlay(alignment: .bottom) {
-                if let toast = viewModel.relogToast {
-                    RelogToastView(toast: toast)
-                        .padding(.bottom, 96) // clear of the pinned PrimaryButton
-                        .padding(.horizontal, AppSpacing.lg)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .task(id: toast.id) {
-                            // `try?` would swallow CancellationError but
-                            // still run the clear, so a newly-arrived toast
-                            // (id flips) would be cleared by the *prior*
-                            // task's continuation. Bail explicitly on cancel.
-                            do {
-                                try await Task.sleep(nanoseconds: 1_600_000_000)
-                            } catch {
-                                return
-                            }
-                            withAnimation(.appReveal) {
-                                viewModel.clearRelogToast()
-                            }
-                        }
-                }
-            }
-            .animation(.motionBase, value: viewModel.relogToast?.id)
-    }
-}
-
-/// Mandatory name confirmation — presents `NameConfirmSheet` whenever
-/// the view model is in `.confirmingName` (every successful first-pass
-/// analyze lands there). Mirrors `ClarificationSheetModifier`:
-/// visibility is entirely state-driven and the binding's `set` is a true
-/// no-op. We do NOT route dismissal through `confirmDetectedName` here —
-/// doing so would race `correctNameAndContinue` (which flips state to
-/// `.analyzing`) the same way the clarification path could race the
-/// refine Task. "Looks right" / drag-to-dismiss call `confirmDetectedName`
-/// from inside the sheet view itself (via its `onConfirm` + `onDisappear`
-/// default).
-private struct NameConfirmSheetModifier: ViewModifier {
-    @ObservedObject var viewModel: CaptureViewModel
-
-    func body(content: Content) -> some View {
-        content.sheet(isPresented: Binding(
-            get: { viewModel.state.isConfirmingName },
-            set: { _ in /* no-op — state machine owns dismissal */ }
-        )) {
-            if case .confirmingName(_, let response) = viewModel.state {
-                NameConfirmSheet(
-                    detectedName: viewModel.editedFoodName
-                        ?? response.analysis.food
-                        ?? "this dish",
-                    nameAlternatives: response.analysis.nameAlternatives ?? [],
-                    onConfirm: {
-                        viewModel.confirmDetectedName()
-                    },
-                    onCorrect: { name in
-                        Task { await viewModel.correctNameAndContinue(name) }
-                    }
-                )
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-            }
-        }
-    }
-}
-
-private struct ClarificationSheetModifier: ViewModifier {
-    @ObservedObject var viewModel: CaptureViewModel
-
-    func body(content: Content) -> some View {
-        // Fix A — the binding's `set` is a TRUE no-op. We do NOT
-        // route dismissal through `acceptOriginalAnalysis` here:
-        // doing so raced the refine Task and flipped state to
-        // `.ready` before the Task body ran, causing the guard in
-        // `refineAnalysis` to fail. Instead the sheet visibility is
-        // entirely state-driven (presents on `.clarifying`,
-        // dismisses on any other state). "Looks about right" /
-        // drag-to-dismiss call `acceptOriginalAnalysis` from inside
-        // the sheet view itself.
-        content.sheet(isPresented: Binding(
-            get: { viewModel.state.isClarifying },
-            set: { _ in /* no-op — state machine owns dismissal */ }
-        )) {
-            if case .clarifying(_, _, let items) = viewModel.state {
-                QuantityClarificationSheet(
-                    items: items,
-                    onConfirm: { quantities in
-                        Task { await viewModel.refineAnalysis(with: quantities) }
-                    },
-                    onDismiss: {
-                        viewModel.acceptOriginalAnalysis()
-                    }
-                )
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-            }
-        }
-    }
-}
-
-// MARK: - Re-log toast
-
-/// Phase 15. Lightweight pill toast for quick-re-log confirmations.
-/// Distinct from `SavedConfirmationSheet`'s full-screen success
-/// choreography — re-logs are a frequency action, not a moment, so
-/// this lives at the bottom of the screen and fades in 1.6s.
-private struct RelogToastView: View {
-    let toast: CaptureViewModel.RelogToast
-
-    var body: some View {
-        HStack(spacing: AppSpacing.sm) {
-            Image(systemName: toast.kind == .success
-                  ? "checkmark.circle.fill"
-                  : "exclamationmark.triangle.fill")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(toast.kind == .success
-                                 ? Color.success
-                                 : Color.error)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(toast.kind == .success ? "Re-logged" : "Couldn't re-log")
-                    .appFont(.captionStrong)
-                    .foregroundStyle(Color.ink)
-                Text(toast.foodName)
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, AppSpacing.sm)
+        .padding(AppSpacing.xl)
+        .frame(maxWidth: 300)
         .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
+            RoundedRectangle(cornerRadius: AppRadius.xl2, style: .continuous)
                 .fill(Color.bgSurface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
+            RoundedRectangle(cornerRadius: AppRadius.xl2, style: .continuous)
                 .strokeBorder(Color.borderHairline, lineWidth: 1)
         )
-        .appShadow(.shadowCard)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            toast.kind == .success
-            ? "Re-logged \(toast.foodName)"
-            : "Couldn't re-log \(toast.foodName)"
-        )
-    }
-}
-
-// MARK: - Daily quest card (Phase 21.5)
-
-/// One playful prompt per day, rendered on Home above the photo card.
-/// Whole card is a Button so a tap anywhere opens the action sheet
-/// that routes to Scan or Manual Log. The completion state swaps
-/// the title to the reward copy and surfaces a "✨ done" pill, but
-/// keeps the card tappable — some users want to continue logging
-/// after the quest is satisfied.
-private struct DailyQuestCard: View {
-    let quest: DailyQuest
-    let completed: Bool
-    /// Phase 21.10 — non-nil when the user *just* completed the quest
-    /// (within the current session). Triggers the live morph
-    /// animation. nil means render the resting state for whichever
-    /// `completed` value is current (no animation).
-    let completionMoment: CaptureViewModel.DailyQuestCompletionMoment?
-    let onTap: () -> Void
-
-    // Phase 21.10 — driven by the morph sequence. Start at the
-    // values appropriate for "no animation pending":
-    //   - `washOpacity = 0`        no overlay tint
-    //   - `pillScale` depends on `completed` (set in .onAppear)
-    //   - `titleScale = 1`         no pop
-    @State private var washOpacity: Double = 0
-    @State private var pillScale: CGFloat = 0
-    @State private var titleScale: CGFloat = 1
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var displayedTitle: String {
-        completed ? quest.kind.rewardCopy : quest.kind.copy
+        .appShadow(.shadowElevated)
+        .padding(AppSpacing.xl)
     }
 
-    var body: some View {
-        Button(action: onTap) {
-            HStack(alignment: .top, spacing: AppSpacing.md) {
-                // Persistent quest identity badge. The leaf marks the
-                // card as "today's healthy choice" regardless of which
-                // prompt the engine picked. On completion it swaps to
-                // a checkmark in-place so the slot itself confirms the
-                // day's quest is done; the trailing greenSave pill
-                // still fires as the celebratory beat.
-                ZStack {
-                    Circle()
-                        .fill(Color.brand)
-                        .frame(width: 36, height: 36)
-                    Image(systemName: completed ? "checkmark" : "leaf.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Color.white)
-                        .id(completed ? "check" : "leaf")
-                        .transition(.opacity.combined(with: .scale))
+    private var iconBlock: some View {
+        ZStack {
+            BrandConfetti(active: confetti)
+            Circle()
+                .strokeBorder(Color.brand, lineWidth: 4)
+                .frame(width: 66, height: 66)
+                .scaleEffect(burstScale)
+                .opacity(burstOpacity)
+            Image(systemName: "archivebox.fill")
+                .font(.system(size: 46, weight: .semibold))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(Color.brandDeep, Color.brand)
+                .scaleEffect(iconScale)
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(Color.brand)
+                        .background(Circle().fill(Color.bgSurface).padding(-1))
+                        .offset(x: 8, y: 8)
+                        .scaleEffect(iconScale)
                 }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    // Eyebrow row — brandDeep ink (not gray) gives
-                    // the card its own voice. The check-circle pill
-                    // on the right carries the celebratory signal
-                    // when completion fires.
-                    HStack(alignment: .center) {
-                        Text("HEALTHY CHOICE FOR TODAY")
-                            .appFont(.captionStrong)
-                            .textCase(.uppercase)
-                            .tracking(0.8)
-                            .foregroundStyle(Color.brandDeep)
-                        Spacer()
-                        if completed {
-                            // Trailing affirmative pill — greenSave
-                            // disc with a brandCreamSoft check reads
-                            // confidently against the brandSoft card
-                            // surface (different green family,
-                            // unambiguous).
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 22, weight: .regular))
-                                .symbolRenderingMode(.palette)
-                                .foregroundStyle(Color.brandCreamSoft, Color.greenSave)
-                                .scaleEffect(pillScale)
-                                .opacity(pillScale)
-                        }
-                    }
-
-                    Text(displayedTitle)
-                        .appFont(.title2)
-                        .foregroundStyle(completed ? Color.brandDeep : Color.ink)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 4)
-                        .scaleEffect(titleScale, anchor: .leading)
-                        // .id forces SwiftUI to treat the post-morph
-                        // text as a *new* view so `.transition(.opacity)`
-                        // crossfades instead of snap-replacing.
-                        .id(displayedTitle)
-                        .transition(.opacity)
-
-                    if completed {
-                        Text("Logged · back tomorrow")
-                            .appFont(.caption)
-                            .foregroundStyle(Color.brandDeep.opacity(0.70))
-                            .padding(.top, 2)
-                            .transition(.opacity)
-                    } else {
-                        HStack(spacing: 4) {
-                            Text("Tap to log this")
-                                .appFont(.caption)
-                            Image(systemName: "arrow.right")
-                                .font(.system(size: 11, weight: .semibold))
-                        }
-                        .foregroundStyle(Color.brandDeep)
-                        .padding(.top, 2)
-                        .transition(.opacity)
-                    }
-                }
-            }
-            .padding(.horizontal, AppSpacing.md)
-            .padding(.vertical, AppSpacing.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(questCardBackground)
-            .overlay(
-                RoundedRectangle(cornerRadius: AppRadius.lg)
-                    .strokeBorder(Color.brand.opacity(0.30), lineWidth: 1)
-            )
-            .appShadow(.shadowCard)
         }
-        // Press scale lives in a ButtonStyle so SwiftUI cancels the
-        // pressed state the instant an ancestor ScrollView starts
-        // panning. A `.simultaneousGesture(DragGesture(min: 0))` here
-        // would claim the touch immediately, lose gesture arbitration
-        // against the ScrollView, and fire onTap when the user was
-        // trying to scroll.
-        .buttonStyle(QuestCardButtonStyle())
-        .onAppear {
-            // Settle the badge into its resting state without
-            // animating — re-entering Home with an already-completed
-            // quest must show the check in place, not replay
-            // yesterday's celebration.
-            pillScale = completed ? 1 : 0
-        }
-        .onChange(of: completionMoment) { _, new in
-            guard new != nil else { return }
-            runCompletionAnimation()
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            completed
-            ? "Today's quest complete: \(quest.kind.rewardCopy). Tap to log more."
-            : "Today's quest: \(quest.kind.copy). Tap to log it."
-        )
-        .accessibilityAddTraits(.isButton)
     }
 
-    /// Phase 21.10 morph sequence — runs when `completionMoment`
-    /// arrives non-nil. Four beats:
-    ///   1. wash overlay fades in + soft haptic
-    ///   2. title crossfades to reward copy + pops + success haptic
-    ///   3. check-circle badge scales in
-    ///   4. wash recedes, card lands in its resting completed state
-    ///
-    /// Reduce Motion path: skip the choreography, snap the badge in,
-    /// fire a single success haptic.
-    private func runCompletionAnimation() {
+    private func animateIn() {
+        Haptics.success()
         guard !reduceMotion else {
-            withAnimation(.appReduced) { pillScale = 1 }
-            Haptics.success()
-            return
-        }
-
-        // Beat 1 — acknowledgment (0.00–0.25s). Lower opacity than
-        // pre-redesign: the wash is now saturated `brand` over a
-        // brandSoft base, so 0.30 reads as a confident flash without
-        // overwhelming the title underneath.
-        withAnimation(.easeOut(duration: 0.25)) {
-            washOpacity = 0.30
-        }
-        Haptics.soft()
-
-        Task { @MainActor in
-            // Beat 2 — transformation (0.25–0.55s)
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.55)) {
-                titleScale = 1.06
-            }
-            Haptics.success()
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                titleScale = 1.0
-            }
-
-            // Beat 3 — badge settles in (0.55–0.85s)
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            withAnimation(.appStamp) {
-                pillScale = 1
-            }
-
-            // Beat 4 — wash recedes, leaving the card clean
-            // (0.85–1.15s). The persistent completion signal is the
-            // badge + brand-tinted gradient; the wash is a moment,
-            // not a state.
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            withAnimation(.easeOut(duration: 0.35)) {
-                washOpacity = 0
-            }
-        }
-    }
-
-    // MARK: - Background composition
-
-    /// Card background. Always `brandSoft` so the quest reads as a
-    /// distinct, branded slot vs. the white surface cards stacked
-    /// below it on Home. The completion morph layers a more saturated
-    /// `brand` wash on top for Beat 1 → Beat 4 of the choreography,
-    /// then recedes back to flat brandSoft as the resting completed
-    /// state. The web design system fills brand surfaces with single
-    /// solid colors (brandCream / brandIvory / brandSoft); the flat
-    /// lime block is the moment.
-    private var questCardBackground: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .fill(Color.brandSoft)
-
-            // Brand wash overlay — appears during Beat 1 of the
-            // morph, fades back out at Beat 4. Resting is 0, so
-            // the card looks identical whenever no animation runs.
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .fill(Color.brand)
-                .opacity(washOpacity)
-        }
-    }
-}
-
-/// Press-scale style for the quest card. Mirrors `MealCardButtonStyle`
-/// — using a ButtonStyle (rather than a `.simultaneousGesture` on a
-/// `.plain` button) lets the parent ScrollView win gesture
-/// arbitration: SwiftUI flips `isPressed` back to `false` the instant
-/// a pan is detected, so the tap action never fires on a scroll.
-private struct QuestCardButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
-            .animation(.appPress, value: configuration.isPressed)
-    }
-}
-
-// MARK: - Quest celebration modal (Phase 21.11)
-
-/// Center-screen celebration that fires when the user completes
-/// today's daily quest. The modal makes the moment unmissable; the
-/// underlying Phase 21.10 in-place card morph handles the persistent
-/// state. Two complementary layers.
-///
-/// Design intent:
-///   - Brief: enters fast, auto-dismisses ~2.5s after entry
-///   - Center-emotionally: hero is the reward emoji, not the brand
-///   - Respects context: backdrop dims to ~40%, user still sees Home
-///   - Tap-to-dismiss for impatient users
-///
-/// Reduce Motion is honored — bouncy entry becomes a calm fade,
-/// the success haptic stays so the completion still registers.
-struct QuestCelebrationModal: View {
-    let moment: CaptureViewModel.DailyQuestCompletionMoment
-    let onDismiss: () -> Void
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    @State private var backdropOpacity: Double = 0
-    @State private var cardScale: CGFloat = 0.6
-    @State private var cardOpacity: Double = 0
-    @State private var heroScale: CGFloat = 0.4
-    @State private var heroRotation: Double = -15
-    @State private var sparkleOpacity: Double = 0
-    @State private var sparkleScale: CGFloat = 0.5
-    @State private var rewardOpacity: Double = 0
-    @State private var rewardOffset: CGFloat = 8
-    @State private var didDismiss: Bool = false
-
-    var body: some View {
-        ZStack {
-            // Backdrop dim — clear-color is no good for hit-testing
-            // taps reliably; black at low opacity gives a real tap
-            // target so tapping anywhere outside the card dismisses.
-            Color.black
-                .opacity(backdropOpacity)
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { dismiss() }
-
-            // Celebration card
-            VStack(spacing: AppSpacing.lg) {
-                // Hero: large emoji from the reward copy, with
-                // sparkle accents fanning out behind it on beat 3.
-                ZStack {
-                    sparkleLayer
-                        .opacity(sparkleOpacity)
-                        .scaleEffect(sparkleScale)
-
-                    Text(heroEmoji)
-                        .font(.system(size: 76))
-                        .scaleEffect(heroScale)
-                        .rotationEffect(.degrees(heroRotation))
-                        .accessibilityHidden(true)
-                }
-                .frame(width: 140, height: 140)
-
-                VStack(spacing: AppSpacing.xs) {
-                    Text("QUEST COMPLETE").eyebrow()
-                        .foregroundStyle(Color.brandDeep)
-
-                    Text(rewardHeadline)
-                        .appFont(.display2)
-                        .foregroundStyle(Color.ink)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .opacity(rewardOpacity)
-                        .offset(y: rewardOffset)
-                }
-                .padding(.horizontal, AppSpacing.md)
-            }
-            .padding(.vertical, AppSpacing.xl)
-            .padding(.horizontal, AppSpacing.lg)
-            .frame(maxWidth: 320)
-            .background(
-                RoundedRectangle(cornerRadius: AppRadius.xl)
-                    .fill(Color.bgSurface)
-            )
-            .overlay(
-                // Subtle brand-tinted top edge — premium detail that
-                // gives the card a small lift without color-flooding.
-                RoundedRectangle(cornerRadius: AppRadius.xl)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.brand.opacity(0.35),
-                                Color.brandSoft.opacity(0.08)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .appShadow(.shadowElevated)
-            .scaleEffect(cardScale)
-            .opacity(cardOpacity)
-            .contentShape(RoundedRectangle(cornerRadius: AppRadius.xl))
-            .onTapGesture { dismiss() }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Quest complete. \(rewardHeadline). Tap to dismiss.")
-            .accessibilityAddTraits(.isButton)
-        }
-        .onAppear { play() }
-    }
-
-    // MARK: - Reward-copy parsing
-    //
-    // Phase 21 reward copies all start with an emoji (e.g.
-    // "🍎 Fruit logged — small win"). We render the emoji at hero
-    // size separately, and the rest as the headline. The `> 0x238C`
-    // floor skips ASCII digits that `isEmoji` reports as true when
-    // followed by the keycap sequence — none of our reward copies
-    // use those, so the filter is purely defensive.
-
-    private var heroEmoji: String {
-        guard let first = moment.rewardCopy.first,
-              first.unicodeScalars.contains(where: { scalar in
-                  scalar.properties.isEmoji && scalar.value > 0x238C
-              }) else {
-            return "✨"
-        }
-        return String(first)
-    }
-
-    private var rewardHeadline: String {
-        var copy = moment.rewardCopy
-        if let first = copy.first,
-           first.unicodeScalars.contains(where: { scalar in
-               scalar.properties.isEmoji && scalar.value > 0x238C
-           }) {
-            copy.removeFirst()
-        }
-        return copy.trimmingCharacters(in: .whitespaces)
-    }
-
-    // MARK: - Sparkle accents
-    //
-    // Six SF Symbol sparkles arranged on a circle around the hero.
-    // Alternating sizes give visual rhythm; brand color keeps them
-    // on-palette. They fade and scale in together at beat 3 so the
-    // user reads them as "a celebration moment" rather than six
-    // separate elements.
-    @ViewBuilder
-    private var sparkleLayer: some View {
-        ZStack {
-            ForEach(0..<6, id: \.self) { i in
-                Image(systemName: "sparkle")
-                    .font(.system(size: i.isMultiple(of: 2) ? 14 : 10,
-                                  weight: .heavy))
-                    .foregroundStyle(Color.brand)
-                    .offset(
-                        x: cos(Double(i) * .pi / 3) * 62,
-                        y: sin(Double(i) * .pi / 3) * 62
-                    )
-            }
-        }
-        .accessibilityHidden(true)
-    }
-
-    // MARK: - Animation
-
-    private func play() {
-        if reduceMotion {
-            // Calm fade-in. No spring, no rotation, no staggered
-            // beats. Sparkles still appear (they're structural to
-            // the layout) but without independent motion.
-            withAnimation(.appReduced) {
-                backdropOpacity = 0.4
-                cardScale = 1
-                cardOpacity = 1
-                heroScale = 1
-                heroRotation = 0
-                rewardOpacity = 1
-                rewardOffset = 0
-                sparkleOpacity = 1
-                sparkleScale = 1
-            }
-            Haptics.success()
+            appeared = true; iconScale = 1; burstOpacity = 0
             scheduleAutoDismiss()
             return
         }
-
-        // Beat 1 (0.00–0.20s) — backdrop dims, card enters with spring
-        withAnimation(.easeOut(duration: 0.20)) {
-            backdropOpacity = 0.4
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.74)) { appeared = true }
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.56).delay(0.06)) { iconScale = 1 }
+        withAnimation(.easeOut(duration: 0.7).delay(0.06)) {
+            burstScale = 2.1; burstOpacity = 0
         }
-        withAnimation(.spring(response: 0.45, dampingFraction: 0.65)) {
-            cardScale = 1
-            cardOpacity = 1
-        }
-        Haptics.soft()
-
-        Task { @MainActor in
-            // Beat 2 (0.20–0.45s) — hero springs in, rotation corrects
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            withAnimation(.spring(response: 0.55, dampingFraction: 0.55)) {
-                heroScale = 1.1
-                heroRotation = 0
-            }
-
-            // Beat 3 (0.45–0.70s) — hero settles, sparkles fan,
-            // success haptic lands with the visual peak.
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                heroScale = 1.0
-            }
-            withAnimation(.easeOut(duration: 0.4)) {
-                sparkleOpacity = 1
-                sparkleScale = 1
-            }
-            Haptics.success()
-
-            // Beat 4 (0.70–1.05s) — reward copy rises into place
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            withAnimation(.easeOut(duration: 0.35)) {
-                rewardOpacity = 1
-                rewardOffset = 0
-            }
-
-            scheduleAutoDismiss()
-        }
+        confetti = true
+        scheduleAutoDismiss()
     }
 
     private func scheduleAutoDismiss() {
+        guard autoDismiss else { return }
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            if !didDismiss { dismiss() }
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            dismiss()
         }
     }
 
     private func dismiss() {
-        guard !didDismiss else { return }
-        didDismiss = true
-        withAnimation(.easeIn(duration: 0.22)) {
-            backdropOpacity = 0
-            cardScale = 0.94
-            cardOpacity = 0
-        }
+        guard !dismissed else { return }
+        dismissed = true
+        withAnimation(.easeIn(duration: 0.2)) { appeared = false }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 220_000_000)
             onDismiss()
         }
-    }
-}
-
-// MARK: - Manual log toast (Phase 21)
-
-/// Lightweight banner shown after a successful manual save. Carries
-/// two slots:
-///   1. an optional quest-complete reward line (only when the save
-///      just completed today's quest), and
-///   2. a free-tier nudge ("Try a photo scan?" or "Upgrade for 5
-///      photo scans/day", depending on `scansRemaining`).
-///
-/// The host owns dismissal so the action buttons can route tab
-/// switches / scan starts cleanly — this modifier is just the
-/// presentation envelope.
-private struct ManualLogToastModifier: ViewModifier {
-    @Binding var toast: CaptureView.ManualLogToast?
-    let onScanAction: () -> Void
-    let onTrackerAction: () -> Void
-
-    func body(content: Content) -> some View {
-        content
-            .overlay(alignment: .bottom) {
-                if let toast {
-                    ManualLogToastView(
-                        toast: toast,
-                        onScanAction: onScanAction,
-                        onTrackerAction: onTrackerAction
-                    )
-                    .padding(.bottom, 96)
-                    .padding(.horizontal, AppSpacing.lg)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .task(id: toast.id) {
-                        do {
-                            try await Task.sleep(nanoseconds: 4_000_000_000)
-                        } catch {
-                            return
-                        }
-                        withAnimation(.appReveal) {
-                            self.toast = nil
-                        }
-                    }
-                }
-            }
-            .animation(.motionBase, value: toast?.id)
-    }
-}
-
-private struct ManualLogToastView: View {
-    let toast: CaptureView.ManualLogToast
-    let onScanAction: () -> Void
-    let onTrackerAction: () -> Void
-
-    /// Scan-nudge line under the manual-log toast. Pro reads as
-    /// unlimited (no remaining-count number, ever); free users see the
-    /// count and, when out, an "unlimited" upsell — never a cap number.
-    private var scanNudgeCopy: String {
-        if toast.isUnlimited {
-            return "Try a photo scan?"
-        }
-        if toast.scansRemaining > 0 {
-            return "Try a photo scan? \(toast.scansRemaining) left today"
-        }
-        return "Upgrade for unlimited photo scans"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(Color.success)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Manual log saved")
-                        .appFont(.captionStrong)
-                        .foregroundStyle(Color.ink)
-                    Text(toast.foodName)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Button {
-                    Haptics.tap()
-                    onTrackerAction()
-                } label: {
-                    Text("View today")
-                        .appFont(.captionStrong)
-                        .foregroundStyle(Color.brandDeep)
-                }
-                .buttonStyle(.plain)
-            }
-
-            if let reward = toast.questRewardCopy {
-                Text(reward)
-                    .appFont(.caption)
-                    .foregroundStyle(Color.brandDeep)
-            }
-
-            HStack(spacing: 6) {
-                Image(systemName: "camera.fill")
-                    .font(.system(size: 11, weight: .heavy))
-                    .foregroundStyle(Color.inkMute)
-                Button {
-                    Haptics.tap()
-                    onScanAction()
-                } label: {
-                    Text(scanNudgeCopy)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.brandDeep)
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 10, weight: .heavy))
-                        .foregroundStyle(Color.brandDeep)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, AppSpacing.sm)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-        .appShadow(.shadowCard)
-    }
-}
-
-// MARK: - Scan counter chip
-
-/// The cutesy/premium pill that lives in the top bar showing scans
-/// left today. Lives in its own struct so the animation state — pulse,
-/// halo breathe, one-shot wiggle on the "ran out" moment — survives
-/// CaptureView re-renders without re-starting on every tick.
-///
-/// Three visual states keyed off `remaining` and `isPro`:
-///   • Plenty (remaining > 1 free, or pro any-N): brand-soft pill, a
-///     mini camera (free) or a depleting progress ring (pro), and a
-///     count that contentTransitions between values.
-///   • Low (remaining == 1, free only): pill stays brand-soft but the
-///     count shifts to a warm honey tone — a soft cue without nagging.
-///   • Out (remaining == 0): pill morphs to a warm peach with an
-///     orangeBadge halo gently breathing behind it. Icon swaps to a
-///     crown via SF Symbols' `.replace` effect, the label fades in
-///     "Out · Go Pro" (free) or "Maxed today" (pro), and the badge
-///     does a one-shot wiggle the first frame it enters this state so
-///     the user actually notices they ran out. Tappable → paywall.
-///
-/// `accessibilityReduceMotion` kills the wiggle and the halo breathe;
-/// state-transition crossfades stay since they're geometry-stable.
-private struct ScanCounterChip: View {
-    let remaining: Int
-    let limit: Int
-    let isPro: Bool
-    /// When true (Pro), the chip drops the counter entirely and just
-    /// reads "Unlimited" — no number, no depletion ring, and it never
-    /// enters the out/warning state (the silent safety cap is invisible).
-    var isUnlimited: Bool = false
-    /// Fires on every tap regardless of state. The parent decides
-    /// what to present — historically out-state went straight to
-    /// the paywall, but the chip now always opens the explainer
-    /// sheet so users can learn the scan budget before being
-    /// upsold.
-    let onTap: () -> Void
-    /// Whether the Home tab is the active tab. The heartbeat loop only runs
-    /// when true, so the chip stops animating on inactive tabs (TabView keeps
-    /// the view alive otherwise).
-    var isActive: Bool = true
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var haloBreathe = false
-    @State private var wiggle: Double = 0
-    /// Heartbeat scale — driven by `runHeartbeatLoop` while scans
-    /// remain so users actually notice the chip exists. Skipped when
-    /// out of scans (the warning halo + wiggle already own the
-    /// attention budget there) and under Reduce Motion.
-    @State private var heartbeatScale: CGFloat = 1.0
-
-    // Unlimited Pro never reads as "out" — the silent safety cap stays
-    // invisible, so even if `remaining` hits 0 the chip keeps saying
-    // "Unlimited" rather than flipping to the warning state.
-    private var isOut: Bool { !isUnlimited && remaining == 0 }
-    private var isLow: Bool { !isPro && remaining == 1 }
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 6) {
-                iconView
-                labelView
-            }
-            .foregroundStyle(foreground)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(fillBackground)
-            .overlay(rimStroke)
-            .background(outerHalo)
-            .rotationEffect(.degrees(wiggle))
-            // Heartbeat scale sits outside the rotation so the lub-dub
-            // doesn't stretch the wiggle into a jelly wobble. Layout
-            // size is unaffected — scaleEffect is purely visual.
-            .scaleEffect(heartbeatScale)
-            // The geometry-stable animation: state→state recolor and
-            // crossfade of the inner content. Spring keeps it bouncy
-            // without overshoot.
-            .animation(.spring(response: 0.55, dampingFraction: 0.78), value: isOut)
-            .animation(.spring(response: 0.55, dampingFraction: 0.78), value: isLow)
-            .animation(.snappy, value: remaining)
-        }
-        .buttonStyle(.plain)
-        .onAppear(perform: startBreathing)
-        // .task auto-cancels on view disappear, so the heartbeat loop
-        // exits cleanly when the user navigates away — no leaked
-        // timers, no zombie animations against a defunct chip. Keyed on
-        // `isActive` so it also stops on inactive tabs (where the chip stays
-        // alive in the TabView) and restarts when Home is reselected.
-        .task(id: isActive) {
-            guard isActive else { return }
-            await runHeartbeatLoop()
-        }
-        .onChange(of: isOut) { _, nowOut in
-            if nowOut { runOutWiggle() }
-        }
-        .accessibilityLabel(accessibilityText)
-        .accessibilityHint(isOut ? "Opens the Pro upgrade screen" : "")
-    }
-
-    // MARK: - Inner pieces
-
-    // Icon morphs between three glyphs via SF Symbols' replace effect
-    // (iOS 17+): camera → progress ring (pro) → crown (out). Bounce on
-    // out so the swap reads as a tiny celebration of "go pro" rather
-    // than a dead-end.
-    @ViewBuilder
-    private var iconView: some View {
-        if isUnlimited {
-            // Crown, not a depletion ring — a ring would encode a
-            // proportion of the hidden cap. The crown reads as "Pro".
-            Image(systemName: "crown.fill")
-                .font(.system(size: 11, weight: .heavy))
-                .transition(.scale.combined(with: .opacity))
-        } else if isPro && !isOut {
-            ProgressRingMini(
-                progress: Double(limit - remaining) / Double(max(limit, 1))
-            )
-            .frame(width: 14, height: 14)
-            .transition(.scale.combined(with: .opacity))
-        } else {
-            Image(systemName: isOut ? "crown.fill" : "camera.fill")
-                .font(.system(size: 11, weight: .heavy))
-                .contentTransition(.symbolEffect(.replace.downUp))
-                .symbolEffect(.bounce, value: isOut)
-                .transition(.scale.combined(with: .opacity))
-        }
-    }
-
-    // Label is two states behind one Group so the whole chunk
-    // crossfades cleanly when the chip flips to out. Inside each
-    // state the number uses .contentTransition(.numericText) so the
-    // digit rolls when a scan is consumed.
-    @ViewBuilder
-    private var labelView: some View {
-        Group {
-            if isUnlimited {
-                Text("Unlimited")
-                    .appFont(.captionStrong)
-                    .lineLimit(1)
-                    .transition(.opacity)
-            } else if isOut {
-                Text(isPro ? "Maxed today" : "Out · Go Pro")
-                    .appFont(.captionStrong)
-                    .lineLimit(1)
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-            } else if isPro {
-                HStack(spacing: 3) {
-                    Text("\(remaining)")
-                        .appFont(.captionStrong)
-                        .monospacedDigit()
-                        .contentTransition(.numericText(countsDown: true))
-                    Text("/ \(limit) today")
-                        .appFont(.captionStrong)
-                        .lineLimit(1)
-                }
-                .transition(.opacity)
-            } else {
-                HStack(spacing: 3) {
-                    Text("\(remaining)")
-                        .appFont(.captionStrong)
-                        .monospacedDigit()
-                        .contentTransition(.numericText(countsDown: true))
-                    Text(remaining == 1 ? "left!" : "left today")
-                        .appFont(.captionStrong)
-                        .lineLimit(1)
-                }
-                .transition(.opacity)
-            }
-        }
-    }
-
-    // MARK: - Style tokens
-
-    private var foreground: Color {
-        if isOut { return .orangeCancel }
-        if isLow { return .orangeBadge }
-        return .brandDeep
-    }
-
-    private var fillBackground: some View {
-        Capsule().fill(
-            isOut
-                ? Color.catDrawbacks                // soft peach
-                : (isLow ? Color.brandCream : Color.brandSoft)
-        )
-    }
-
-    private var rimStroke: some View {
-        Capsule().strokeBorder(
-            isOut
-                ? Color.orangeCancel.opacity(0.35)
-                : (isLow
-                    ? Color.orangeBadge.opacity(0.40)
-                    : Color.brand.opacity(0.25)),
-            lineWidth: 1
-        )
-    }
-
-    // Soft warm halo that only appears in the out state. Slowly
-    // breathes scale + opacity so the chip feels alive — the same
-    // trick the pro badge uses, tuned warmer so it reads as
-    // "attention, friendly" instead of "alarm".
-    @ViewBuilder
-    private var outerHalo: some View {
-        if isOut {
-            Capsule()
-                .fill(Color.orangeBadge.opacity(0.45))
-                .blur(radius: 9)
-                .scaleEffect(haloBreathe ? 1.22 : 1.05)
-                .opacity(haloBreathe ? 0.95 : 0.55)
-                .allowsHitTesting(false)
-                .transition(.opacity)
-        }
-    }
-
-    // MARK: - Animations
-
-    private func startBreathing() {
-        guard !reduceMotion else { return }
-        withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
-            haloBreathe = true
-        }
-    }
-
-    /// Lub-dub-rest heartbeat that draws the eye to the chip without
-    /// being constant. Three-phase scale: quick lub (1.22), quick dub
-    /// (0.94 — undershoot reads as the recoil after a heartbeat),
-    /// then a settle back to 1.0 followed by a long rest.
-    ///
-    /// Runs in every state — including out — so the chip stays
-    /// noticeable when the user has nothing left and needs to tap to
-    /// upgrade. The out-state halo breathes behind the chip; the
-    /// heartbeat scales the chip itself; the two layers reinforce
-    /// "tap me" rather than compete.
-    ///
-    /// Killed only under Reduce Motion. `.task` cancels the loop when
-    /// the chip leaves the view tree.
-    private func runHeartbeatLoop() async {
-        guard !reduceMotion else { return }
-        while !Task.isCancelled {
-            // Lub — fast contraction outward.
-            await MainActor.run {
-                withAnimation(.spring(response: 0.18, dampingFraction: 0.55)) {
-                    heartbeatScale = 1.22
-                }
-            }
-            try? await Task.sleep(nanoseconds: 180_000_000)
-
-            // Dub — quick rebound below 1.0 so it reads as a real
-            // double-beat instead of a single pop.
-            await MainActor.run {
-                withAnimation(.spring(response: 0.18, dampingFraction: 0.55)) {
-                    heartbeatScale = 0.94
-                }
-            }
-            try? await Task.sleep(nanoseconds: 160_000_000)
-
-            // Settle back to rest.
-            await MainActor.run {
-                withAnimation(.spring(response: 0.30, dampingFraction: 0.72)) {
-                    heartbeatScale = 1.0
-                }
-            }
-
-            // Long pause between beats — keeps the motion noticeable
-            // when it lands rather than blending into ambient noise.
-            try? await Task.sleep(nanoseconds: 1_900_000_000)
-        }
-    }
-
-    // One-shot wobble: -7° → 7° → -3° → 0. Fires only the moment the
-    // chip flips into the out state so the user notices; subsequent
-    // re-renders of the out chip don't wiggle again.
-    private func runOutWiggle() {
-        guard !reduceMotion else { return }
-        Haptics.tap()
-        withAnimation(.spring(response: 0.18, dampingFraction: 0.45)) {
-            wiggle = -7
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
-            withAnimation(.spring(response: 0.18, dampingFraction: 0.45)) {
-                wiggle = 7
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.5)) {
-                wiggle = -3
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.55)) {
-                wiggle = 0
-            }
-        }
-    }
-
-    // MARK: - Accessibility
-
-    private var accessibilityText: String {
-        if isUnlimited { return "Unlimited photo scans with Pro" }
-        if isOut {
-            return isPro
-                ? "You've reached today's scan limit"
-                : "Out of scans today. Tap to upgrade to Pro."
-        }
-        if isPro { return "\(remaining) of \(limit) scans today" }
-        return remaining == 1
-            ? "1 free scan left today"
-            : "\(remaining) free scans left today"
-    }
-}
-
-/// Minimal depletion ring used inside the Pro-state chip. Trims from
-/// a full circle as scans are consumed (progress 0 → full ring,
-/// progress 1 → just the track). A tiny embedded camera sells what
-/// the ring is counting without needing a separate label.
-private struct ProgressRingMini: View {
-    let progress: Double  // 0.0 (full) → 1.0 (depleted)
-
-    var body: some View {
-        let p = min(max(progress, 0), 1)
-        ZStack {
-            Circle()
-                .stroke(Color.brand.opacity(0.25), lineWidth: 2)
-            Circle()
-                .trim(from: 0, to: max(1.0 - p, 0.01))
-                .stroke(
-                    Color.brandDeep,
-                    style: StrokeStyle(lineWidth: 2, lineCap: .round)
-                )
-                .rotationEffect(.degrees(-90))
-                .animation(.snappy, value: p)
-            Image(systemName: "camera.fill")
-                .font(.system(size: 6, weight: .heavy))
-                .foregroundStyle(Color.brandDeep)
-        }
-    }
-}
-
-// MARK: - Scan limits explainer
-
-/// Modal that explains the scan budget in one screen so users
-/// understand "why N today" without leaving Home. Surfaces:
-///   • Today's usage (X of Y, with the remaining count up top so
-///     the user's actual state is the first thing they read).
-///   • Free policy spelled out — 4/day for the first week, then 2/day
-///     forever. Bonus framing rather than "your cap will drop".
-///   • Pro policy — unlimited photo scans, every day, cancel anytime.
-///   • Action row: free users get a gold "Try Pro" pill that opens
-///     the existing `PaywallView`; pro users get a quiet "You're on
-///     Pro" confirmation + Close.
-///
-/// Entrance choreography (the "alive" feel): inner content stays
-/// invisible until the sheet finishes its native slide-up, then
-/// each block reveals in turn with a small offset + spring. Total
-/// reveal ~0.55s; total perceived presentation ~1s including the
-/// sheet itself.
-///
-/// Lives inline in CaptureView.swift to avoid manual pbxproj file
-/// adds (project doesn't use synchronized folders).
-private struct ScanLimitsExplainerSheet: View {
-    let used: Int
-    let limit: Int
-    let isPro: Bool
-    /// Pro is presented as unlimited — the today strip and the Pro card
-    /// render "Unlimited" with no number when this is set.
-    var isUnlimited: Bool = false
-    let onTryPro: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// Master reveal flag. Flipped via `.task` after a short delay so
-    /// inner content lands *after* the system sheet slide; staggered
-    /// per-block delays do the rest.
-    @State private var revealed = false
-
-    private var remaining: Int { max(0, limit - used) }
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            ScrollView {
-                VStack(spacing: AppSpacing.lg) {
-                    heroBlock                      // delay 0.00
-                        .reveal(revealed, delay: 0.00)
-                    todayCard                      // delay 0.08
-                        .reveal(revealed, delay: 0.08)
-                    freeCard                       // delay 0.16
-                        .reveal(revealed, delay: 0.16)
-                    proCard                        // delay 0.24
-                        .reveal(revealed, delay: 0.24)
-                    Spacer(minLength: AppSpacing.md)
-                    actionRow                      // delay 0.34
-                        .reveal(revealed, delay: 0.34)
-                    footerNote
-                        .reveal(revealed, delay: 0.40)
-                }
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.xl3)
-                .padding(.bottom, AppSpacing.xl)
-            }
-
-            // Close X. Sits above the drag indicator so the chrome
-            // doesn't fight the eye for the same corner.
-            Button {
-                Haptics.tap()
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .heavy))
-                    .foregroundStyle(Color.ink)
-                    .frame(width: 32, height: 32)
-                    .background(Circle().fill(Color.bgSurface))
-                    .appShadow(.shadowCard)
-            }
-            .padding(AppSpacing.md)
-            .accessibilityLabel("Close")
-        }
-        .background(Color.bgCanvas)
-        .task {
-            // Wait a beat so the inner reveal doesn't race the
-            // sheet's slide-up. ~0.18s lands the first item just as
-            // the sheet settles, which reads as a continuous motion
-            // chain rather than two separate animations.
-            if reduceMotion {
-                revealed = true
-            } else {
-                try? await Task.sleep(nanoseconds: 180_000_000)
-                revealed = true
-            }
-        }
-    }
-
-    // MARK: - Hero
-
-    private var heroBlock: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            // Stacked camera + sparkle glyph — reads as "scan magic"
-            // without needing illustration. Gold tint nods to Pro
-            // even on free, since both tiers are explained inside.
-            ZStack {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                ProGold.cream.opacity(0.7),
-                                ProGold.rose.opacity(0.0),
-                            ],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: 60
-                        )
-                    )
-                    .frame(width: 96, height: 96)
-                Image(systemName: "camera.aperture")
-                    .font(.system(size: 44, weight: .regular))
-                    .foregroundStyle(Color.brandDeep)
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
-
-            Text("Your scan budget")
-                .appFont(.display2)
-                .foregroundStyle(Color.ink)
-                .frame(maxWidth: .infinity, alignment: .center)
-
-            Text("Simple, no surprises.")
-                .appFont(.bodyV2)
-                .foregroundStyle(Color.inkMute)
-                .frame(maxWidth: .infinity, alignment: .center)
-        }
-        .padding(.top, AppSpacing.sm)
-    }
-
-    // MARK: - Today
-
-    /// Today's usage strip. Keeps the user's actual state visible
-    /// throughout the explanation so the abstract policy below maps
-    /// to something concrete ("I have N left right now").
-    private var todayCard: some View {
-        HStack(spacing: AppSpacing.md) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("TODAY")
-                    .appFont(.labelEyebrow)
-                    .foregroundStyle(Color.inkMute)
-                Text(todayLine)
-                    .appFont(.title2)
-                    .foregroundStyle(Color.ink)
-                    .monospacedDigit()
-            }
-            Spacer()
-            // Mini pip strip — one circle per scan in today's limit,
-            // filled = used, empty = remaining. Capped at 10 so pro
-            // doesn't get an unreadable row. Hidden for unlimited Pro:
-            // a finite pip count would imply a cap.
-            if !isUnlimited {
-                HStack(spacing: 4) {
-                    ForEach(0..<min(limit, 10), id: \.self) { i in
-                        Circle()
-                            .fill(i < used ? Color.brandDeep : Color.brand.opacity(0.25))
-                            .frame(width: 7, height: 7)
-                    }
-                }
-            } else {
-                Image(systemName: "infinity")
-                    .font(.system(size: 16, weight: .heavy))
-                    .foregroundStyle(Color.brandDeep)
-            }
-        }
-        .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .fill(Color.brandSoft.opacity(0.65))
-        )
-    }
-
-    private var todayLine: String {
-        if isUnlimited { return "Unlimited scans" }
-        if remaining == 0 { return "Out for today" }
-        if remaining == 1 { return "1 scan left" }
-        return "\(remaining) scans left"
-    }
-
-    // MARK: - Free card
-
-    private var freeCard: some View {
-        tierCard(
-            label: "FREE",
-            labelColor: Color.inkMute,
-            accent: Color.brand,
-            border: Color.borderHairline,
-            bigNumber: "4 → 2",
-            bigSuffix: "per day",
-            lines: [
-                "First week: 4 scans/day to help you get the hang of it.",
-                "After: 2 scans/day, every day.",
-            ],
-            crown: false
-        )
-    }
-
-    // MARK: - Pro card
-
-    private var proCard: some View {
-        tierCard(
-            label: "PRO",
-            labelColor: ProGold.deep,
-            accent: ProGold.warm,
-            border: ProGold.warm.opacity(0.45),
-            bigNumber: "∞",
-            bigSuffix: "per day",
-            lines: [
-                "Unlimited photo scans, every single day.",
-                "Cancel anytime in Settings.",
-            ],
-            crown: true
-        )
-    }
-
-    /// Shared card shape so the two tiers read as a pair. The Pro
-    /// variant gets a warm gold border + crown badge to feel earned
-    /// rather than just "the other option".
-    private func tierCard(
-        label: String,
-        labelColor: Color,
-        accent: Color,
-        border: Color,
-        bigNumber: String,
-        bigSuffix: String,
-        lines: [String],
-        crown: Bool
-    ) -> some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 5) {
-                    if crown {
-                        Image(systemName: "crown.fill")
-                            .font(.system(size: 10, weight: .heavy))
-                    }
-                    Text(label)
-                        .appFont(.labelEyebrow)
-                }
-                .foregroundStyle(labelColor)
-
-                ForEach(lines.indices, id: \.self) { i in
-                    Text(lines[i])
-                        .appFont(.bodyV2)
-                        .foregroundStyle(Color.inkMute)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(bigNumber)
-                    .font(.custom(AppFont.PS.mplusBlack, size: 30))
-                    .foregroundStyle(accent)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                Text(bigSuffix)
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-            }
-            .frame(width: 96, alignment: .trailing)
-        }
-        .padding(AppSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(border, lineWidth: crown ? 1.5 : 1)
-        )
-        // Pro card gets a soft gold shadow so it visually lifts off
-        // the page — the cue is geometric, not just colored.
-        .shadow(
-            color: crown ? ProGold.warm.opacity(0.25) : .black.opacity(0.04),
-            radius: crown ? 12 : 4,
-            x: 0,
-            y: crown ? 6 : 2
-        )
-    }
-
-    // MARK: - Action row
-
-    @ViewBuilder
-    private var actionRow: some View {
-        if isPro {
-            // Already paying. Don't ask again — just confirm the
-            // status and let them dismiss.
-            VStack(spacing: AppSpacing.sm) {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 16, weight: .heavy))
-                    Text("You're on Pro")
-                        .appFont(.title2)
-                }
-                .foregroundStyle(ProGold.deep)
-                .frame(maxWidth: .infinity, minHeight: 56)
-                .background(
-                    Capsule().fill(ProGold.cream.opacity(0.45))
-                )
-                .overlay(
-                    Capsule().strokeBorder(ProGold.warm.opacity(0.45), lineWidth: 1)
-                )
-
-                Button {
-                    Haptics.tap()
-                    dismiss()
-                } label: {
-                    Text("Done")
-                        .appFont(.bodyEmphasis)
-                        .foregroundStyle(Color.inkMute)
-                        .frame(maxWidth: .infinity, minHeight: 48)
-                }
-                .buttonStyle(.plain)
-            }
-        } else {
-            VStack(spacing: AppSpacing.sm) {
-                Button {
-                    Haptics.tap()
-                    onTryPro()
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "crown.fill")
-                            .font(.system(size: 16, weight: .heavy))
-                        Text("Try Pro")
-                            .appFont(.title2)
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: 60)
-                    .background(
-                        Capsule().fill(
-                            LinearGradient(
-                                colors: [ProGold.warm, ProGold.edgeDark],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    )
-                    .overlay(
-                        Capsule().strokeBorder(ProGold.cream.opacity(0.6), lineWidth: 0.8)
-                    )
-                    .shadow(color: ProGold.warm.opacity(0.45), radius: 10, x: 0, y: 4)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    Haptics.tap()
-                    dismiss()
-                } label: {
-                    Text("Maybe later")
-                        .appFont(.bodyEmphasis)
-                        .foregroundStyle(Color.inkMute)
-                        .frame(maxWidth: .infinity, minHeight: 48)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    private var footerNote: some View {
-        Text("Manual logging is unlimited on both tiers.")
-            .appFont(.caption)
-            .foregroundStyle(Color.inkLight)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
-    }
-}
-
-/// Reveal modifier for the explainer sheet — opacity + small upward
-/// offset + tiny scale, driven by a single boolean flipped after the
-/// sheet's slide-up so the inner content reads as continuous motion.
-private struct RevealModifier: ViewModifier {
-    let revealed: Bool
-    let delay: Double
-
-    func body(content: Content) -> some View {
-        content
-            .opacity(revealed ? 1 : 0)
-            .scaleEffect(revealed ? 1.0 : 0.96)
-            .offset(y: revealed ? 0 : 14)
-            .animation(
-                .spring(response: 0.55, dampingFraction: 0.78).delay(delay),
-                value: revealed
-            )
-    }
-}
-
-private extension View {
-    func reveal(_ revealed: Bool, delay: Double) -> some View {
-        modifier(RevealModifier(revealed: revealed, delay: delay))
     }
 }
 

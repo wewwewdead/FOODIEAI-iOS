@@ -18,7 +18,7 @@ import CoreGraphics
 /// Tier 1; Tier 3 redesigns introduce v2 components that consume these
 /// values explicitly.
 enum AppRadius {
-    static let sm:   CGFloat = 12     // Phase 14 (new) — macro chips, small inline pills
+    static let sm:   CGFloat = 12     // Phase 14 (new), macro chips, small inline pills
     static let md:   CGFloat = 16     // Meal card thumbnails (within cards)
     static let lg:   CGFloat = 20     // Cards, accordion rows, sheet pills
     static let xl:   CGFloat = 24     // Photo cards, hero containers

@@ -369,7 +369,7 @@ actor MealHistoryService {
                 patterns.append(Pattern(
                     id: "firstThisWeek:\(candidate.foodName.lowercased())",
                     kind: .firstThisWeek,
-                    title: "Trying new things — \(candidate.foodName) was new this week.",
+                    title: "Trying new things, \(candidate.foodName) was new this week.",
                     detail: nil
                 ))
             }

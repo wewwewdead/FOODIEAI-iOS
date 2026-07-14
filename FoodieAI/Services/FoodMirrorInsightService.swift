@@ -182,7 +182,7 @@ struct FoodMirrorInsightService {
         case .loved:
             return "You've felt good after most of your meals lately."
         case .fine:
-            return "Most of your recent meals have left you feeling fine — steady ground."
+            return "Most of your recent meals have left you feeling fine, steady ground."
         case .tough:
             return "More of your recent meals than usual have felt tough afterwards."
         }
@@ -328,7 +328,7 @@ struct FoodMirrorInsightService {
         }
 
         if topFoods.isEmpty {
-            return "Try logging two meals from the same kitchen this week — patterns get easier to spot."
+            return "Try logging two meals from the same kitchen this week, patterns get easier to spot."
         }
 
         return "Try adding a vegetable to one meal a day for the next 3 days."
@@ -472,7 +472,7 @@ struct FoodMirrorInsightService {
 
         let curRounded  = Int(curAvg.rounded())
         let prevRounded = Int(prevAvg.rounded())
-        return "You leaned into more protein this week — about \(curRounded)g per meal vs \(prevRounded)g last week."
+        return "You leaned into more protein this week, about \(curRounded)g per meal vs \(prevRounded)g last week."
     }
 
     /// Sugar shift, ≥20% relative and ≥5g absolute. Both directions
@@ -567,7 +567,7 @@ struct FoodMirrorInsightService {
             if recentDinners.count >= 2,
                let recentAvg = mean(recentDinners.map(\.calories)),
                recentAvg >= timing.lunchAvgKcal * 1.15 {
-                return "Try keeping dinner a little lighter today — your evenings have been running heavy."
+                return "Try keeping dinner a little lighter today, your evenings have been running heavy."
             }
         }
 
@@ -579,7 +579,7 @@ struct FoodMirrorInsightService {
            avg30 < 15 {
             let avg7 = mean(proteinValues7) ?? avg30
             if avg7 < 18 {
-                return "Maybe make space for a protein-rich meal today — something like eggs, fish, or beans."
+                return "Maybe make space for a protein-rich meal today, something like eggs, fish, or beans."
             }
         }
 

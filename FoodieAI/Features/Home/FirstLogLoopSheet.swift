@@ -37,11 +37,11 @@ struct FirstLogLoopSheet: View {
             }
 
             VStack(spacing: AppSpacing.sm) {
-                Text("Day 1 — you're on the board")
+                Text("Day 1, you're on the board")
                     .appFont(.display2)
                     .foregroundStyle(Color.ink)
                     .multilineTextAlignment(.center)
-                Text("That's day one of your streak. Snap a meal each day to keep it going — the first 7 days are where the habit sticks.")
+                Text("That's day one of your streak. Snap a meal each day to keep it going, the first 7 days are where the habit sticks.")
                     .appFont(.bodyV2)
                     .foregroundStyle(Color.inkMute)
                     .multilineTextAlignment(.center)

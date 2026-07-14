@@ -19,15 +19,29 @@ struct WidgetSnapshot: Codable, Equatable {
     /// Optional + last so old cached snapshots still decode.
     var suggestion: String? = nil
 
+    /// Calories of eating room earned by moving *above baseline* today (see
+    /// `MovementEnergy.budgetCredit`). Optional + defaulted so old cached
+    /// snapshots still decode. A per-day value → zeroed at rollover. The widget
+    /// adds it to `calorieGoal` so its over/left figure uses the SAME effective
+    /// goal as the in-app daily-loop ring and never contradicts it.
+    var movementCreditKcal: Int? = nil
+
     static let empty = WidgetSnapshot(
         streakDays: 0, caloriesConsumed: 0, calorieGoal: 0,
         steps: 0, stepGoal: 0, updatedAt: Date(timeIntervalSince1970: 0)
     )
 
-    /// Fraction of the calorie goal consumed, clamped to 0…1 for the ring.
+    /// Base calorie goal plus today's movement credit — the denominator the
+    /// in-app ring uses. All widget over/left/progress math keys off this so
+    /// the two surfaces agree on an active day.
+    var effectiveCalorieGoal: Int { calorieGoal + max(0, movementCreditKcal ?? 0) }
+
+    /// Fraction of the (movement-adjusted) calorie goal consumed, clamped to
+    /// 0…1 for the ring.
     var calorieProgress: Double {
-        guard calorieGoal > 0 else { return 0 }
-        return min(max(Double(caloriesConsumed) / Double(calorieGoal), 0), 1)
+        let goal = effectiveCalorieGoal
+        guard goal > 0 else { return 0 }
+        return min(max(Double(caloriesConsumed) / Double(goal), 0), 1)
     }
 
     /// True when this snapshot was captured during `date`'s local day. The
@@ -51,6 +65,7 @@ struct WidgetSnapshot: Codable, Equatable {
         copy.caloriesConsumed = 0
         copy.steps = 0
         copy.suggestion = nil
+        copy.movementCreditKcal = nil   // per-day credit resets with the day
         return copy
     }
 }

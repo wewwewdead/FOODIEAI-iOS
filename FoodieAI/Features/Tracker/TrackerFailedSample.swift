@@ -35,7 +35,7 @@ struct TrackerFailedSample: View {
                 .foregroundStyle(.white)
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
-                    Text("—")
+                    Text("-")
                         .appFont(.kcal)
                         .fontWeight(.black)
                         .foregroundStyle(.white)
@@ -43,9 +43,9 @@ struct TrackerFailedSample: View {
                         .appFont(.body)
                         .foregroundStyle(.white.opacity(0.85))
                 }
-                Text("Total sugar: —g")
+                Text("Total sugar:g")
                     .appFont(.body).fontWeight(.semibold).foregroundStyle(.white)
-                Text("Total carbs: —g")
+                Text("Total carbs:g")
                     .appFont(.body).fontWeight(.semibold).foregroundStyle(.white)
             }
             BouncingBadge(text: "Daily tracker resets every 12:00 am",

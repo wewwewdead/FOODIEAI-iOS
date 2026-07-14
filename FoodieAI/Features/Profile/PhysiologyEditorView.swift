@@ -286,7 +286,7 @@ struct PhysiologyEditorView: View {
                         .foregroundStyle(Color.inkLight)
                         .fixedSize(horizontal: false, vertical: true)
                     if goals.wasFloored {
-                        Text("We've set the minimum to a safe floor — adjust your goal direction if you want more aggressive change.")
+                        Text("We've set the minimum to a safe floor, adjust your goal direction if you want more aggressive change.")
                             .appFont(.caption)
                             .foregroundStyle(Color.error)
                             .fixedSize(horizontal: false, vertical: true)

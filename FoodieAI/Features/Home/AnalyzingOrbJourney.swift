@@ -57,10 +57,6 @@ struct AnalyzingOrbJourneyModifier: ViewModifier {
     let isPro: Bool
     let isActive: Bool
     let enabled: Bool
-    /// When on, the analyzing visual is the GPU particle fluid (the photo
-    /// shatters into particles that flow into the island) instead of the
-    /// shader genie + metaball orb.
-    let useFluid: Bool
 
     /// Last known photo-card frame (global). Captured while the card exists and
     /// RETAINED after it disappears at `.ready`, so the return animation still
@@ -85,137 +81,22 @@ struct AnalyzingOrbJourneyModifier: ViewModifier {
                                 : CGRect(x: full.size.width / 2 - 150,
                                          y: full.size.height * 0.42 - 150,
                                          width: 300, height: 300)
-                            if useFluid {
-                                FluidOrbJourney(
-                                    image: image,
-                                    isThinking: isAnalyzing,
-                                    cardRect: card,
-                                    islandTarget: CGPoint(x: full.size.width / 2,
-                                                          y: max(34, safeTop) + 24),
-                                    returnTarget: CGPoint(x: full.size.width / 2,
-                                                          y: full.size.height * 0.42),
-                                    isActive: isActive,
-                                    canvas: full.size,
-                                    safeTop: safeTop,
-                                    glowColor: palette.first ?? Color(red: 0.15, green: 0.86, blue: 1.0)
-                                )
-                            } else {
-                                AnalyzingOrb(
-                                    image: image,
-                                    isAnalyzing: isAnalyzing,
-                                    palette: palette,
-                                    isPro: isPro,
-                                    isActive: isActive,
-                                    source: lastCard != .zero ? lastCard : nil,
-                                    canvas: full.size,
-                                    safeTop: safeTop
-                                )
-                            }
+                            AnalyzingOrb(
+                                image: image,
+                                isAnalyzing: isAnalyzing,
+                                palette: palette,
+                                isPro: isPro,
+                                isActive: isActive,
+                                source: lastCard != .zero ? lastCard : nil,
+                                canvas: full.size,
+                                safeTop: safeTop
+                            )
                         }
                     }
                     .ignoresSafeArea()
                 }
                 .allowsHitTesting(false)
             }
-    }
-}
-
-// MARK: - SPH particle fluid journey (mount + return lifecycle)
-
-/// Wraps `FluidParticleView` with the same up→hold→back lifecycle as the genie
-/// orb: stays mounted (gathering / swirling at the island) for the whole
-/// thinking window, then runs the RETURN phase (particles flow back to the app
-/// and dissolve) before unmounting — so the particle mode flows home too,
-/// instead of vanishing.
-struct FluidOrbJourney: View {
-    let image: UIImage
-    let isThinking: Bool
-    let cardRect: CGRect
-    let islandTarget: CGPoint
-    let returnTarget: CGPoint
-    let isActive: Bool
-    /// For the black Dynamic Island pouch the particles swirl inside.
-    let canvas: CGSize
-    let safeTop: CGFloat
-    let glowColor: Color
-
-    @State private var mounted = false
-    @State private var returning = false
-    @State private var pouchOn = false
-    @State private var hideTask: Task<Void, Never>?
-    @State private var pouchTask: Task<Void, Never>?
-    @State private var pulseTask: Task<Void, Never>?
-    private static let returnDuration: CFTimeInterval = 0.9
-
-    private var hasIsland: Bool { safeTop > 51 }
-
-    var body: some View {
-        ZStack {
-            if mounted {
-                // Black "expanded island" pouch behind the particles so the
-                // liquid reads as swirling inside the Dynamic Island. Fades in
-                // as the particles arrive, out as they flow home.
-                if hasIsland {
-                    IslandExtension(canvasSize: canvas, bulbCenter: islandTarget,
-                                    bulbDiameter: 90, glowColor: glowColor)
-                        .opacity(pouchOn ? 1 : 0)
-                        .animation(.easeOut(duration: 0.3), value: pouchOn)
-                }
-                FluidParticleView(
-                    image: image,
-                    cardRect: cardRect,
-                    target: islandTarget,
-                    returnTarget: returnTarget,
-                    returning: returning,
-                    returnDuration: Self.returnDuration,
-                    isActive: isActive
-                )
-            }
-        }
-        .onAppear { sync() }
-        .onChange(of: isThinking) { _, _ in sync() }
-        .onDisappear { hideTask?.cancel(); pouchTask?.cancel(); pulseTask?.cancel() }
-    }
-
-    private func sync() {
-        hideTask?.cancel()
-        pouchTask?.cancel()
-        pulseTask?.cancel()
-        if isThinking {
-            let firstLaunch = !mounted
-            mounted = true
-            returning = false
-            if firstLaunch {
-                Haptics.prepare()
-                Haptics.tap()          // launch
-            }
-            // Reveal the pouch once the particles have nearly reached the island.
-            pouchOn = false
-            pouchTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 850_000_000)
-                guard !Task.isCancelled else { return }
-                pouchOn = true
-                Haptics.soft()         // dock
-                pulseTask = Task { @MainActor in
-                    while !Task.isCancelled {
-                        try? await Task.sleep(nanoseconds: 1_300_000_000)
-                        guard !Task.isCancelled else { return }
-                        Haptics.soft() // thinking heartbeat
-                    }
-                }
-            }
-        } else if mounted {
-            returning = true   // flow home + dissolve, then unmount
-            pouchOn = false    // pouch fades as the liquid leaves
-            Haptics.soft()     // release
-            hideTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: UInt64(Self.returnDuration * 1_000_000_000) + 120_000_000)
-                guard !Task.isCancelled else { return }
-                mounted = false
-                returning = false
-                Haptics.tap()  // settle
-            }
-        }
     }
 }
 
@@ -404,13 +285,13 @@ private struct AnalyzingOrb: View {
                 //   launch (tap) → arrive/dock (soft) → thinking heartbeat
                 //   (gentle soft pulses) → release (soft) → settle (tap).
                 Haptics.prepare()       // warm the engine for low-latency sync
-                Haptics.tap()           // launch — the photo lifts up the funnel
+                Haptics.tap()           // launch, the photo lifts up the funnel
                 pouchOn = false
                 pouchTask = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: UInt64(Self.riseDuration * 0.66 * 1_000_000_000))
                     guard !Task.isCancelled else { return }
                     pouchOn = true
-                    Haptics.soft()      // dock — settles into the island
+                    Haptics.soft()      // dock, settles into the island
                     pulseTask = Task { @MainActor in
                         while !Task.isCancelled {
                             try? await Task.sleep(nanoseconds: 1_300_000_000)
@@ -426,14 +307,14 @@ private struct AnalyzingOrb: View {
             guard mounted else { return }
             leg = .returning
             pouchOn = false   // fades out as the orb leaves
-            if animated { Haptics.soft() }   // release — the orb warps back home
+            if animated { Haptics.soft() }   // release, the orb warps back home
             legStart = animated ? Date() : Date(timeIntervalSinceNow: -Self.fallDuration)
             let secs = animated ? Self.fallDuration : 0
             hideTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000) + 120_000_000)
                 guard !Task.isCancelled else { return }
                 mounted = false
-                if animated { Haptics.tap() }   // settle — the breakdown lands
+                if animated { Haptics.tap() }   // settle, the breakdown lands
             }
         }
     }
@@ -681,12 +562,11 @@ extension View {
         palette: [Color],
         isPro: Bool,
         isActive: Bool,
-        enabled: Bool,
-        useFluid: Bool
+        enabled: Bool
     ) -> some View {
         modifier(AnalyzingOrbJourneyModifier(
             image: image, isAnalyzing: isAnalyzing, palette: palette,
-            isPro: isPro, isActive: isActive, enabled: enabled, useFluid: useFluid
+            isPro: isPro, isActive: isActive, enabled: enabled
         ))
     }
 }

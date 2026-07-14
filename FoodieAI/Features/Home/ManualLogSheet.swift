@@ -371,7 +371,7 @@ struct ManualLogSheet: View {
                 .appFont(.caption)
                 .foregroundStyle(Color.inkMute)
             Spacer()
-            Text(value.map { "\(Int($0.rounded()))g" } ?? "—")
+            Text(value.map { "\(Int($0.rounded()))g" } ?? "-")
                 .appFont(.bodyEmphasis)
                 .foregroundStyle(value == nil ? Color.inkLight : Color.ink)
                 .monospacedDigit()

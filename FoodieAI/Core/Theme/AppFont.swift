@@ -51,24 +51,24 @@ enum AppFont {
         case bodyLG, foodName, kcal, nav, body, meta
         // Meta-size weight variants used by BouncingBadge.
         // Same 12pt as `meta`, different Nunito weight files.
-        case metaSemiBold        // Nunito-SemiBold (600) — `.reminder` badge
-        case metaExtraBold       // Nunito-ExtraBold (800) — `.free` badge
+        case metaSemiBold        // Nunito-SemiBold (600), `.reminder` badge
+        case metaExtraBold       // Nunito-ExtraBold (800), `.free` badge
         // Pill button label — same 24pt as `bodyLG` but Nunito-ExtraBold (800)
         // per Phase 3 spec ("bodyLG, weight 800").
         case pillTitle
 
         // v2 tokens (Phase 14 redesign — REDESIGN_DESIGN_SYSTEM.md §Type scale).
-        case heroNumber          // 88pt M PLUS Black, kern -3 — THE one number
-        case display1            // 42pt M PLUS Bold, kern -1.2 — onboarding hero
-        case display2            // 32pt Nunito ExtraBold, kern -0.8 — food name, date
-        case title1              // 20pt Nunito ExtraBold, kern -0.3 — card titles
-        case title2              // 17pt Nunito ExtraBold, kern -0.2 — pill button label
-        case bodyV2              // 16pt Nunito Regular — v2 default body
+        case heroNumber          // 88pt M PLUS Black, kern -3, THE one number
+        case display1            // 42pt M PLUS Bold, kern -1.2, onboarding hero
+        case display2            // 32pt Nunito ExtraBold, kern -0.8, food name, date
+        case title1              // 20pt Nunito ExtraBold, kern -0.3, card titles
+        case title2              // 17pt Nunito ExtraBold, kern -0.2, pill button label
+        case bodyV2              // 16pt Nunito Regular, v2 default body
         case bodyEmphasis        // 16pt Nunito SemiBold
-        case chipNumber          // 20pt Nunito ExtraBold, kern -0.3 — macro chips
+        case chipNumber          // 20pt Nunito ExtraBold, kern -0.3, macro chips
         case caption             // 13pt Nunito SemiBold
         case captionStrong       // 13pt Nunito ExtraBold
-        case labelEyebrow        // 11pt Nunito ExtraBold, kern 2 — UPPERCASE eyebrow
+        case labelEyebrow        // 11pt Nunito ExtraBold, kern 2, UPPERCASE eyebrow
     }
 
     // MARK: - Token-to-Font lookup
@@ -354,7 +354,7 @@ extension Text {
     /// Static factory for numeric Text with monospacedDigit applied.
     static func number(_ value: Double,
                        formatter: (Double) -> String = { v in
-                           if v.isNaN || v.isInfinite { return "—" }
+                           if v.isNaN || v.isInfinite { return "-" }
                            if v == v.rounded() { return "\(Int(v))" }
                            return String(format: "%.1f", v)
                        }) -> Text {

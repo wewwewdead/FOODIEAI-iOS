@@ -24,9 +24,17 @@ struct ExpandableMealCard: View {
     /// (so they can refresh their own state afterwards).
     var onDelete: (() -> Void)? = nil
 
+    /// Phase 23 — the durable Vault. Drives the "Save to Vault" toggle in
+    /// the context menu and expansion. Injected app-wide (FoodieAIApp);
+    /// previews supply `VaultStore.shared`.
+    @EnvironmentObject private var vault: VaultStore
+
     @State private var isExpanded: Bool = false
     @State private var showingDeleteConfirm: Bool = false
     @State private var deletePhase: DeletePhase = .idle
+    /// Phase 23 — the card's on-screen frame (global), so the save-to-vault
+    /// flight launches from this card.
+    @State private var cardFrame: CGRect = .zero
 
     /// Three-beat delete choreography, Duolingo-style:
     ///   .idle    → resting state
@@ -63,6 +71,17 @@ struct ExpandableMealCard: View {
                 isExpanded: isExpanded
             )
             .contextMenu {
+                // Phase 23 — save/remove this logged food to the durable
+                // Vault. Always available (not gated on onDelete) so it
+                // works on every surface that shows a logged meal.
+                Button {
+                    Haptics.tap()
+                    toggleVault()
+                } label: {
+                    let inVault = vault.isInVault(foodName: log.foodName)
+                    Label(inVault ? "Remove from Vault" : "Save to Vault",
+                          systemImage: inVault ? "bookmark.slash" : "bookmark")
+                }
                 if onDelete != nil {
                     Button(role: .destructive) {
                         showingDeleteConfirm = true
@@ -102,6 +121,13 @@ struct ExpandableMealCard: View {
         )
         .appShadow(.shadowCard)
         .clipShape(RoundedRectangle(cornerRadius: AppRadius.lg))
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { cardFrame = geo.frame(in: .global) }
+                    .onChange(of: geo.frame(in: .global)) { _, f in cardFrame = f }
+            }
+        )
         .scaleEffect(deleteScaleX, anchor: .center)
         .scaleEffect(x: 1, y: deleteScaleY, anchor: .center)
         .rotationEffect(deleteRotation, anchor: .center)
@@ -122,7 +148,7 @@ struct ExpandableMealCard: View {
     private var deleteScaleY: CGFloat {
         switch deletePhase {
         case .idle:    return 1
-        case .windup:  return 0.94   // …and shorter — gathering energy
+        case .windup:  return 0.94   // …and shorter, gathering energy
         case .vanish:  return 0.2
         }
     }
@@ -207,9 +233,61 @@ struct ExpandableMealCard: View {
                     items: log.drawbacks
                 )
             }
+
+            // Phase 23 — save this food to the durable Vault so it's
+            // one-tap re-loggable later, no re-scan. Tap-reachable (via
+            // the expansion), complementing the long-press context menu.
+            vaultButton
         }
         // Horizontal padding moved to the call site so the expansion
         // can align with the row inside the unified card chrome.
+    }
+
+    @ViewBuilder
+    private var vaultButton: some View {
+        let inVault = vault.isInVault(foodName: log.foodName)
+        Button {
+            Haptics.tap()
+            Task { await toggleVault() }
+        } label: {
+            HStack(spacing: AppSpacing.xs) {
+                Image(systemName: inVault ? "bookmark.fill" : "bookmark")
+                Text(inVault ? "Saved to Vault" : "Save to Vault")
+            }
+            .font(AppFont.font(.caption))
+            .foregroundStyle(inVault ? Color.brandDeep : Color.brand)
+            .padding(.vertical, AppSpacing.xs)
+            .padding(.horizontal, AppSpacing.sm)
+            .background(
+                Capsule().strokeBorder(
+                    inVault ? Color.brandDeep.opacity(0.4) : Color.brand.opacity(0.85),
+                    lineWidth: 1.2
+                )
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(inVault ? "Saved to Vault" : "Save to Vault")
+    }
+
+    /// Toggle this logged food's Vault membership. Add snapshots the
+    /// `food_logs` row (zero upload, shared photo) and fires the flying-chip
+    /// + confirmation celebration (launched from this card, flying to the
+    /// vault pill); remove drops it by name. `VaultStore` owns the optimistic
+    /// UI + rollback.
+    @MainActor
+    private func toggleVault() {
+        if vault.isInVault(foodName: log.foodName) {
+            Task { await vault.remove(byFoodName: log.foodName) }
+        } else {
+            VaultCelebration.shared.celebrate(
+                image: nil,
+                foodName: log.foodName,
+                from: cardFrame == .zero
+                    ? nil
+                    : CGPoint(x: cardFrame.midX, y: cardFrame.midY)
+            )
+            Task { _ = await vault.add(from: log) }
+        }
     }
 }
 
@@ -222,7 +300,10 @@ struct ExpandableMealCard: View {
 /// Nil-valued macros (pre-Phase-11 analyzed rows, or manual logs where
 /// the user left protein/fat/fiber blank) render as "—" rather than "0g"
 /// — "0g" would be a false claim about the food's composition.
-private struct MealMacroGrid: View {
+///
+/// Phase 23: promoted from `private` to internal so the Vault meal-detail
+/// view can reuse the exact same six-macro grid (via `SavedFood.asFoodLog`).
+struct MealMacroGrid: View {
     let log: FoodLog
 
     var body: some View {
@@ -275,7 +356,7 @@ private struct MacroChipPlaceholder: View {
                 .foregroundStyle(Color.inkLight)
             // "—" replaces both the number and the unit — communicating
             // "no data" rather than "we measured this and it was zero."
-            Text("—")
+            Text("-")
                 .appFont(.chipNumber)
                 .foregroundStyle(Color.inkLight)
         }
@@ -319,6 +400,7 @@ private struct MacroChipPlaceholder: View {
     }
     .background(Color.bgCanvas)
     .environmentObject(FavoritesStore.shared)
+    .environmentObject(VaultStore.shared)
 }
 
 private extension FoodLog {

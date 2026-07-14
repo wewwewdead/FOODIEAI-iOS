@@ -112,7 +112,7 @@ struct RecentMealsSheet: View {
             Text("No saved meals yet")
                 .appFont(.title1)
                 .foregroundStyle(Color.ink)
-            Text("Save a meal first — it'll show up here for one-tap re-logging.")
+            Text("Save a meal first, it'll show up here for one-tap re-logging.")
                 .appFont(.bodyV2)
                 .foregroundStyle(Color.inkMute)
                 .multilineTextAlignment(.center)

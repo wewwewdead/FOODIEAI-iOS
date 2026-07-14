@@ -22,6 +22,14 @@ struct NameConfirmSheet: View {
     let nameAlternatives: [String]
     let onConfirm: () -> Void
     let onCorrect: (String) -> Void
+    /// NOVEL_DIRECTIONS Idea 4 — a name recognized from a PAST meal's photo
+    /// (Visual Food Memory). nil unless the opt-in read flag is on and a
+    /// confident visual match was found. Offered as a one-tap chip; never
+    /// auto-applied, so this stays a suggestion the user confirms.
+    var visualSuggestion: String? = nil
+    /// How many past meals matched this photo (the "you've had this N times"
+    /// signal). 0 when unknown / read path off.
+    var visualTimesSeen: Int = 0
 
     /// True once the user has taken an explicit action (confirm, chip
     /// pick, or typed correction). Gates the `onDisappear` default so a
@@ -69,6 +77,10 @@ struct NameConfirmSheet: View {
                     header
                     detectedNameCard
 
+                    if recognizedName != nil {
+                        visualSuggestionSection
+                    }
+
                     if !quickPicks.isEmpty {
                         quickPickSection
                     }
@@ -76,7 +88,7 @@ struct NameConfirmSheet: View {
                     actions
 
                     if isCorrecting {
-                        correctionField
+                        updateAnalysisButton
                             .transition(
                                 reduceMotion
                                     ? .opacity
@@ -117,13 +129,44 @@ struct NameConfirmSheet: View {
 
     private var detectedNameCard: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
-            Text("WE SEE")
+            Text(isCorrecting ? "EDIT THE NAME" : "WE SEE")
                 .appFont(.caption)
                 .foregroundStyle(Color.brandDeep)
-            Text(detectedName)
-                .appFont(.title1)
-                .foregroundStyle(Color.ink)
-                .fixedSize(horizontal: false, vertical: true)
+
+            // The name box itself is the editor. Read mode shows the
+            // detected name as text; entering correction swaps it in place
+            // for a focused, pre-filled field — no separate input box
+            // appears below.
+            if isCorrecting {
+                TextField("Type the dish name",
+                          text: $typedName,
+                          axis: .vertical)
+                    .font(AppFont.font(.title1))
+                    .foregroundStyle(Color.ink)
+                    .tint(Color.brand)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...6)
+                    .multilineTextAlignment(.leading)
+                    .submitLabel(.done)
+                    .autocorrectionDisabled(false)
+                    .textInputAutocapitalization(.sentences)
+                    .focused($fieldFocused)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // Vertical-axis field inserts a newline on Return; catch
+                    // it, strip it, and commit so Done matches the "Update
+                    // analysis" button.
+                    .onChange(of: typedName) { _, newValue in
+                        guard newValue.contains("\n") else { return }
+                        typedName = newValue
+                            .replacingOccurrences(of: "\n", with: "")
+                        if canSubmitTyped { commitCorrection(trimmedTyped) }
+                    }
+            } else {
+                Text(detectedName)
+                    .appFont(.title1)
+                    .foregroundStyle(Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.md)
@@ -133,10 +176,53 @@ struct NameConfirmSheet: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.brand.opacity(0.45), lineWidth: 1)
+                .strokeBorder(
+                    Color.brand.opacity(isCorrecting ? 0.9 : 0.45),
+                    lineWidth: isCorrecting ? 1.5 : 1
+                )
         )
+        .overlay {
+            // Tap the name box in read mode to start editing in place.
+            // Removed in edit mode so taps reach the field to reposition
+            // the cursor.
+            if !isCorrecting {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { beginCorrecting() }
+            }
+        }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Detected dish: \(detectedName)")
+        .accessibilityLabel(
+            isCorrecting
+                ? "Edit the dish name"
+                : "Detected dish: \(detectedName). Double-tap to edit."
+        )
+    }
+
+    /// The visual-memory suggestion, but only when it's a *different* name
+    /// than the model already detected (otherwise "Looks right" covers it).
+    private var recognizedName: String? {
+        guard let raw = visualSuggestion?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              raw.caseInsensitiveCompare(detectedName) != .orderedSame else { return nil }
+        return raw
+    }
+
+    /// One-tap "you've photographed this before" suggestion, sourced from the
+    /// on-device Visual Food Memory. Routes through the same correction path as
+    /// the quick picks, so accepting it re-analyzes with the recognized name.
+    @ViewBuilder
+    private var visualSuggestionSection: some View {
+        if let name = recognizedName {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                Text(visualTimesSeen >= 2
+                     ? "You've photographed this \(visualTimesSeen) times"
+                     : "You've photographed this before")
+                    .appFont(.captionStrong)
+                    .foregroundStyle(Color.inkMute)
+                chip(label: name) { commitCorrection(name) }
+            }
+        }
     }
 
     /// One-tap quick picks from `nameAlternatives`. Each routes straight
@@ -168,24 +254,16 @@ struct NameConfirmSheet: View {
             }
 
             Button {
-                Haptics.soft()
                 if isCorrecting {
-                    // Collapse the field if they reconsidered.
-                    fieldFocused = false
-                    isCorrecting = false
+                    cancelCorrecting()
                 } else {
-                    isCorrecting = true
-                    // Let the reveal animation start before focusing so
-                    // the keyboard doesn't fight the field's move-in.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        fieldFocused = true
-                    }
+                    beginCorrecting()
                 }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: isCorrecting ? "xmark" : "pencil")
                         .font(.system(size: 12, weight: .heavy))
-                    Text(isCorrecting ? "Never mind" : "Not correct — fix it")
+                    Text(isCorrecting ? "Never mind" : "Not right? Fix it")
                         .appFont(.captionStrong)
                 }
                 .foregroundStyle(Color.inkMute)
@@ -197,47 +275,47 @@ struct NameConfirmSheet: View {
             .accessibilityLabel(
                 isCorrecting
                     ? "Cancel correcting the name"
-                    : "The detected name is not correct — type the right one"
+                    : "The detected name is not correct, type the right one"
             )
         }
     }
 
-    private var correctionField: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            HStack(spacing: AppSpacing.sm) {
-                TextField("Type the dish name", text: $typedName)
-                    .font(AppFont.font(.bodyEmphasis))
-                    .foregroundStyle(Color.ink)
-                    .tint(Color.brand)
-                    .textFieldStyle(.plain)
-                    .submitLabel(.done)
-                    .autocorrectionDisabled(false)
-                    .textInputAutocapitalization(.sentences)
-                    .focused($fieldFocused)
-                    .onSubmit { if canSubmitTyped { commitCorrection(trimmedTyped) } }
-                    .padding(.horizontal, AppSpacing.md)
-                    .padding(.vertical, 12)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppRadius.md)
-                            .fill(Color.bgSurface)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppRadius.md)
-                            .strokeBorder(Color.brand.opacity(0.55), lineWidth: 1)
-                    )
-            }
-
-            PrimaryButton(title: "Update analysis",
-                          leadingSystemImage: "sparkles") {
-                guard canSubmitTyped else { return }
-                commitCorrection(trimmedTyped)
-            }
-            .disabled(!canSubmitTyped)
-            .opacity(canSubmitTyped ? 1 : 0.5)
+    /// Commit action shown while editing. The input itself lives in
+    /// `detectedNameCard` now — this button just applies the edit and
+    /// re-runs the analysis.
+    private var updateAnalysisButton: some View {
+        PrimaryButton(title: "Update analysis",
+                      leadingSystemImage: "sparkles") {
+            guard canSubmitTyped else { return }
+            commitCorrection(trimmedTyped)
         }
+        .disabled(!canSubmitTyped)
+        .opacity(canSubmitTyped ? 1 : 0.5)
     }
 
     // MARK: - Actions
+
+    /// Enter in-place editing: pre-fill the name box with the detected
+    /// name so a correction is a quick edit (add/remove a word) rather
+    /// than typing it from scratch, then focus the field.
+    private func beginCorrecting() {
+        Haptics.soft()
+        typedName = detectedName
+        isCorrecting = true
+        // Let the reveal animation start before focusing so the keyboard
+        // doesn't fight the field's move-in.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            fieldFocused = true
+        }
+    }
+
+    /// Leave editing without committing — the name box reverts to showing
+    /// the detected name.
+    private func cancelCorrecting() {
+        Haptics.soft()
+        fieldFocused = false
+        isCorrecting = false
+    }
 
     private func commitCorrection(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -245,7 +323,14 @@ struct NameConfirmSheet: View {
         Haptics.tap()
         fieldFocused = false
         didAct = true
-        onCorrect(trimmed)
+        // The field pre-fills with the detected name. If the user submits it
+        // unchanged there's nothing to re-analyze — accept the first pass
+        // instead of spending a round-trip on the same name.
+        if trimmed.caseInsensitiveCompare(detectedName) == .orderedSame {
+            onConfirm()
+        } else {
+            onCorrect(trimmed)
+        }
     }
 
     private func chip(label: String, action: @escaping () -> Void) -> some View {

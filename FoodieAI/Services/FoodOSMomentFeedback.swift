@@ -169,6 +169,10 @@ struct FoodOSMomentPreference: Codable, Equatable {
 extension FoodOSMoment {
     var revelationRepeatKey: String? {
         guard kind == .revelation else { return nil }
+        // Prefer the structured key the engine set at construction; only
+        // reverse-engineer it from display copy for moments that didn't
+        // supply one (older callers / hand-built test fixtures).
+        if let key = authoritativeRepeatKey { return key }
         let joined = [title, body ?? "", evidenceLine ?? ""]
             .joined(separator: " ")
             .lowercased()
@@ -216,6 +220,23 @@ extension FoodOSMoment {
             && !evidence.contains("mood note")
     }
 
+    /// Deterministic revelation tag from the engine's structured `repeatKey`
+    /// (e.g. "timeOfDay:morning", "macroTrend:protein", "calorieTrend"). Mirrors
+    /// the copy-based fallback below exactly, just without depending on copy.
+    fileprivate static func revelationTag(forRepeatKey key: String) -> FoodOSMomentTag {
+        let head = key.split(separator: ":").first.map(String.init) ?? key
+        switch head {
+        case "timeOfDay":    return .revelationTimeOfDay
+        case "macroLean":    return .revelationMacroLean
+        case "dayType":      return .revelationDayType
+        case "macroTrend":   return .valueMacroTrend
+        case "calorieTrend": return .valueCalorieTrend
+        case "varietyTrend": return .valueVarietyTrend
+        case "consistency":  return .valueConsistency
+        default:             return .unknown
+        }
+    }
+
     /// Stable tag for this moment shape. Used by the feedback store
     /// to bucket events and by the bandit to score priority
     /// adjustments. Pure — no I/O, no side effects.
@@ -242,6 +263,12 @@ extension FoodOSMoment {
             if evidence.contains("mood note") { return .moodReflection }
             return .genericReflection
         case .revelation:
+            // Prefer the structured key set at construction over matching the
+            // display copy — a copy tweak used to be able to silently re-route
+            // feedback to a different learning bucket.
+            if let key = authoritativeRepeatKey {
+                return Self.revelationTag(forRepeatKey: key)
+            }
             let joined = [title, body ?? "", evidenceLine ?? ""]
                 .joined(separator: " ")
                 .lowercased()

@@ -24,8 +24,9 @@ final class OnboardingViewModel: ObservableObject {
         /// the calorie/macro calculator. Always rendered; the user can
         /// skip it (physiology stays NULL, archetype defaults apply).
         case physiology    = 3
-        case coaches       = 4
-        case notifications = 5
+        // Raw values 4 (coaches) and 5 (notifications) retired 2026-07 — those
+        // steps were unreachable in the live flow. Gap left intentionally; no
+        // code reconstructs Step from a raw value.
         /// Phase 22 — informational comparison of Free vs Pro. Always
         /// rendered; both CTAs advance to `.completing` so onboarding
         /// is never blocked by a purchase decision. Tapping "Try Pro"
@@ -37,18 +38,47 @@ final class OnboardingViewModel: ObservableObject {
         /// gate values are persisted; RootView will route to MainTabView
         /// on its next render.
         case finished      = 8
+        /// Phase 23. Empathy/commitment step ("what's slowed you down
+        /// before?"). Logically sits between the goal (archetype) and
+        /// physiology in the live flow — see `advance()`. New rawValue
+        /// appended so the existing ones are undisturbed; flow is
+        /// switch-driven, not rawValue-ordered.
+        case barriers      = 9
     }
 
     @Published var step: Step {
         didSet {
+            guard step != oldValue else { return }
+            recordReached(step)
             #if DEBUG
-            if step != oldValue {
-                NSLog("[Onboarding] step → %@", String(describing: step))
-            }
+            NSLog("[Onboarding] step → %@", String(describing: step))
             #endif
         }
     }
+
+    /// Local funnel buffer — the ordered, de-duplicated steps reached this run.
+    /// Flushed to analytics only AFTER auth (analytics_events is auth-scoped):
+    /// once when sign-in completes (`onboarding_signed_in`, path-so-far) and
+    /// again with the full path at completion (`onboarding_completed`). The
+    /// delta between the two = users who signed in but bailed at the paywall.
+    /// Pre-auth droppers aren't attributable without anonymous analytics
+    /// (deferred by design — see the low-egress tradeoff).
+    @Published private(set) var reachedSteps: [String] = []
+
+    private func recordReached(_ step: Step) {
+        let key = String(describing: step)
+        if reachedSteps.last != key, !reachedSteps.contains(key) {
+            reachedSteps.append(key)
+        }
+    }
     @Published var archetype: Profile.Archetype? = nil
+
+    /// Phase 23. Empathy/commitment answers — the obstacles the user has hit
+    /// before ("late-night snacking", "eating out", …). Raw keys from
+    /// `OnboardingBarriersStepView`. Kept in session and reported in the
+    /// completion analytics (count only); not persisted to the profile (no
+    /// migration this phase). Empty = skipped.
+    @Published var barriers: Set<String> = []
 
     /// Set membership for fast row rendering on the coach picker.
     @Published var preferredCoaches: Set<String> = []
@@ -68,6 +98,19 @@ final class OnboardingViewModel: ObservableObject {
     /// physiology columns and archetype-derived goals untouched.
     @Published var physiology: CalorieGoalCalculator.Physiology? = nil
 
+    /// Phase 23. Optional target weight (kg) captured alongside physiology
+    /// for lose/gain goals. Drives ONLY the onboarding plan-reveal
+    /// projection chart — a one-time motivational moment — so it's kept in
+    /// session and not persisted in this phase (no migration). `nil` for
+    /// maintain/curious goals or when the user leaves it blank.
+    @Published var targetWeightKg: Double? = nil
+
+    /// Set true when the plan-reveal (physiology preview) is shown. Because
+    /// sign-in now comes AFTER the reveal, we can't write an analytics row at
+    /// reveal time (no `auth.uid()` yet → RLS rejects it). Instead we stash the
+    /// flag and report it in the first post-auth event (`onboarding_signed_in`).
+    @Published var didRevealPlan: Bool = false
+
     @Published private(set) var isCompleting: Bool = false
     @Published var completionError: String? = nil
 
@@ -83,6 +126,8 @@ final class OnboardingViewModel: ObservableObject {
          service: ProfileService = ProfileService.shared) {
         self.step = initialStep
         self.service = service
+        // Seed the funnel (init assignment doesn't trigger `step.didSet`).
+        self.reachedSteps = [String(describing: initialStep)]
     }
 
     // MARK: - Navigation
@@ -93,15 +138,18 @@ final class OnboardingViewModel: ObservableObject {
     func advance() {
         switch step {
         case .hero:           step = .archetype
-        case .signIn:         step = .archetype
-        case .archetype:      step = .physiology
-        // Physiology (skip or save) → completing — sign-in already happened up
-        // front. The rest of the survey (coaches/notifications/subscription)
-        // stays deferred. The physiology view calls `advance()`, so this is
-        // its single exit.
-        case .physiology:     step = .completing
-        case .coaches:        step = .notifications
-        case .notifications:  step = .subscription
+        // Sign-in moved to the END (Phase 23): the user completes the quiz and
+        // sees their personalized plan BEFORE the sign-in wall, then signs in
+        // and hits the offer. Advancing from .signIn lands on the paywall
+        // (normally reached via signInDidComplete once auth flips).
+        case .signIn:         step = .subscription
+        case .archetype:      step = .barriers
+        case .barriers:       step = .physiology
+        // Phase 23. Plan reveal (physiology) → sign-in → the (previously
+        // orphaned) subscription offer → completing. Showing the aha before
+        // asking to sign in is the core conversion move; the offer follows
+        // sign-in so a purchase has an auth token to validate against.
+        case .physiology:     step = .signIn
         case .subscription:   step = .completing
         case .completing:     step = .finished
         case .finished:       break
@@ -112,18 +160,20 @@ final class OnboardingViewModel: ObservableObject {
         switch step {
         case .hero, .signIn, .completing, .finished: break
         case .archetype:      step = .hero
-        case .physiology:     step = .archetype
-        case .coaches:        step = .physiology
-        case .notifications:  step = .coaches
-        case .subscription:   step = .notifications
+        case .barriers:       step = .archetype
+        case .physiology:     step = .barriers
+        // Mirrors the advance() reroute: the offer now follows physiology.
+        case .subscription:   step = .physiology
         }
     }
 
-    /// "Get started" on the hero. Sign-in comes first: a fresh user goes to the
-    /// sign-in interrupt, then into the goal + physiology setup. A legacy
-    /// already-signed-in account skips straight to the goal step.
+    /// "Get started" on the hero. Phase 23: the quiz comes first for everyone —
+    /// goal → physiology → plan reveal — and sign-in is deferred to the end, so
+    /// the user experiences value before the sign-in wall. `isSignedIn` is
+    /// retained for the call site but no longer branches (a legacy signed-in
+    /// account simply auto-skips the later sign-in step).
     func startFromHero(isSignedIn: Bool) {
-        step = isSignedIn ? .archetype : .signIn
+        step = .archetype
     }
 
     /// Reset to a clean first-run state. Called by `RootView` on sign-out so a
@@ -133,30 +183,41 @@ final class OnboardingViewModel: ObservableObject {
     func reset() {
         step = .hero
         archetype = nil
+        barriers = []
         physiology = nil
+        targetWeightKg = nil
+        didRevealPlan = false
         preferredCoaches = []
         orderedCoaches = []
         notificationsAccepted = nil
         completionError = nil
+        reachedSteps = [String(describing: Step.hero)]
     }
 
-    /// Continue from the goal screen to the physiology step, where age / height
-    /// / weight / sex / activity produce an accurate (Mifflin-St Jeor) calorie
-    /// target — the denominator of the whole goal-loop. Physiology then
-    /// completes onboarding (sign-in already happened first). `isSignedIn` is
-    /// unused here (kept for the call site).
+    /// Continue from the goal screen. Phase 23: the empathy/commitment
+    /// (barriers) step comes next, then physiology. `isSignedIn` is unused
+    /// here (kept for the call site; sign-in is deferred to the end).
     func continueFromGoal(isSignedIn: Bool) {
-        step = .physiology
+        step = .barriers
     }
 
     /// Called by `OnboardingFlow` when `auth.isSignedIn` flips to true (or on a
-    /// remount) while parked at `.signIn`. Sign-in is the FIRST onboarding step,
-    /// so completing it leads into the goal + physiology setup. Returning
-    /// accounts (`onboarding_completed_at != nil`) are routed past onboarding by
+    /// remount) while parked at `.signIn`. Phase 23: sign-in is now the LAST
+    /// interactive step (after the plan reveal), so completing it leads into
+    /// the subscription offer, then completion. Returning accounts
+    /// (`onboarding_completed_at != nil`) are routed past onboarding by
     /// `RootView` and never reach here.
     func signInDidComplete() {
         guard step == .signIn else { return }
-        step = .archetype
+        // First moment we can attribute the funnel to a user — flush the
+        // path so far. Completers also emit `onboarding_completed`; the gap
+        // between the two is the paywall drop-off.
+        AnalyticsService.shared.track(
+            AnalyticsService.Event.onboardingSignedIn,
+            ["path": reachedSteps.joined(separator: ">"),
+             "personalized": physiology != nil ? "true" : "false",
+             "plan_revealed": didRevealPlan ? "true" : "false"])
+        step = .subscription
     }
 
     // MARK: - Selection
@@ -279,7 +340,9 @@ final class OnboardingViewModel: ObservableObject {
             // (survey deferred); a later goals_personalized event closes the loop.
             AnalyticsService.shared.track(
                 AnalyticsService.Event.onboardingCompleted,
-                ["personalized": physiology != nil ? "true" : "false"])
+                ["personalized": physiology != nil ? "true" : "false",
+                 "barriers": "\(barriers.count)",
+                 "path": reachedSteps.joined(separator: ">")])
         } catch {
             #if DEBUG
             NSLog("[Onboarding] complete FAILED: %@", "\(error)")

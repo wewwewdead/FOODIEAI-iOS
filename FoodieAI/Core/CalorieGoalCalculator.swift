@@ -186,26 +186,80 @@ enum CalorieGoalCalculator {
         let floored = raw < floor
         let calories = Int((floored ? floor : raw).rounded())
 
-        // Step 5 — Derive macros from calorie target. Same numbers as
-        // MacroGoalCalculator (50/25/25 + 14g/1000kcal fiber + 10% sugar
-        // ceiling); duplicated here so this computation stays self-
-        // contained and the unit tests can pin every number.
-        let carbs   = Int(round(Double(calories) * 0.50 / 4.0))
-        let protein = Int(round(Double(calories) * 0.25 / 4.0))
-        let fat     = Int(round(Double(calories) * 0.25 / 9.0))
-        let fiber   = Int(round(Double(calories) / 1000.0 * 14.0))
-        let sugar   = Int(round(Double(calories) * 0.10 / 4.0))
+        // Step 5 — Derive macros from the calorie target through the single
+        // macro-split helper (50/25/25 + 14g/1000kcal fiber + 10% sugar
+        // ceiling), so `compute` and the manual "recalculate macros" button
+        // can never drift apart.
+        let macros = Self.macrosFromCalories(calories)
 
         return Goals(
             bmr:        Int(bmr.rounded()),
             tdee:       Int(tdee.rounded()),
             calories:   calories,
-            carbsG:     carbs,
-            proteinG:   protein,
-            fatG:       fat,
-            fiberG:     fiber,
-            sugarG:     sugar,
+            carbsG:     macros.carbsG,
+            proteinG:   macros.proteinG,
+            fatG:       macros.fatG,
+            fiberG:     macros.fiberG,
+            sugarG:     macros.sugarG,
             wasFloored: floored
+        )
+    }
+
+    // MARK: - Weight projection
+
+    /// Energy density of body-mass change. ~7,700 kcal ≈ 1 kg of body
+    /// weight is the standard planning constant (Wishnofsky 1958; still the
+    /// accepted first-order estimate for goal-date projections). Used only
+    /// for the onboarding "here's when you'll reach your goal" reveal — a
+    /// motivational estimate, not a clinical guarantee.
+    static let kcalPerKg: Double = 7_700
+
+    /// A straight-line projection from the user's current weight to their
+    /// target at the plan's fixed ±500 kcal/day pace. Everything is derived
+    /// from data already collected (no pace question, no backend), so the
+    /// reveal stays consistent with the calorie target we compute elsewhere.
+    struct WeightProjection: Equatable {
+        let startKg: Double
+        let targetKg: Double
+        /// Whole weeks to reach the target at `weeklyRateKg` (min 1).
+        let weeks: Int
+        let goalDate: Date
+        /// kg/week implied by the goal-direction calorie delta.
+        let weeklyRateKg: Double
+        /// True when the target is below the start (losing), else gaining.
+        let losing: Bool
+    }
+
+    /// Project a goal date from current + target weight at the goal's fixed
+    /// pace. Returns nil when there's nothing to project — a maintain goal,
+    /// a missing/degenerate target, or a target that sits on the wrong side
+    /// of the current weight for the chosen direction (e.g. "lose" but the
+    /// target is heavier), which we treat as no-projection rather than
+    /// drawing a misleading line.
+    static func projectWeight(currentKg: Double,
+                              targetKg: Double,
+                              goal: GoalDirection,
+                              from startDate: Date = Date()) -> WeightProjection? {
+        guard goal != .maintain else { return nil }
+        let losing = goal == .lose
+        // Direction sanity: a lose goal needs a lighter target; gain a heavier one.
+        if losing, targetKg >= currentKg { return nil }
+        if !losing, targetKg <= currentKg { return nil }
+
+        let delta = abs(currentKg - targetKg)
+        guard delta >= 0.5 else { return nil } // already essentially there
+
+        let weeklyRateKg = Double(abs(goal.calorieDelta)) * 7.0 / kcalPerKg
+        guard weeklyRateKg > 0 else { return nil }
+
+        let weeks = max(1, Int((delta / weeklyRateKg).rounded()))
+        let goalDate = Calendar.current
+            .date(byAdding: .day, value: weeks * 7, to: startDate) ?? startDate
+
+        return WeightProjection(
+            startKg: currentKg, targetKg: targetKg,
+            weeks: weeks, goalDate: goalDate,
+            weeklyRateKg: weeklyRateKg, losing: losing
         )
     }
 

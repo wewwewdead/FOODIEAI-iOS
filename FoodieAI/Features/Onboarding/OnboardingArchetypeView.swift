@@ -96,13 +96,13 @@ struct OnboardingArchetypeView: View {
         guard let archetype = vm.archetype else { return nil }
         switch archetype {
         case .aware:
-            return "Got it — FoodieAI will help you stay aware of what you eat."
+            return "Got it, FoodieAI will help you stay aware of what you eat."
         case .loseWeight:
-            return "Got it — we'll tune things to keep your day in balance."
+            return "Got it, we'll tune things to keep your day in balance."
         case .buildMuscle:
-            return "Got it — we'll lean into protein and fuel for training."
+            return "Got it, we'll lean into protein and fuel for training."
         case .curious:
-            return "Got it — we'll keep things light and curious."
+            return "Got it, we'll keep things light and curious."
         }
     }
 

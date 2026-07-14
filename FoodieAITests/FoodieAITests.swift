@@ -1672,7 +1672,7 @@ final class FoodMirrorInsightServiceTests: XCTestCase {
             let lower = copy.lowercased()
             for word in forbidden {
                 XCTAssertFalse(lower.contains(word),
-                               "Insight copy must not contain '\(word)' — got: '\(copy)'")
+                               "Insight copy must not contain '\(word)', got: '\(copy)'")
             }
         }
     }
@@ -1873,7 +1873,7 @@ final class FoodMirrorInsightServiceTests: XCTestCase {
             let lower = copy.lowercased()
             for word in forbidden {
                 XCTAssertFalse(lower.contains(word),
-                               "Nudge copy must not contain '\(word)' — got: '\(copy)'")
+                               "Nudge copy must not contain '\(word)', got: '\(copy)'")
             }
         }
     }
@@ -4556,7 +4556,7 @@ final class FoodOSStoryBuilderTests: XCTestCase {
             uniqueFoodCount:   uniqueCount
         )
         XCTAssertEqual(hero,
-                       "You're mostly exploring — but Sweet potato is becoming a reliable anchor.")
+                       "You're mostly exploring, but Sweet potato is becoming a reliable anchor.")
     }
 
     /// Pure explorer — no food repeats more than once → "exploring
@@ -4576,7 +4576,7 @@ final class FoodOSStoryBuilderTests: XCTestCase {
             uniqueFoodCount:   uniqueCount
         )
         XCTAssertEqual(hero,
-                       "You're exploring widely — your meals rarely repeat.")
+                       "You're exploring widely, your meals rarely repeat.")
     }
 
     // MARK: 3. recognition evidence includes count + window
@@ -4665,7 +4665,7 @@ final class FoodOSStoryBuilderTests: XCTestCase {
             thirtyDayLogCount:   30,
             sevenDayLogCount:    6,
             moodLogCount:        4,
-            eatingIdentity:      "You're mostly exploring — but Sweet potato is becoming a reliable anchor.",
+            eatingIdentity:      "You're mostly exploring, but Sweet potato is becoming a reliable anchor.",
             weeklySummary:       nil,
             mostCommonFoods:     [FoodMirrorSummary.FoodCount(name: "Sweet potato", count: 6)],
             moodInsight:         nil,
@@ -4689,13 +4689,13 @@ final class FoodOSStoryBuilderTests: XCTestCase {
     /// top food count).
     func test_contradictionGuard_catchesExplorerVsAnchorConflict() {
         let bad = FoodOSNarrativePolicy.hasRarelyRepeatContradiction(
-            hero: "You're an explorer — your meals rarely repeat.",
+            hero: "You're an explorer, your meals rarely repeat.",
             topFoodCount: 6
         )
         XCTAssertTrue(bad)
 
         let ok = FoodOSNarrativePolicy.hasRarelyRepeatContradiction(
-            hero: "You're an explorer — your meals rarely repeat.",
+            hero: "You're an explorer, your meals rarely repeat.",
             topFoodCount: 2
         )
         XCTAssertFalse(ok)
@@ -6028,15 +6028,40 @@ final class MovementGoalNarratorTests: XCTestCase {
 
     // MARK: MovementGuidance — goal + line agree
 
-    func test_guidance_overEating_explainsExtraStepsAndNudgedGoal() {
+    func test_guidance_overEating_explainsRemainingStepsAndNudgedGoal() {
         let r = MovementGuidance.compute(
             direction: .maintain, ageYears: 30, currentSteps: 4_000,
             consumed: 2_200, calorieGoal: 2_000, weightKg: 70)
         XCTAssertEqual(r.stepGoal, 13_000)
         XCTAssertEqual(r.baseStepGoal, 8_000)
         XCTAssertTrue(r.line.contains("200 over"))
-        XCTAssertTrue(r.line.lowercased().contains("extra steps"))
+        XCTAssertTrue(r.line.lowercased().contains("more steps"))
         XCTAssertTrue(r.line.contains("13,000"))   // nudged goal stated
+        // Progress-aware: walking more shrinks the steps still owed.
+        let r2 = MovementGuidance.compute(
+            direction: .maintain, ageYears: 30, currentSteps: 10_000,
+            consumed: 2_200, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertTrue(r2.line.contains("3,000 more steps"))  // 13,000 − 10,000
+    }
+
+    func test_guidance_overEating_pastBumpedGoal_celebratesMoreThanOffset() {
+        // Over by 200 → goal bumped to 13k (fully covers it), walked 18k past it.
+        let r = MovementGuidance.compute(
+            direction: .maintain, ageYears: 30, currentSteps: 18_000,
+            consumed: 2_200, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(r.stepGoal, 13_000)
+        XCTAssertTrue(r.line.lowercased().contains("more than walked off"))
+    }
+
+    func test_guidance_overEating_cappedGoal_pastIt_doesNotClaimFullOffset() {
+        // Over by 800 → goal capped at 15k, which only chips at the excess.
+        // Even past the goal, the copy must NOT claim it's fully walked off.
+        let r = MovementGuidance.compute(
+            direction: .maintain, ageYears: 30, currentSteps: 17_000,
+            consumed: 2_800, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(r.stepGoal, 15_000)
+        XCTAssertTrue(r.line.lowercased().contains("chipping it down"))
+        XCTAssertFalse(r.line.lowercased().contains("more than walked off"))
     }
 
     func test_guidance_hitAdjustedGoal_saysBalanced() {
@@ -6071,6 +6096,46 @@ final class MovementGoalNarratorTests: XCTestCase {
         XCTAssertEqual(r.stepGoal, 7_000)
         XCTAssertFalse(r.line.lowercased().contains("extra steps"))
         XCTAssertFalse(r.line.lowercased().contains("eased"))
+    }
+
+    // MARK: Step over-delivery — the surplus moment (the reported gap)
+
+    func test_guidance_underEating_butPastFloor_celebratesSurplus() {
+        // Ate under → goal eased to the 6k floor, then blew past it to 10k.
+        // The line must headline the over-delivery, not the eased goal.
+        let r = MovementGuidance.compute(
+            direction: .lose, ageYears: 30, currentSteps: 10_000,
+            consumed: 1_450, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(r.stepGoal, 6_000)
+        XCTAssertTrue(r.line.lowercased().contains("past today's floor"))
+        XCTAssertTrue(r.line.lowercased().contains("ahead of plan"))
+        XCTAssertFalse(r.line.lowercased().contains("eased"))
+    }
+
+    func test_guidance_onGoal_pastFloor_offersSnackRoom() {
+        // Ate on goal, base 8k floor, walked 12k → maintain surplus moment.
+        let r = MovementGuidance.compute(
+            direction: .maintain, ageYears: 30, currentSteps: 12_000,
+            consumed: 2_000, calorieGoal: 2_000, weightKg: 70)
+        XCTAssertEqual(r.stepGoal, 8_000)
+        XCTAssertTrue(r.line.lowercased().contains("past your floor"))
+        XCTAssertTrue(r.line.lowercased().contains("snack"))
+    }
+
+    func test_surplusLine_gain_saysEatItBack_notDeficit() {
+        let s = MovementGoalNarrator.surplusLine(
+            direction: .gain, surplusSteps: 5_000, weightKg: 70)
+        XCTAssertTrue(s.lowercased().contains("eat it back"))
+        XCTAssertFalse(s.lowercased().contains("deficit"))
+    }
+
+    func test_goalSuggestion_smallOvershoot_stillAffirms_noSurplusSpam() {
+        // A 500-step overshoot is "goal hit", not a celebration — guards the
+        // 1,000-step surplus threshold so the moment stays earned.
+        let s = MovementGoalNarrator.goalSuggestion(
+            direction: .lose, currentSteps: 10_500, goalSteps: 10_000, weightKg: 70)
+        XCTAssertTrue(s.lowercased().contains("goal hit"))
+        XCTAssertFalse(s.lowercased().contains("past today's floor"))
     }
 }
 
@@ -6147,11 +6212,12 @@ final class StreakMathTests: XCTestCase {
 
 final class OnboardingScanFirstTests: XCTestCase {
     @MainActor
-    func test_getStarted_signedOut_goesToSignInFirst() {
-        // Sign-in is the first onboarding step; goal + physiology run after it.
+    func test_getStarted_signedOut_goesToQuizFirst() {
+        // Phase 23: the quiz comes first for everyone; sign-in is deferred to
+        // the end so the user sees value before the sign-in wall.
         let vm = OnboardingViewModel(initialStep: .hero)
         vm.startFromHero(isSignedIn: false)
-        XCTAssertEqual(vm.step, .signIn)
+        XCTAssertEqual(vm.step, .archetype)
     }
 
     @MainActor
@@ -6163,38 +6229,61 @@ final class OnboardingScanFirstTests: XCTestCase {
     }
 
     @MainActor
-    func test_continueFromGoal_goesToPhysiology() {
-        // Goal → physiology (age/height/weight/activity → accurate target),
-        // then sign-in.
+    func test_continueFromGoal_goesToBarriers() {
+        // Phase 23: goal → barriers (empathy/commitment) → physiology.
         let vm = OnboardingViewModel(initialStep: .archetype)
         vm.continueFromGoal(isSignedIn: false)
-        XCTAssertEqual(vm.step, .physiology)
+        XCTAssertEqual(vm.step, .barriers)
     }
 
     @MainActor
-    func test_skipGoal_seedsAwareAndGoesToPhysiology() {
+    func test_skipGoal_seedsAwareAndGoesToBarriers() {
         let vm = OnboardingViewModel(initialStep: .archetype)
         vm.skipArchetype(isSignedIn: false)
         XCTAssertEqual(vm.archetype, .aware)
-        XCTAssertEqual(vm.step, .physiology)
+        XCTAssertEqual(vm.step, .barriers)
     }
 
     @MainActor
-    func test_physiology_advancesToCompleting() {
-        // Physiology (save or skip) completes onboarding — sign-in already
-        // happened up front; the rest of the survey stays deferred.
+    func test_barriers_advancesToPhysiology_andBackToArchetype() {
+        let vm = OnboardingViewModel(initialStep: .barriers)
+        vm.advance()
+        XCTAssertEqual(vm.step, .physiology)
+        vm.back()               // physiology → barriers
+        XCTAssertEqual(vm.step, .barriers)
+        vm.back()               // barriers → archetype
+        XCTAssertEqual(vm.step, .archetype)
+    }
+
+    @MainActor
+    func test_planReveal_toSignIn_toOffer_toCompleting() {
+        // Full tail of the reordered flow (Phase 23): plan reveal (physiology)
+        // → sign-in → the previously orphaned subscription offer → completing.
         let vm = OnboardingViewModel(initialStep: .physiology)
+        vm.advance()
+        XCTAssertEqual(vm.step, .signIn)
+        vm.signInDidComplete()
+        XCTAssertEqual(vm.step, .subscription)
         vm.advance()
         XCTAssertEqual(vm.step, .completing)
     }
 
     @MainActor
-    func test_signIn_goesToGoalSetup() {
-        // Sign-in is first; completing it leads into the goal + physiology
-        // setup, not straight to completion.
+    func test_subscription_backReturnsToPhysiology() {
+        // Back from the offer returns to the plan reveal, not the old
+        // (deferred) notifications step.
+        let vm = OnboardingViewModel(initialStep: .subscription)
+        vm.back()
+        XCTAssertEqual(vm.step, .physiology)
+    }
+
+    @MainActor
+    func test_signIn_advancesToOfferAtEnd() {
+        // Phase 23: sign-in is the last interactive step (after the plan
+        // reveal); completing it leads into the subscription offer.
         let vm = OnboardingViewModel(initialStep: .signIn)
         vm.signInDidComplete()
-        XCTAssertEqual(vm.step, .archetype)
+        XCTAssertEqual(vm.step, .subscription)
     }
 
     @MainActor
@@ -6202,6 +6291,48 @@ final class OnboardingScanFirstTests: XCTestCase {
         let vm = OnboardingViewModel(initialStep: .completing)
         vm.signInDidComplete()
         XCTAssertEqual(vm.step, .completing)
+    }
+
+    @MainActor
+    func test_funnel_recordsReachedStepsInOrderWithoutDupes() {
+        // Local funnel buffer: seeded with the initial step, then appended on
+        // each distinct transition (deduped).
+        let vm = OnboardingViewModel(initialStep: .hero)
+        vm.startFromHero(isSignedIn: false)     // → archetype
+        vm.continueFromGoal(isSignedIn: false)  // → barriers
+        vm.advance()                            // barriers → physiology
+        XCTAssertEqual(vm.reachedSteps, ["hero", "archetype", "barriers", "physiology"])
+    }
+}
+
+// MARK: - Weight projection (onboarding plan-reveal timeline)
+
+final class WeightProjectionTests: XCTestCase {
+    // ±500 kcal/day ⇒ 500*7/7700 ≈ 0.4545 kg/week.
+    func test_loseProjection_weeksAndDirection() {
+        let p = CalorieGoalCalculator.projectWeight(currentKg: 80, targetKg: 70, goal: .lose)
+        XCTAssertNotNil(p)
+        XCTAssertEqual(p?.weeks, 22)          // 10 / 0.4545 = 22.0
+        XCTAssertEqual(p?.losing, true)
+    }
+
+    func test_gainProjection_weeksAndDirection() {
+        let p = CalorieGoalCalculator.projectWeight(currentKg: 60, targetKg: 65, goal: .gain)
+        XCTAssertEqual(p?.weeks, 11)          // 5 / 0.4545 = 11.0
+        XCTAssertEqual(p?.losing, false)
+    }
+
+    func test_maintain_hasNoProjection() {
+        XCTAssertNil(CalorieGoalCalculator.projectWeight(currentKg: 80, targetKg: 70, goal: .maintain))
+    }
+
+    func test_wrongDirection_hasNoProjection() {
+        // A lose goal with a heavier target must not draw a misleading line.
+        XCTAssertNil(CalorieGoalCalculator.projectWeight(currentKg: 70, targetKg: 80, goal: .lose))
+    }
+
+    func test_negligibleDelta_hasNoProjection() {
+        XCTAssertNil(CalorieGoalCalculator.projectWeight(currentKg: 70.2, targetKg: 70.0, goal: .lose))
     }
 }
 
@@ -6305,5 +6436,757 @@ final class WidgetSnapshotRolloverTests: XCTestCase {
         let rendered = kstDate(2026, 6, 28, 10, 0)
         XCTAssertTrue(snap.isFromSameDay(as: rendered, calendar: kst))
         XCTAssertEqual(snap.rolledOver(to: rendered, calendar: kst), snap)
+    }
+}
+
+
+// MARK: - Visual Food Memory (NOVEL_DIRECTIONS Idea 4)
+
+final class VisualFoodMemoryTests: XCTestCase {
+    private func desc(_ v: [Float]) -> VisualDescriptor { VisualDescriptor(vector: v) }
+    private func entry(_ name: String, _ v: [Float], day: Int = 1) -> VisualMemoryEntry {
+        VisualMemoryEntry(foodName: name, descriptor: desc(v),
+                          loggedAt: Date(timeIntervalSince1970: TimeInterval(day) * 86_400))
+    }
+
+    func testDistanceIsEuclidean() {
+        XCTAssertEqual(desc([0, 0]).distance(to: desc([3, 4])), 5, accuracy: 0.0001)
+        XCTAssertEqual(desc([1, 2, 3]).distance(to: desc([1, 2, 3])), 0, accuracy: 0.0001)
+    }
+
+    func testMismatchedDimsAreInfinitelyFar() {
+        XCTAssertEqual(desc([1, 2]).squaredDistance(to: desc([1, 2, 3])),
+                       .greatestFiniteMagnitude)
+    }
+
+    func testNearestPicksClosest() {
+        let entries = [entry("pizza", [10, 10]), entry("salad", [0, 0]), entry("burger", [5, 5])]
+        let match = VisualFoodMatcher.nearest(to: desc([0.5, 0.5]), in: entries)
+        XCTAssertEqual(match?.entry.foodName, "salad")
+    }
+
+    func testNearestEmptyIsNil() {
+        XCTAssertNil(VisualFoodMatcher.nearest(to: desc([1, 1]), in: []))
+    }
+
+    func testNearestTieBreaksToEarlierLog() {
+        let a = entry("early", [1, 0], day: 1)
+        let b = entry("late", [-1, 0], day: 2)   // both distance 1 from origin
+        let match = VisualFoodMatcher.nearest(to: desc([0, 0]), in: [b, a])
+        XCTAssertEqual(match?.entry.foodName, "early")
+    }
+
+    func testOccurrencesWithinThresholdSortedNearest() {
+        let entries = [entry("a", [0, 0]), entry("b", [1, 0]), entry("c", [10, 0])]
+        let occ = VisualFoodMatcher.occurrences(of: desc([0, 0]), in: entries, within: 2)
+        XCTAssertEqual(occ.map { $0.entry.foodName }, ["a", "b"])
+    }
+
+    func testTimesSeenIsClusterSize() {
+        let entries = [entry("a", [0, 0]), entry("a", [0.2, 0]),
+                       entry("a", [0.4, 0]), entry("z", [50, 0])]
+        XCTAssertEqual(VisualFoodMatcher.timesSeen(desc([0, 0]), in: entries, within: 1), 3)
+    }
+
+    func testSuggestedNameOnlyWhenConfident() {
+        let entries = [entry("ramen", [0, 0])]
+        XCTAssertEqual(
+            VisualFoodMatcher.suggestedName(for: desc([0.1, 0]), in: entries, maxDistance: 1),
+            "ramen")
+        XCTAssertNil(
+            VisualFoodMatcher.suggestedName(for: desc([5, 0]), in: entries, maxDistance: 1))
+    }
+
+    func testDescriptorRoundTripsThroughCodable() throws {
+        let d = desc([1.5, -2.25, 3.0, 0])
+        let data = try JSONEncoder().encode(d)
+        let back = try JSONDecoder().decode(VisualDescriptor.self, from: data)
+        XCTAssertEqual(back, d)
+    }
+
+    func testStoreRecordsButStaysSilentUntilCalibrated() async {
+        let store = VisualFoodMemory(entries: [])
+        await store.record(foodName: "poke", descriptor: desc([0, 0]), at: Date())
+        let count = await store.count
+        XCTAssertEqual(count, 1)
+        // One entry is not enough to learn a threshold, so recognition is silent.
+        let learned = await store.learnedThreshold
+        XCTAssertNil(learned)
+        let name = await store.suggestedName(for: desc([0, 0]))
+        XCTAssertNil(name)
+        let seen = await store.timesSeen(desc([0, 0]))
+        XCTAssertEqual(seen, 0)
+    }
+
+    // Calibration: learn a "same dish" threshold from labeled repeats.
+    func testCalibratedThresholdNilWithoutEnoughSameDishPairs() {
+        let entries = [entry("poke", [0, 0]), entry("poke", [1, 0]), entry("burger", [50, 0])]
+        XCTAssertNil(VisualFoodMatcher.calibratedThreshold(from: entries))  // 1 same pair < 4
+    }
+
+    func testCalibratedThresholdLearnsFromRepeats() {
+        let entries = [
+            entry("poke", [0, 0]), entry("poke", [1, 0]), entry("poke", [2, 0]), entry("poke", [3, 0]),
+            entry("burger", [50, 0]), entry("burger", [51, 0]),
+        ]
+        let t = VisualFoodMatcher.calibratedThreshold(from: entries)
+        XCTAssertNotNil(t)
+        XCTAssertGreaterThanOrEqual(t ?? 0, 1)
+        XCTAssertLessThan(t ?? 999, 20)   // well under the different-dish gap (~48)
+    }
+
+    func testStoreRecognizesAfterEnoughRepeats() async {
+        let seed = [
+            entry("poke", [0, 0]), entry("poke", [1, 0]), entry("poke", [2, 0]), entry("poke", [3, 0]),
+            entry("burger", [50, 0]), entry("burger", [51, 0]),
+        ]
+        let store = VisualFoodMemory(entries: seed)
+        let learned = await store.learnedThreshold
+        XCTAssertNotNil(learned)
+        // A new poke-like photo is recognized; a clearly-different one is not.
+        let name = await store.suggestedName(for: desc([0.5, 0]))
+        XCTAssertEqual(name, "poke")
+        let far = await store.suggestedName(for: desc([100, 0]))
+        XCTAssertNil(far)
+        let seen = await store.timesSeen(desc([0.5, 0]))
+        XCTAssertGreaterThanOrEqual(seen, 3)
+    }
+
+    func testStoreRejectsEmptyNameOrVector() async {
+        let store = VisualFoodMemory(entries: [])
+        await store.record(foodName: "  ", descriptor: desc([1, 2]), at: Date())
+        await store.record(foodName: "x", descriptor: desc([]), at: Date())
+        let count = await store.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testStoreCapsAtMax() async {
+        let store = VisualFoodMemory(entries: [])
+        for i in 0..<(VisualFoodMemory.maxEntries + 25) {
+            await store.record(foodName: "m\(i)", descriptor: desc([Float(i), 0]), at: Date())
+        }
+        let count = await store.count
+        XCTAssertEqual(count, VisualFoodMemory.maxEntries)
+    }
+
+    // Robustness: corrupt (non-finite) prints must never store or match.
+    func testDescriptorValidity() {
+        XCTAssertTrue(desc([1, 2, 3]).isValid)
+        XCTAssertFalse(desc([]).isValid)
+        XCTAssertFalse(desc([1, Float.nan, 3]).isValid)
+        XCTAssertFalse(desc([1, Float.infinity]).isValid)
+    }
+
+    func testNonFiniteIsInfinitelyFar() {
+        XCTAssertEqual(desc([1, 2]).squaredDistance(to: desc([1, Float.nan])),
+                       .greatestFiniteMagnitude)
+    }
+
+    func testStoreRejectsNonFiniteDescriptor() async {
+        let store = VisualFoodMemory(entries: [])
+        await store.record(foodName: "bad", descriptor: desc([1, Float.nan]), at: Date())
+        let count = await store.count
+        XCTAssertEqual(count, 0)
+    }
+}
+
+
+// MARK: - Meal Twin engine (NOVEL_DIRECTIONS Idea 2)
+
+final class MealTwinEngineTests: XCTestCase {
+    private typealias Slot = MealSuggestionEngine.MealSlot
+
+    private func meal(_ name: String, _ cal: Double, _ slot: Slot, mood: Double = 0.5) -> TwinMeal {
+        TwinMeal(name: name, calories: cal, slot: slot, moodPositiveRate: mood)
+    }
+
+    func testBaselineLandingProjectsTypicalRemainingSlots() {
+        let ctx = MealTwinContext(
+            hour: 12, consumedSoFar: 500, goal: 2000, direction: .maintain,
+            loggedSlots: [.breakfast],
+            typicalMeals: [meal("wrap", 400, .lunch), meal("pasta", 700, .dinner)])
+        let p = MealTwinEngine.project(ctx)
+        XCTAssertEqual(p.baselineLandingKcal, 1600, accuracy: 0.001) // 500 + 400 + 700
+        XCTAssertEqual(p.baselineVsGoal, -400, accuracy: 0.001)
+    }
+
+    func testPrefersMoveThatLandsCloserToGoal() {
+        let ctx = MealTwinContext(
+            hour: 18, consumedSoFar: 1000, goal: 2000, direction: .maintain,
+            loggedSlots: [.breakfast, .lunch],
+            typicalMeals: [meal("light", 900, .dinner), meal("heavy", 1500, .dinner)])
+        let move = MealTwinEngine.project(ctx).move
+        XCTAssertEqual(move?.meal.name, "light")            // 1900 beats 2500
+        XCTAssertEqual(move?.slot, .dinner)
+    }
+
+    func testMoodBreaksTieBetweenEqualCalorieMoves() {
+        let ctx = MealTwinContext(
+            hour: 18, consumedSoFar: 1000, goal: 2000, direction: .maintain,
+            loggedSlots: [.breakfast, .lunch],
+            typicalMeals: [meal("dull", 1000, .dinner, mood: 0.3),
+                           meal("joy", 1000, .dinner, mood: 0.9)])
+        let move = MealTwinEngine.project(ctx).move
+        XCTAssertEqual(move?.meal.name, "joy")              // same landing → mood decides
+        XCTAssertTrue(move?.landsOnGoal == true)            // 2000 exactly
+        XCTAssertTrue(move?.reason.contains("mood") == true)
+    }
+
+    func testLoseDirectionTreatsUnderGoalAsOnGoal() {
+        let ctx = MealTwinContext(
+            hour: 18, consumedSoFar: 1000, goal: 1800, direction: .lose,
+            loggedSlots: [.breakfast, .lunch],
+            typicalMeals: [meal("salad", 500, .dinner, mood: 0.7)])
+        let move = MealTwinEngine.project(ctx).move
+        XCTAssertEqual(move?.projectedLandingKcal ?? 0, 1500, accuracy: 0.001)
+        XCTAssertTrue(move?.landsOnGoal == true)            // under goal is success for `lose`
+    }
+
+    func testNoRemainingSlotsYieldsNoMove() {
+        let ctx = MealTwinContext(
+            hour: 21, consumedSoFar: 1900, goal: 2000, direction: .maintain,
+            loggedSlots: [.breakfast, .lunch, .dinner],
+            typicalMeals: [meal("pasta", 700, .dinner)])
+        let p = MealTwinEngine.project(ctx)
+        XCTAssertNil(p.move)
+        XCTAssertEqual(p.baselineLandingKcal, 1900, accuracy: 0.001)
+    }
+
+    func testNextMoveIsEarliestRemainingSlot() {
+        let ctx = MealTwinContext(
+            hour: 12, consumedSoFar: 400, goal: 2000, direction: .maintain,
+            loggedSlots: [.breakfast],
+            typicalMeals: [meal("wrap", 500, .lunch), meal("pasta", 700, .dinner)])
+        // lunch is earlier than dinner and both are ahead → lunch decided first.
+        XCTAssertEqual(MealTwinEngine.project(ctx).move?.slot, .lunch)
+    }
+}
+
+
+// MARK: - Causal Nudges / uplift (NOVEL_DIRECTIONS Idea 3)
+
+final class NudgeUpliftModelTests: XCTestCase {
+    private let ctx = NudgeContext(dayPart: 2, isWeekend: false, streakAtRisk: false)
+
+    func testUpliftPositiveWhenNudgeHelps() {
+        let s = NudgeStats(treatedSent: 10, treatedLogged: 8, controlSeen: 10, controlLogged: 3)
+        XCTAssertGreaterThan(NudgeUpliftModel.uplift(s), 0)
+    }
+
+    func testUpliftNegativeWhenNudgeDoesntHelp() {
+        let s = NudgeStats(treatedSent: 10, treatedLogged: 3, controlSeen: 10, controlLogged: 8)
+        XCTAssertLessThan(NudgeUpliftModel.uplift(s), 0)
+    }
+
+    func testColdStartExplores() {
+        let empty = NudgeStats()
+        // No data → randomize regardless of roll; coin picks the arm.
+        XCTAssertEqual(NudgeUpliftModel.decide(stats: empty, roll: 0.99, coin: 0.3),
+                       .send(.cold))
+        XCTAssertEqual(NudgeUpliftModel.decide(stats: empty, roll: 0.99, coin: 0.7),
+                       .withhold(.control))
+    }
+
+    func testExploitSendsWhenUpliftPositive() {
+        let s = NudgeStats(treatedSent: 10, treatedLogged: 8, controlSeen: 10, controlLogged: 3)
+        // roll above exploration → exploit; uplift > 0 → send.
+        XCTAssertEqual(NudgeUpliftModel.decide(stats: s, roll: 0.9, coin: 0.9),
+                       .send(.exploit))
+    }
+
+    func testExploitWithholdsWhenUpliftNotPositive() {
+        let s = NudgeStats(treatedSent: 10, treatedLogged: 3, controlSeen: 10, controlLogged: 8)
+        XCTAssertEqual(NudgeUpliftModel.decide(stats: s, roll: 0.9, coin: 0.1),
+                       .withhold(.exploit))
+    }
+
+    func testExploresEvenWithDataWhenRollLow() {
+        let s = NudgeStats(treatedSent: 10, treatedLogged: 8, controlSeen: 10, controlLogged: 3)
+        // roll below exploration rate → keep randomizing to stay fresh.
+        XCTAssertEqual(NudgeUpliftModel.decide(stats: s, explorationRate: 0.2, roll: 0.1, coin: 0.3),
+                       .send(.explore))
+        XCTAssertEqual(NudgeUpliftModel.decide(stats: s, explorationRate: 0.2, roll: 0.1, coin: 0.8),
+                       .withhold(.control))
+    }
+
+    func testStoreRecordsTreatedAndControlSeparately() async {
+        let store = NudgeUpliftStore(stats: [:])
+        await store.record(kind: .mealReminder, context: ctx, sent: true, logged: true)
+        await store.record(kind: .mealReminder, context: ctx, sent: false, logged: false)
+        let s = await store.stats(for: .mealReminder, context: ctx)
+        XCTAssertEqual(s.treatedSent, 1)
+        XCTAssertEqual(s.treatedLogged, 1)
+        XCTAssertEqual(s.controlSeen, 1)
+        XCTAssertEqual(s.controlLogged, 0)
+    }
+
+    func testStoreDecisionIsColdBeforeData() async {
+        let store = NudgeUpliftStore(stats: [:])
+        let d = await store.decision(for: .comeback, context: ctx, roll: 0.99, coin: 0.1)
+        XCTAssertEqual(d, .send(.cold))
+    }
+
+    func testDayPartBuckets() {
+        XCTAssertEqual(NudgeContext.dayPart(forHour: 3), 0)
+        XCTAssertEqual(NudgeContext.dayPart(forHour: 9), 1)
+        XCTAssertEqual(NudgeContext.dayPart(forHour: 14), 2)
+        XCTAssertEqual(NudgeContext.dayPart(forHour: 21), 3)
+    }
+
+    // A low control rate keeps a user-facing reminder from being dropped often:
+    // most explore draws send, only high coins withhold for a control sample.
+    func testControlRateWidensSendRange() {
+        let empty = NudgeStats()
+        XCTAssertEqual(NudgeUpliftModel.decide(stats: empty, controlRate: 0.15, roll: 0.99, coin: 0.8),
+                       .send(.cold))
+        XCTAssertEqual(NudgeUpliftModel.decide(stats: empty, controlRate: 0.15, roll: 0.99, coin: 0.9),
+                       .withhold(.control))
+    }
+
+    func testOutcomeEvaluatorScoresWindow() {
+        let fired = Date(timeIntervalSince1970: 1_000_000)
+        let p = NudgePending(kind: .calorieBalance, context: ctx, sent: true,
+                             firedAt: fired, windowHours: 2)
+        // A log inside the window scores true, even before the window closes.
+        let midWindow = fired.addingTimeInterval(1800)
+        let r1 = NudgeOutcomeEvaluator.resolve(pending: [p], logDates: [midWindow], now: midWindow)
+        XCTAssertEqual(r1.resolved.first?.logged, true)
+        XCTAssertTrue(r1.remaining.isEmpty)
+
+        // No log and the window is still open → stays pending.
+        let r2 = NudgeOutcomeEvaluator.resolve(pending: [p], logDates: [], now: fired.addingTimeInterval(600))
+        XCTAssertTrue(r2.resolved.isEmpty)
+        XCTAssertEqual(r2.remaining.count, 1)
+
+        // No log and the window has closed → scores false.
+        let r3 = NudgeOutcomeEvaluator.resolve(pending: [p], logDates: [], now: fired.addingTimeInterval(3 * 3600))
+        XCTAssertEqual(r3.resolved.first?.logged, false)
+        XCTAssertTrue(r3.remaining.isEmpty)
+    }
+
+    func testTrackerCommitsDayStableDecisionAndResolves() async {
+        let tracker = NudgeOutcomeTracker(pending: [])
+        let fired = Date(timeIntervalSince1970: 2_000_000)
+        let before = await tracker.todaysDecision(kind: .calorieBalance, dayKey: "2026-07-04")
+        XCTAssertNil(before)
+        await tracker.commit(kind: .calorieBalance, context: ctx, dayKey: "2026-07-04",
+                             sent: false, firedAt: fired, windowHours: 2)
+        let after = await tracker.todaysDecision(kind: .calorieBalance, dayKey: "2026-07-04")
+        XCTAssertEqual(after, false)   // committed + stable for the day
+        // After the window with no log → a control outcome (sent:false, logged:false).
+        let resolved = await tracker.resolve(logDates: [], now: fired.addingTimeInterval(3 * 3600))
+        XCTAssertEqual(resolved.count, 1)
+        XCTAssertEqual(resolved.first?.sent, false)
+        XCTAssertEqual(resolved.first?.logged, false)
+    }
+}
+
+
+// MARK: - One Brain surface policy (NOVEL_DIRECTIONS Idea 1)
+
+final class SurfacePolicyTests: XCTestCase {
+    private let neutral = SurfaceContext(
+        hour: 12, remainingBudgetFraction: 0.5, streakAtRisk: false,
+        daysSinceLastLog: 0, recentMoodPositiveRate: 0.5)
+
+    private func cand(_ kind: SurfaceKind, base: Double, eligible: Bool = true,
+                      pref: Double = 0.5, rel: Double = 0.5) -> SurfaceCandidate {
+        SurfaceCandidate(kind: kind, basePriority: base, eligible: eligible,
+                         preference: pref, contextRelevance: rel)
+    }
+
+    func testIneligibleNeverRanks() {
+        let ranked = SurfacePolicy.rank([
+            cand(.dailyQuest, base: 90, eligible: false),
+            cand(.eatToGoal, base: 60, eligible: true),
+        ])
+        XCTAssertEqual(ranked.map(\.kind), [.eatToGoal])
+    }
+
+    func testNeutralVectorReproducesBasePriorityOrder() {
+        // All preference 0.5 + relevance 0.5 → score == basePriority.
+        let ranked = SurfacePolicy.rank([
+            cand(.trendCoach, base: 80),
+            cand(.foodOSMoment, base: 95),
+            cand(.recordsBanner, base: 40),
+        ])
+        XCTAssertEqual(ranked.map(\.kind), [.foodOSMoment, .trendCoach, .recordsBanner])
+        XCTAssertEqual(SurfacePolicy.score(cand(.trendCoach, base: 80)), 80, accuracy: 0.001)
+    }
+
+    func testPreferenceBoostsAndSuppresses() {
+        XCTAssertEqual(SurfacePolicy.score(cand(.dailyQuest, base: 50, pref: 1.0)),
+                       62, accuracy: 0.001)   // +12
+        XCTAssertEqual(SurfacePolicy.score(cand(.dailyQuest, base: 50, pref: 0.0)),
+                       38, accuracy: 0.001)   // −12
+    }
+
+    // The point of One Brain: context can promote a lower-base surface above a
+    // higher-base one when it's genuinely more relevant right now.
+    func testContextRelevancePromotesStreakNudgeWhenAtRisk() {
+        let risk = SurfaceContext(hour: 20, remainingBudgetFraction: 0.2,
+                                  streakAtRisk: true, daysSinceLastLog: 0,
+                                  recentMoodPositiveRate: 0.5)
+        let candidates = [
+            SurfacePolicy.make(.foodOSMoment, basePriority: 70, eligible: true, context: risk),
+            SurfacePolicy.make(.streakNudge, basePriority: 60, eligible: true, context: risk),
+        ]
+        // streakNudge (60 + relevance 1.0 → 72) outranks foodOSMoment (70).
+        XCTAssertEqual(SurfacePolicy.top(candidates)?.kind, .streakNudge)
+    }
+
+    func testRelevanceRules() {
+        let risk = SurfaceContext(hour: 8, remainingBudgetFraction: 0.7,
+                                  streakAtRisk: true, daysSinceLastLog: 3,
+                                  recentMoodPositiveRate: 0.5)
+        XCTAssertEqual(SurfacePolicy.relevance(.streakNudge, in: risk), 1.0, accuracy: 0.001)
+        XCTAssertEqual(SurfacePolicy.relevance(.streakNudge, in: neutral), 0.1, accuracy: 0.001)
+        XCTAssertEqual(SurfacePolicy.relevance(.comeback, in: risk), 1.0, accuracy: 0.001)
+        XCTAssertEqual(SurfacePolicy.relevance(.comeback, in: neutral), 0.0, accuracy: 0.001)
+        XCTAssertEqual(SurfacePolicy.relevance(.eatToGoal, in: risk), 0.7, accuracy: 0.001)
+    }
+
+    func testFillPicksTopN() {
+        let ranked = SurfacePolicy.fill(slots: 2, from: [
+            cand(.trendCoach, base: 80),
+            cand(.foodOSMoment, base: 95),
+            cand(.recordsBanner, base: 40),
+        ])
+        XCTAssertEqual(ranked.map(\.kind), [.foodOSMoment, .trendCoach])
+    }
+
+    func testDeterministicTieBreakByKind() {
+        let ranked = SurfacePolicy.rank([
+            cand(.recordsBanner, base: 50),
+            cand(.dailyQuest, base: 50),
+        ])
+        // equal score → tie-break by rawValue: "dailyQuest" < "recordsBanner".
+        XCTAssertEqual(ranked.map(\.kind), [.dailyQuest, .recordsBanner])
+    }
+
+    // One Brain wiring: the Today soft-nudge slot picks one winner.
+    func testSoftNudgeArbitration() {
+        let roomy = SurfaceContext(hour: 12, remainingBudgetFraction: 0.9,
+                                   streakAtRisk: false, daysSinceLastLog: 0,
+                                   recentMoodPositiveRate: 0.5)
+        // Budget room → eat-to-goal outranks the (never time-critical) personalize.
+        let eat = SurfacePolicy.make(.eatToGoal, basePriority: 50, eligible: true, context: roomy)
+        let personalize = SurfacePolicy.make(.personalize, basePriority: 50, eligible: true, context: roomy)
+        XCTAssertEqual(SurfacePolicy.top([eat, personalize])?.kind, .eatToGoal)
+
+        // Near goal → eat-to-goal fades, personalize takes the slot.
+        let tight = SurfaceContext(hour: 12, remainingBudgetFraction: 0.05,
+                                   streakAtRisk: false, daysSinceLastLog: 0,
+                                   recentMoodPositiveRate: 0.5)
+        let eatTight = SurfacePolicy.make(.eatToGoal, basePriority: 50, eligible: true, context: tight)
+        let personalizeTight = SurfacePolicy.make(.personalize, basePriority: 50, eligible: true, context: tight)
+        XCTAssertEqual(SurfacePolicy.top([eatTight, personalizeTight])?.kind, .personalize)
+
+        // First-scan always leads the soft slot for a brand-new user.
+        let firstScan = SurfacePolicy.make(.firstScan, basePriority: 50, eligible: true, context: roomy)
+        XCTAssertEqual(SurfacePolicy.top([firstScan, personalize, eat])?.kind, .firstScan)
+    }
+}
+
+
+// MARK: - Twin meal repertoire builder (NOVEL_DIRECTIONS Idea 2)
+
+final class TwinMealBuilderTests: XCTestCase {
+    private let tz = TimeZone(identifier: "UTC")!
+
+    private func log(_ name: String, hour: Int, cal: Double = 500,
+                     mood: FoodLog.Mood? = nil) -> FoodLog {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = tz
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        var comps = c.dateComponents([.year, .month, .day], from: base)
+        comps.hour = hour; comps.minute = 0; comps.timeZone = tz
+        let dt = c.date(from: comps) ?? base
+        return FoodLog(
+            id: UUID(), userId: UUID(), foodName: name,
+            imagePath: nil, imageThumbPath: nil,
+            calories: cal, carbsG: 0, sugarG: 0, proteinG: nil, fatG: nil, fiberG: nil,
+            benefits: [], drawbacks: [], nutrients: [],
+            coachName: nil, coachAdvice: nil,
+            eatenAt: dt, createdAt: dt, origin: .analyzed, sourceLogId: nil, mood: mood)
+    }
+
+    func testGroupsByNameAndAveragesCalories() {
+        let meals = TwinMealBuilder.build(
+            from: [log("Pizza", hour: 18, cal: 800), log("pizza", hour: 19, cal: 1000)],
+            timeZone: tz)
+        XCTAssertEqual(meals.count, 1)
+        XCTAssertEqual(meals.first?.name, "pizza")          // most-recent (hour 19) casing
+        XCTAssertEqual(meals.first?.calories ?? 0, 900, accuracy: 0.001)
+        XCTAssertEqual(meals.first?.slot, .dinner)
+    }
+
+    func testModalSlotFromEatenHours() {
+        let meals = TwinMealBuilder.build(
+            from: [log("salad", hour: 12), log("salad", hour: 13), log("salad", hour: 19)],
+            timeZone: tz)
+        XCTAssertEqual(meals.first?.slot, .lunch)            // lunch×2 beats dinner×1
+    }
+
+    func testMoodRateFromPosteriorWhenEnoughEvidence() {
+        let meals = TwinMealBuilder.build(
+            from: [log("ramen", hour: 19, mood: .loved),
+                   log("ramen", hour: 19, mood: .loved),
+                   log("ramen", hour: 19, mood: .loved)],
+            timeZone: tz)
+        // 3 positive, 0 negative → (3+1)/(3+0+2) = 0.8
+        XCTAssertEqual(meals.first?.moodPositiveRate ?? 0, 0.8, accuracy: 0.001)
+    }
+
+    func testNeutralMoodRateUnderThinEvidence() {
+        let meals = TwinMealBuilder.build(
+            from: [log("toast", hour: 8, mood: .loved), log("toast", hour: 8)],
+            timeZone: tz)
+        XCTAssertEqual(meals.first?.moodPositiveRate ?? 0, 0.5, accuracy: 0.001) // total<3 → neutral
+    }
+
+    func testDropsOvernightOnlyDishes() {
+        // Logged only at 02:00 → forHour is nil → no slot → skipped.
+        let meals = TwinMealBuilder.build(from: [log("midnight snack", hour: 2)], timeZone: tz)
+        XCTAssertTrue(meals.isEmpty)
+    }
+
+    func testFrequencyCapAndOrdering() {
+        var logs: [FoodLog] = []
+        logs += Array(repeating: log("common", hour: 12), count: 5)
+        logs += Array(repeating: log("rare", hour: 12), count: 1)
+        let meals = TwinMealBuilder.build(from: logs, timeZone: tz, maxMeals: 1)
+        XCTAssertEqual(meals.map(\.name), ["common"])       // most-frequent kept, cap honored
+    }
+
+    func testEmptyHistoryYieldsEmptyRepertoire() {
+        XCTAssertTrue(TwinMealBuilder.build(from: [], timeZone: tz).isEmpty)
+    }
+}
+
+// MARK: - Phase 23: Vault conversions
+
+/// The Vault reuses the analyze-save payload verbatim: a logged meal snapshots
+/// into a `NewVaultItem`, and a `SavedFood` rebuilds a `NewFoodLog` for
+/// re-logging. These pure conversions are the risk surface — a dropped or
+/// mismatched field silently corrupts a saved food. Identity/dedup uses the
+/// same normalization as the heart + repeat detection.
+@MainActor
+final class VaultConversionTests: XCTestCase {
+
+    private func makeLog(
+        name: String = "Margherita Pizza",
+        proteinG: Double? = 12,
+        imagePath: String? = "u/1.jpg",
+        thumbPath: String? = "u/1_thumb.jpg"
+    ) -> FoodLog {
+        FoodLog(
+            id: UUID(), userId: UUID(),
+            foodName: name,
+            imagePath: imagePath, imageThumbPath: thumbPath,
+            calories: 285, carbsG: 35, sugarG: 4,
+            proteinG: proteinG, fatG: 9, fiberG: 3,
+            benefits: ["Good protein"], drawbacks: ["High sodium"],
+            nutrients: ["Calcium"],
+            coachName: "Coach", coachAdvice: "Enjoy in moderation.",
+            eatenAt: Date(), createdAt: Date(),
+            origin: .analyzed, sourceLogId: nil, mood: nil
+        )
+    }
+
+    private func makeSavedFood(name: String = "Oatmeal",
+                               sourceLogId: UUID? = UUID()) -> SavedFood {
+        SavedFood(
+            id: UUID(), userId: UUID(),
+            foodName: name,
+            imagePath: "u/2.jpg", imageThumbPath: "u/2_thumb.jpg",
+            calories: 300, carbsG: 54, sugarG: 1,
+            proteinG: 10, fatG: 5, fiberG: 8,
+            benefits: ["Fiber"], drawbacks: [], nutrients: ["Iron"],
+            coachName: "Coach", coachAdvice: "Great start.",
+            sourceLogId: sourceLogId, createdAt: Date()
+        )
+    }
+
+    func test_newVaultItem_fromLog_copiesPayloadAndPointsAtSourceLog() {
+        let log = makeLog()
+        let item = NewVaultItem(from: log)
+
+        XCTAssertEqual(item.foodName, log.foodName)
+        XCTAssertEqual(item.imagePath, log.imagePath)         // reuses the same Storage object
+        XCTAssertEqual(item.imageThumbPath, log.imageThumbPath)
+        XCTAssertEqual(item.calories, log.calories)
+        XCTAssertEqual(item.carbsG, log.carbsG)
+        XCTAssertEqual(item.sugarG, log.sugarG)
+        XCTAssertEqual(item.proteinG, log.proteinG)
+        XCTAssertEqual(item.fatG, log.fatG)
+        XCTAssertEqual(item.fiberG, log.fiberG)
+        XCTAssertEqual(item.benefits, log.benefits)
+        XCTAssertEqual(item.drawbacks, log.drawbacks)
+        XCTAssertEqual(item.nutrients, log.nutrients)
+        XCTAssertEqual(item.coachName, log.coachName)
+        XCTAssertEqual(item.coachAdvice, log.coachAdvice)
+        // Points back at the origin row so re-logs stay linked when it lives.
+        XCTAssertEqual(item.sourceLogId, log.id)
+    }
+
+    func test_savedFood_relogDraft_isReloggedAndCopiesPayload() {
+        let source = UUID()
+        let item = makeSavedFood(sourceLogId: source)
+        let draft = item.newFoodLogForRelog()
+
+        XCTAssertEqual(draft.origin, .relogged)
+        XCTAssertEqual(draft.sourceLogId, source)   // carried through
+        XCTAssertEqual(draft.foodName, item.foodName)
+        XCTAssertEqual(draft.imagePath, item.imagePath)        // no re-upload
+        XCTAssertEqual(draft.imageThumbPath, item.imageThumbPath)
+        XCTAssertEqual(draft.calories, item.calories)
+        XCTAssertEqual(draft.carbsG, item.carbsG)
+        XCTAssertEqual(draft.sugarG, item.sugarG)
+        XCTAssertEqual(draft.proteinG, item.proteinG)
+        XCTAssertEqual(draft.fatG, item.fatG)
+        XCTAssertEqual(draft.fiberG, item.fiberG)
+        XCTAssertEqual(draft.benefits, item.benefits)
+        XCTAssertEqual(draft.drawbacks, item.drawbacks)
+        XCTAssertEqual(draft.nutrients, item.nutrients)
+        XCTAssertEqual(draft.coachName, item.coachName)
+        XCTAssertEqual(draft.coachAdvice, item.coachAdvice)
+    }
+
+    func test_relogDraft_withNilSourceLog_staysNil() {
+        // Items saved from the result screen have no origin row.
+        let item = makeSavedFood(sourceLogId: nil)
+        XCTAssertNil(item.newFoodLogForRelog().sourceLogId)
+    }
+
+    func test_vaultDedupIdentity_isCaseAndWhitespaceInsensitive() {
+        // The Vault's "same food" rule must match the heart / repeat
+        // detection so membership and dedup agree across surfaces.
+        XCTAssertEqual(
+            FavoritesStore.normalize("Margherita Pizza"),
+            FavoritesStore.normalize("  margherita   pizza  ")
+        )
+        XCTAssertNotEqual(
+            FavoritesStore.normalize("Oatmeal"),
+            FavoritesStore.normalize("Oatmeal with berries")
+        )
+    }
+}
+
+// MARK: - Vault search index
+
+/// The client-side inverted index that powers zero-egress vault search.
+/// These pin the query contract the UI relies on: empty query = no filter,
+/// prefix + AND matching, tokenization, and index/postings upkeep on
+/// add/remove.
+final class VaultSearchIndexTests: XCTestCase {
+
+    private func id(_ n: Int) -> UUID {
+        UUID(uuidString: "00000000-0000-0000-0000-\(String(format: "%012d", n))")!
+    }
+
+    /// Builds an index from (index → name) pairs using deterministic ids.
+    private func makeIndex(_ named: [(Int, String)]) -> (VaultSearchIndex, [Int: UUID]) {
+        var ids: [Int: UUID] = [:]
+        let entries = named.map { (n, name) -> (id: UUID, name: String) in
+            let uuid = id(n)
+            ids[n] = uuid
+            return (id: uuid, name: name)
+        }
+        return (VaultSearchIndex(entries), ids)
+    }
+
+    func test_emptyQuery_returnsNil_meaningNoFilter() {
+        let (index, _) = makeIndex([(1, "Oatmeal"), (2, "Grilled Chicken")])
+        XCTAssertNil(index.search(""))
+        XCTAssertNil(index.search("   "))
+        // Punctuation-only tokenizes to nothing → also "no filter".
+        XCTAssertNil(index.search("!!!"))
+    }
+
+    func test_prefixMatch_findsPartialToken() {
+        let (index, ids) = makeIndex([(1, "Grilled Chicken"), (2, "Oatmeal")])
+        XCTAssertEqual(index.search("chick"), [ids[1]!])
+        XCTAssertEqual(index.search("grill"), [ids[1]!])
+        XCTAssertEqual(index.search("oat"), [ids[2]!])
+    }
+
+    func test_search_isCaseAndWhitespaceInsensitive() {
+        let (index, ids) = makeIndex([(1, "Grilled Chicken")])
+        XCTAssertEqual(index.search("CHICKEN"), [ids[1]!])
+        XCTAssertEqual(index.search("  ChIcK  "), [ids[1]!])
+    }
+
+    func test_multipleTerms_areANDed() {
+        let (index, ids) = makeIndex([
+            (1, "Grilled Chicken"),
+            (2, "Chicken Soup"),
+            (3, "Grilled Salmon"),
+        ])
+        // Both terms must match → only the grilled chicken.
+        XCTAssertEqual(index.search("grill chick"), [ids[1]!])
+        // Order of terms doesn't matter.
+        XCTAssertEqual(index.search("chick grill"), [ids[1]!])
+    }
+
+    func test_singleToken_matchesEveryNameContainingIt() {
+        let (index, ids) = makeIndex([
+            (1, "Grilled Chicken"),
+            (2, "Chicken Soup"),
+            (3, "Beef Stew"),
+        ])
+        XCTAssertEqual(index.search("chicken"), Set([ids[1]!, ids[2]!]))
+    }
+
+    func test_noMatch_returnsEmptySet_notNil() {
+        let (index, _) = makeIndex([(1, "Oatmeal")])
+        XCTAssertEqual(index.search("pizza"), [])
+        // One matching term + one non-matching term → AND yields empty.
+        XCTAssertEqual(index.search("oat pizza"), [])
+    }
+
+    func test_tokenize_splitsOnNonAlphanumerics() {
+        XCTAssertEqual(VaultSearchIndex.tokenize("PB&J Sandwich"),
+                       ["pb", "j", "sandwich"])
+        XCTAssertEqual(VaultSearchIndex.tokenize("Mac 'n' Cheese"),
+                       ["mac", "n", "cheese"])
+        XCTAssertEqual(VaultSearchIndex.tokenize("  "), [])
+    }
+
+    func test_insert_makesNewFoodSearchable() {
+        var (index, _) = makeIndex([(1, "Oatmeal")])
+        let newID = id(2)
+        index.insert(id: newID, name: "Grilled Chicken")
+        XCTAssertEqual(index.search("chicken"), [newID])
+    }
+
+    func test_remove_dropsFoodFromResults() {
+        var (index, ids) = makeIndex([
+            (1, "Grilled Chicken"),
+            (2, "Chicken Soup"),
+        ])
+        index.remove(id: ids[1]!, name: "Grilled Chicken")
+        // Only the soup remains under "chicken"; "grilled" is gone entirely.
+        XCTAssertEqual(index.search("chicken"), [ids[2]!])
+        XCTAssertEqual(index.search("grilled"), [])
+    }
+
+    func test_remove_prunesEmptyTokens() {
+        var (index, ids) = makeIndex([(1, "Oatmeal")])
+        XCTAssertEqual(index.tokenCount, 1)
+        index.remove(id: ids[1]!, name: "Oatmeal")
+        XCTAssertEqual(index.tokenCount, 0)   // no orphaned empty postings
+        XCTAssertEqual(index.search("oat"), [])
+    }
+
+    func test_sharedToken_survivesPartialRemoval() {
+        // Two foods share the "chicken" token; removing one must not orphan
+        // the token for the other.
+        var (index, ids) = makeIndex([
+            (1, "Grilled Chicken"),
+            (2, "Chicken Soup"),
+        ])
+        index.remove(id: ids[1]!, name: "Grilled Chicken")
+        XCTAssertEqual(index.search("chicken"), [ids[2]!])
     }
 }

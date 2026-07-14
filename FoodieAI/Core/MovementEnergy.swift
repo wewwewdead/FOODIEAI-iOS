@@ -32,7 +32,7 @@ enum StepGoalCalculator {
         let base: Int
         switch direction {
         case .lose:     base = 10_000   // Tudor-Locke "active"; deficit assist
-        case .gain:     base = 7_000    // cardio floor — steps oppose a surplus
+        case .gain:     base = 7_000    // cardio floor, steps oppose a surplus
         case .maintain: base = 8_000    // top of the mortality-benefit plateau
         case .none:     base = 8_000    // general default, no direction set
         }
@@ -178,19 +178,19 @@ enum MovementGoalNarrator {
         switch direction {
         case .lose:
             return hasKcal
-                ? "\(steps) steps ≈ \(kcal) kcal — \(deficitFraction(kcal)) your daily deficit. Move it and you can eat that much more and still lose."
-                : "\(steps) steps a day is a real assist to your deficit — move more, eat a little more, still lose."
+                ? "\(steps) steps ≈ \(kcal) kcal, \(deficitFraction(kcal)) your daily deficit. Move it and you can eat that much more and still lose."
+                : "\(steps) steps a day is a real assist to your deficit, move more, eat a little more, still lose."
         case .maintain:
             return hasKcal
-                ? "\(steps) steps ≈ \(kcal) kcal — the daily movement your maintenance goal already assumes. Hit it and eating to goal truly holds steady."
-                : "\(steps) steps is the movement your goal counts on — hit it and your budget stays a true maintenance number."
+                ? "\(steps) steps ≈ \(kcal) kcal, the daily movement your maintenance goal already assumes. Hit it and eating to goal truly holds steady."
+                : "\(steps) steps is the movement your goal counts on, hit it and your budget stays a true maintenance number."
         case .gain:
             return hasKcal
-                ? "\(steps) steps ≈ \(kcal) kcal — for your heart, not the scale. Steps burn calories, so eat that back to keep gaining."
-                : "\(steps) steps is a heart-health floor — steps burn calories, so eat back what you move to keep gaining."
+                ? "\(steps) steps ≈ \(kcal) kcal, for your heart, not the scale. Steps burn calories, so eat that back to keep gaining."
+                : "\(steps) steps is a heart-health floor, steps burn calories, so eat back what you move to keep gaining."
         case .none:
             return hasKcal
-                ? "\(steps) steps ≈ \(kcal) kcal — most of the health benefit, and enough to keep your calorie goal honest."
+                ? "\(steps) steps ≈ \(kcal) kcal, most of the health benefit, and enough to keep your calorie goal honest."
                 : "\(steps) steps covers most of the health benefit and keeps your calorie goal honest."
         }
     }
@@ -211,25 +211,52 @@ enum MovementGoalNarrator {
         let canCorrelate = direction != .gain && calorieGoal > 0
         let overBy = consumed - calorieGoal
 
-        // OVER calories → the extra steps to walk it off + the nudged goal.
+        // OVER calories → progress-aware offset against the nudged goal. Reacts
+        // to steps already walked (was static before): shows what's *left*,
+        // celebrates clearing the bumped goal, and never claims a capped goal
+        // fully "walks off" an excess it can only chip at.
         if canCorrelate, overBy > DayCalorieStanding.onGoalToleranceKcal {
             let over = MealSuggestionEngine.roundKcal(overBy)
             let extra = max(0, adjustedStepGoal - baseStepGoal)
-            // Hit the bumped goal already → the excess is worked off.
-            if currentSteps >= adjustedStepGoal && extra > 0 {
-                return "Movement's matched today's \(over) over — nicely balanced."
-            }
-            // Did the clamp shave the bump? Then it only chips at the excess.
+            // Does reaching the (possibly clamp-shaved) goal fully cover the
+            // excess, or only chip at it? Drives the verb *and* keeps the
+            // celebration honest when the goal was capped.
             let needed = StepGoalCalculator.stepsToWalkOff(overBy, weightKg: weightKg)
-            let verb = extra < needed ? "chips away at it" : "offsets it"
-            return "\(over) over — about \(stepsLabel(extra)) extra steps (\(walkPhrase(forSteps: extra))) \(verb). Goal nudged to \(stepsLabel(adjustedStepGoal))."
+            let fullyOffsets = extra >= needed
+            let surplus = currentSteps - adjustedStepGoal
+
+            // Walked clear past the bumped goal — celebrate, but only claim a
+            // full walk-off when the goal could actually deliver one.
+            if surplus >= surplusStepThreshold {
+                return fullyOffsets
+                    ? "\(over) over, and +\(stepsLabel(surplus)) past your bumped \(stepsLabel(adjustedStepGoal)) goal. More than walked off, strong day."
+                    : "\(over) over, +\(stepsLabel(surplus)) past your bumped \(stepsLabel(adjustedStepGoal)) goal, chipping it down further. Big movement day."
+            }
+            // Reached the bumped goal (within a step of it) — matched.
+            if currentSteps >= adjustedStepGoal {
+                return fullyOffsets
+                    ? "Movement's matched today's \(over) over, nicely balanced."
+                    : "Reached today's bumped \(stepsLabel(adjustedStepGoal)) goal, chips today's \(over) over down."
+            }
+            // Partway → the steps *still left* to the goal, acknowledging the
+            // ground already covered rather than re-quoting the full bump.
+            let remainingToGoal = max(0, adjustedStepGoal - currentSteps)
+            let verb = fullyOffsets ? "offsets it" : "chips away at it"
+            return "\(over) over, about \(stepsLabel(remainingToGoal)) more steps (\(walkPhrase(forSteps: remainingToGoal))) \(verb). Goal nudged to \(stepsLabel(adjustedStepGoal))."
         }
 
-        // UNDER calories → the eased goal (never below the health floor).
+        // UNDER calories → the eased goal (never below the health floor) —
+        // *unless* they've already pushed well past it. Over-delivery is the
+        // headline; burying it under "goal eased to 6,000" was the dead-end
+        // that made the loop feel one-directional.
         if canCorrelate, -overBy > DayCalorieStanding.onGoalToleranceKcal,
            adjustedStepGoal < baseStepGoal {
+            let surplus = currentSteps - adjustedStepGoal
+            if surplus >= surplusStepThreshold {
+                return surplusLine(direction: direction, surplusSteps: surplus, weightKg: weightKg)
+            }
             let under = MealSuggestionEngine.roundKcal(-overBy)
-            return "Ate \(under) under — step goal eased to \(stepsLabel(adjustedStepGoal)) for today."
+            return "Ate \(under) under, step goal eased to \(stepsLabel(adjustedStepGoal)) for today."
         }
 
         // ON GOAL / gain / no data → the plain goal-oriented step nudge.
@@ -250,13 +277,19 @@ enum MovementGoalNarrator {
         let goal = stepsLabel(goalSteps)
         let remaining = max(0, goalSteps - currentSteps)
 
-        // Already at/over today's step goal — affirm, don't push more cardio.
+        // Already at/over today's step goal. A meaningful surplus gets the
+        // goal-aware over-delivery moment; a small overshoot just affirms
+        // (don't over-celebrate 500 steps past the mark).
         if remaining == 0 {
+            let surplus = currentSteps - goalSteps
+            if surplus >= surplusStepThreshold {
+                return surplusLine(direction: direction, surplusSteps: surplus, weightKg: weightKg)
+            }
             switch direction {
-            case .lose:     return "\(goal) steps in — goal hit. Any extra walk now deepens today's deficit."
-            case .maintain: return "\(goal) steps in — you're matched with your maintenance plan for today."
-            case .gain:     return "\(goal) steps in — plenty for gaining. No need to add cardio; if you do, eat it back."
-            case .none:     return "\(goal) steps in — you've reached the daily mark tied to better health."
+            case .lose:     return "\(goal) steps in, goal hit. Any extra walk now deepens today's deficit."
+            case .maintain: return "\(goal) steps in, you're matched with your maintenance plan for today."
+            case .gain:     return "\(goal) steps in, plenty for gaining. No need to add cardio; if you do, eat it back."
+            case .none:     return "\(goal) steps in, you've reached the daily mark tied to better health."
             }
         }
 
@@ -267,13 +300,53 @@ enum MovementGoalNarrator {
         switch direction {
         case .lose:
             let burn = kcal >= 10 ? ", ~\(kcal) kcal toward your deficit" : ""
-            return "\(remain) steps to your \(goal) goal — \(walk)\(burn)."
+            return "\(remain) steps to your \(goal) goal, \(walk)\(burn)."
         case .maintain:
-            return "\(remain) steps to your \(goal) goal — \(walk) keeps today balanced."
+            return "\(remain) steps to your \(goal) goal, \(walk) keeps today balanced."
         case .gain:
-            return "\(remain) steps to your \(goal) floor — a short walk covers circulation and appetite. Gaining needs no more; eat back what you walk."
+            return "\(remain) steps to your \(goal) floor, a short walk covers circulation and appetite. Gaining needs no more; eat back what you walk."
         case .none:
-            return "\(remain) steps to your \(goal) goal — \(walk) reaches the daily health mark."
+            return "\(remain) steps to your \(goal) goal, \(walk) reaches the daily health mark."
+        }
+    }
+
+    /// A step surplus big enough to be a *moment* rather than noise — one full
+    /// rounding bucket (500) past the floor, doubled to 1,000 so a near-miss
+    /// overshoot still reads as "goal hit". Below this, the affirmations are
+    /// the better copy.
+    static let surplusStepThreshold = 1_000
+
+    /// The over-delivery moment: the user has walked meaningfully past today's
+    /// step floor. Translates the surplus into their *weight goal* so the extra
+    /// effort means something — deeper deficit (lose), bonus burn + a little
+    /// eating room (maintain), or fuel to eat back (gain) — instead of a flat
+    /// "goal hit" that ignored the work. Pure copy; kcal shown when bodyweight
+    /// is known. Uses gross active kcal (output), consistent with the
+    /// "toward your deficit" figure elsewhere; the precise earn-*back* credit
+    /// is owned by the movement-credit chip, so the two never restate one number.
+    static func surplusLine(direction: CalorieGoalCalculator.GoalDirection?,
+                            surplusSteps: Int,
+                            weightKg: Double?) -> String {
+        let extra = stepsLabel(surplusSteps)
+        let kcal = Int(MovementEnergy.activeKcalFromSteps(surplusSteps, weightKg: weightKg).rounded())
+        let hasKcal = kcal >= 10
+        switch direction {
+        case .lose:
+            return hasKcal
+                ? "+\(extra) steps past today's floor, about \(kcal) kcal deeper into your deficit. You're ahead of plan."
+                : "+\(extra) steps past today's floor, every extra step deepens today's deficit. You're ahead of plan."
+        case .maintain:
+            return hasKcal
+                ? "+\(extra) steps past your floor, ~\(kcal) kcal of bonus burn. Room for a small snack and you'll still hold steady."
+                : "+\(extra) steps past your floor, bonus movement beyond your plan. Room for a small snack and you'll still hold steady."
+        case .gain:
+            return hasKcal
+                ? "+\(extra) steps past your floor, ~\(kcal) kcal burned. Eat it back to keep gaining."
+                : "+\(extra) steps past your floor, extra movement burns energy. Eat it back to keep gaining."
+        case .none:
+            return hasKcal
+                ? "+\(extra) steps past the daily mark, ~\(kcal) kcal of bonus movement. Nice work."
+                : "+\(extra) steps past the daily mark, bonus movement on the board. Nice work."
         }
     }
 

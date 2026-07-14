@@ -585,7 +585,7 @@ private struct DetailPanel: View {
     }
 
     private func format(_ v: Double) -> String {
-        if v.isNaN || v.isInfinite { return "—" }
+        if v.isNaN || v.isInfinite { return "-" }
         if v == v.rounded() { return "\(Int(v))" }
         return String(format: "%.1f", v)
     }

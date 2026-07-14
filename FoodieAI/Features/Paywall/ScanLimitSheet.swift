@@ -108,7 +108,7 @@ struct ScanLimitSheet: View {
         // silent server-side safety cap, the message must NOT reveal the
         // number. Frame it as a gentle "you've done a lot today" instead.
         isPro
-            ? "You've scanned a lot today — take a break?"
+            ? "You've scanned a lot today, take a break?"
             : "You've used today's \(info.limit) photo scans."
     }
 

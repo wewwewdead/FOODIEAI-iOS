@@ -82,14 +82,14 @@ enum FoodOSStoryBuilder {
         if let name = topName,
            topCount >= anchorFloor,
            uniqueRatio >= exploringRatio {
-            return "You're mostly exploring — but \(name) is becoming a reliable anchor."
+            return "You're mostly exploring, but \(name) is becoming a reliable anchor."
         }
 
         // 3. Pure explorer — many unique meals, no strong repeats.
         // Safe to say "rarely repeat" because the guard above caught
         // the anchor case first.
         if uniqueRatio >= exploringRatio, topCount < anchorFloor {
-            return "You're exploring widely — your meals rarely repeat."
+            return "You're exploring widely, your meals rarely repeat."
         }
 
         // 4. Several reliable meals — at least two foods at the
@@ -159,7 +159,7 @@ enum FoodOSStoryBuilder {
         lovedCount: Int
     ) -> String {
         let logsNoun = lovedCount == 1 ? "log" : "logs"
-        return "\(food) seems to work well for you — \(lovedCount) \(logsNoun) with steady or loved mood notes."
+        return "\(food) seems to work well for you, \(lovedCount) \(logsNoun) with steady or loved mood notes."
     }
 
     // MARK: Action label gating

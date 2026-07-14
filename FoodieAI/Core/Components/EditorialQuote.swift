@@ -81,7 +81,7 @@ struct EditorialQuote: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            attribution.map { "\(text). — \($0)" } ?? text
+            attribution.map { "\(text). \($0)" } ?? text
         )
         .onAppear { startIfNeeded() }
     }
@@ -118,7 +118,7 @@ struct EditorialQuote: View {
             attribution: "William Shakespeare"
         )
         EditorialQuote(
-            text: "Anonymous wisdom — the best meal is the one you remember tomorrow."
+            text: "Anonymous wisdom, the best meal is the one you remember tomorrow."
         )
     }
     .padding(AppSpacing.lg)

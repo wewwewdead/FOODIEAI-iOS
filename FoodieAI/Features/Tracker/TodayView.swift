@@ -50,6 +50,14 @@ struct TodayView: View {
     @State private var eatSuggestionDismissed: Bool = false
     @State private var automaticRefreshTask: Task<Void, Never>? = nil
 
+    /// NOVEL_DIRECTIONS Idea 2 — the user's meal repertoire (name / calories /
+    /// slot / mood), built once from ~30 days of history and reused by the Meal
+    /// Twin card. One cached fetch; refetched when the tab first activates and
+    /// after a new save (`twinRepertoireToken`), never per render.
+    @State private var twinRepertoire: [TwinMeal] = []
+    @State private var twinRepertoireToken = 0
+    private let twinLogService = FoodLogService()
+
     /// HealthKit activity reader (steps + active energy). Guarded — shows
     /// nothing on devices without Health or before the user grants access.
     ///
@@ -67,6 +75,14 @@ struct TodayView: View {
     @State private var showingPhysiologyEditor = false
     @State private var personalizeDismissed = false
 
+    /// Activation: a one-time "scan your first meal" nudge for brand-new users
+    /// who haven't logged anything yet — the single highest-leverage action.
+    /// `firstScanLogged` is loaded per-user from UserDefaults on appear / when
+    /// the account changes (see `loadFirstScanFlag`); the dismiss is
+    /// session-only. Built from already-loaded state, so zero egress.
+    @State private var firstScanLogged = false
+    @State private var firstScanNudgeDismissed = false
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: AppSpacing.xl2) {
@@ -74,6 +90,7 @@ struct TodayView: View {
                 streakRepairBanner
                 personalizeGoalsCard
                 freezeNoticeBanner
+                firstScanNudge
                 eatToGoalCard
                 DailyLoopHeroView(
                     calories: caloriesFromState,
@@ -89,7 +106,11 @@ struct TodayView: View {
             .onAppear {
                 refreshWidgetSnapshot()
                 streakRepairStore.refresh()
+                loadFirstScanFlag()
             }
+            // Account changed (sign-in / switch / delete+recreate) → reload the
+            // per-user flag so the nudge reflects the new account, not the old.
+            .onChange(of: profileStore.profile?.id) { _, _ in loadFirstScanFlag() }
             // Widget refreshes on app-open (onAppear / foreground below) and on
             // calorie changes — NOT per live step. A per-step reload fired a
             // cross-process WidgetCenter reload on every footstep; the widget is
@@ -133,10 +154,22 @@ struct TodayView: View {
             // inactive or the app backgrounds (see below).
             health.startLiveUpdates(weightKg: profileStore.profile?.weightKg)
         }
+        // Meal Twin repertoire: load on appear + whenever the token bumps
+        // (tab first activates / a meal is saved). The fetch/build run off-main;
+        // only the assignment lands here on the main actor.
+        .task(id: twinRepertoireToken) {
+            guard isActive else { return }
+            twinRepertoire = await fetchTwinRepertoire()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .foodLogDidChange)) { _ in
+            twinRepertoireToken &+= 1
+        }
         .onChange(of: isActive) { _, active in
             if active {
                 scheduleAutomaticRefresh(reason: .tabBecameActive)
                 health.startLiveUpdates(weightKg: profileStore.profile?.weightKg)
+                // First activation with no repertoire yet → fetch it once.
+                if twinRepertoire.isEmpty { twinRepertoireToken &+= 1 }
             } else {
                 automaticRefreshTask?.cancel()
                 automaticRefreshTask = nil
@@ -203,9 +236,10 @@ struct TodayView: View {
     /// jumps to Home; the inline × dismisses for the session.
     @ViewBuilder
     private var eatToGoalCard: some View {
-        if !eatSuggestionDismissed, let suggestion = eatToGoalSuggestion {
+        if !eatSuggestionDismissed, topSoftNudge == .eatToGoal, let suggestion = eatToGoalSuggestion {
             EatToGoalCard(
                 suggestion: suggestion,
+                twin: twinData,
                 onScan: {
                     Haptics.tap()
                     eatSuggestionDismissed = true
@@ -245,6 +279,153 @@ struct TodayView: View {
             now: Date(),
             timeZone: .current
         )
+    }
+
+    // MARK: - One Brain surface policy (NOVEL_DIRECTIONS Idea 1)
+
+    /// Among the eligible *soft* advisory nudges (first-scan, eat-to-goal,
+    /// personalize), the single most relevant one to show, chosen by
+    /// `SurfacePolicy`. The two time-critical banners (streak repair, freeze
+    /// notice) are NOT arbitrated here and always show. This collapses an
+    /// up-to-three-card stack into one, so Today speaks with one voice instead
+    /// of piling advice. `nil` when no soft nudge is eligible.
+    private var topSoftNudge: SurfaceKind? {
+        let ctx = softNudgeContext
+        var candidates: [SurfaceCandidate] = []
+        if showFirstScanNudge {
+            candidates.append(SurfacePolicy.make(.firstScan, basePriority: 50, eligible: true, context: ctx))
+        }
+        if !eatSuggestionDismissed, eatToGoalSuggestion != nil {
+            candidates.append(SurfacePolicy.make(.eatToGoal, basePriority: 50, eligible: true, context: ctx))
+        }
+        if needsPersonalization, !personalizeDismissed {
+            candidates.append(SurfacePolicy.make(.personalize, basePriority: 50, eligible: true, context: ctx))
+        }
+        return SurfacePolicy.top(candidates)?.kind
+    }
+
+    /// The state vector the soft-nudge policy scores against, from data already
+    /// loaded on this tab (zero egress). Only `hour` and the remaining-budget
+    /// fraction actually move these kinds; the rest are neutral here.
+    private var softNudgeContext: SurfaceContext {
+        var remainingFraction = 1.0
+        if case .loaded(_, let totals) = viewModel.state {
+            let goal = Double(max(1, profileStore.calorieGoal + movementCreditKcal))
+            remainingFraction = min(max((goal - Double(totals.totalCalories)) / goal, 0), 1)
+        }
+        return SurfaceContext(
+            hour: Calendar.current.component(.hour, from: Date()),
+            remainingBudgetFraction: remainingFraction,
+            streakAtRisk: false,
+            daysSinceLastLog: 0,
+            recentMoodPositiveRate: 0.5
+        )
+    }
+
+    // MARK: - Meal Twin (NOVEL_DIRECTIONS Idea 2)
+
+    /// One cached ~30-day history fetch, turned into the repertoire. Best-effort.
+    private func fetchTwinRepertoire() async -> [TwinMeal] {
+        let now = Date()
+        let start = Calendar.current.date(byAdding: .day, value: -30, to: now) ?? now
+        guard let logs = try? await twinLogService.logs(from: start, to: now) else { return [] }
+        return TwinMealBuilder.build(from: logs, timeZone: .current)
+    }
+
+    /// The Meal Twin card payload — a forward projection + one mood-aware move —
+    /// or nil when there's no repertoire/move yet (the card then shows the
+    /// generic suggestion fallback, so the surface never blanks). Built from
+    /// data already loaded here + the cached repertoire; the engine is pure.
+    private var twinData: EatToGoalCard.TwinData? {
+        guard case .loaded(let logs, let totals) = viewModel.state,
+              !twinRepertoire.isEmpty else { return nil }
+        let effectiveGoal = profileStore.calorieGoal + movementCreditKcal
+        let loggedSlots = Set(logs.compactMap {
+            MealSuggestionEngine.MealSlot.forHour(
+                Calendar.current.component(.hour, from: $0.eatenAt))
+        })
+        let context = MealTwinContext(
+            hour: Calendar.current.component(.hour, from: Date()),
+            consumedSoFar: totals.totalCalories,
+            goal: effectiveGoal,
+            direction: profileStore.profile?.weightGoalDirection,
+            loggedSlots: loggedSlots,
+            typicalMeals: twinRepertoire
+        )
+        let projection = MealTwinEngine.project(context)
+        guard let move = projection.move else { return nil }
+        return EatToGoalCard.TwinData(
+            headline: twinHeadline(vsGoal: projection.baselineVsGoal),
+            move: move,
+            consumed: totals.totalCalories,
+            projectedLanding: projection.baselineLandingKcal,
+            goal: effectiveGoal
+        )
+    }
+
+    /// Factual, direction-agnostic framing of the "do nothing" trajectory —
+    /// the move row carries the goal-aware judgment.
+    private func twinHeadline(vsGoal: Double) -> String {
+        let tolerance = DayCalorieStanding.onGoalToleranceKcal
+        if abs(vsGoal) <= tolerance { return "On track for today" }
+        let rounded = Int((abs(vsGoal) / 10).rounded() * 10)
+        return vsGoal > 0 ? "Heading to \(rounded) over" : "\(rounded) to go today"
+    }
+
+    // MARK: - First-scan activation nudge
+
+    /// Shown to a brand-new user (recently onboarded, nothing logged yet) with
+    /// an empty day, to drive the most important activation action: their first
+    /// scan. "Scan a meal" jumps to the Home/capture tab; × dismisses for the
+    /// session. Reuses the peer-card treatment with a brand-tinted border so it
+    /// reads as the day's primary call to action.
+    @ViewBuilder
+    private var firstScanNudge: some View {
+        if showFirstScanNudge, topSoftNudge == .firstScan {
+            FirstScanCard(
+                onScan: {
+                    Haptics.tap()
+                    markFirstScanLogged()       // acting on it, don't re-nag
+                    notifRouter.requestTab(0)
+                },
+                onDismiss: {
+                    Haptics.tap()
+                    withAnimation(.appReveal) { firstScanNudgeDismissed = true }
+                }
+            )
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+    }
+
+    private var showFirstScanNudge: Bool {
+        guard isRecentlyOnboarded, !firstScanLogged, !firstScanNudgeDismissed else { return false }
+        if case .empty = viewModel.state { return true }
+        return false
+    }
+
+    /// True for the first week after onboarding — the window where driving the
+    /// first scan matters. Keeps the nudge off returning users' ordinary empty
+    /// days (they'd never have a nil `onboardingCompletedAt` from long ago).
+    private var isRecentlyOnboarded: Bool {
+        guard let completedAt = profileStore.profile?.onboardingCompletedAt else { return false }
+        return Date().timeIntervalSince(completedAt) < 7 * 24 * 3600
+    }
+
+    /// (Re)load the per-user first-scan flag. Called on appear AND whenever the
+    /// signed-in account changes, so the flag always reflects THIS account and
+    /// can't inherit a prior account's state on the same device.
+    private func loadFirstScanFlag() {
+        firstScanLogged = UserDefaults.standard.bool(
+            forKey: ActivationFlags.firstScanLoggedKey(profileStore.profile?.id))
+    }
+
+    /// Persist that this account has logged its first meal — retires the nudge
+    /// for good, for this account only (survives relaunch).
+    private func markFirstScanLogged() {
+        guard !firstScanLogged else { return }
+        firstScanLogged = true
+        UserDefaults.standard.set(
+            true, forKey: ActivationFlags.firstScanLoggedKey(profileStore.profile?.id))
     }
 
     // MARK: - Date header
@@ -321,7 +502,7 @@ struct TodayView: View {
                     Text("Get your \(broken)-day streak back")
                         .appFont(.bodyEmphasis)
                         .foregroundStyle(Color.ink)
-                    Text("You missed a few days — no worries. Restore your run and pick up right where you left off.")
+                    Text("You missed a few days, no worries. Restore your run and pick up right where you left off.")
                         .appFont(.caption)
                         .foregroundStyle(Color.inkMute)
                         .fixedSize(horizontal: false, vertical: true)
@@ -384,7 +565,7 @@ struct TodayView: View {
     /// naggy but returns next launch until the user personalizes.
     @ViewBuilder
     private var personalizeGoalsCard: some View {
-        if needsPersonalization && !personalizeDismissed {
+        if needsPersonalization, !personalizeDismissed, topSoftNudge == .personalize {
             HStack(alignment: .top, spacing: AppSpacing.md) {
                 Button {
                     Haptics.tap()
@@ -471,7 +652,7 @@ struct TodayView: View {
                         Text("A freeze saved your streak")
                             .appFont(.bodyEmphasis)
                             .foregroundStyle(Color.ink)
-                        Text("You missed a day, but your \(notice.streakDays)-day run is still going. No pressure — pick back up whenever.")
+                        Text("You missed a day, but your \(notice.streakDays)-day run is still going. No pressure, pick back up whenever.")
                             .appFont(.caption)
                             .foregroundStyle(Color.inkMute)
                             .fixedSize(horizontal: false, vertical: true)
@@ -507,11 +688,15 @@ struct TodayView: View {
         // Reuse the same engine the day-standing card uses so the widget's
         // coach line is identical: burn-off ("a 15-min walk evens it out")
         // when over, eat-to-goal ("room for a balanced meal") when under,
-        // direction-aware. Computed against the base goal to match the
-        // widget's over/under numbers.
+        // direction-aware. Computed against the EFFECTIVE goal (base +
+        // movement credit) — the same denominator the in-app ring uses — so
+        // the widget's coach line and over/under never contradict the ring on
+        // an active day. The credit is passed to the snapshot too; the widget
+        // recombines base + credit via `effectiveCalorieGoal`.
+        let credit = movementCreditKcal
         let standing = DayCalorieStanding.compute(
             dayCalories: caloriesFromState,
-            goal: profileStore.calorieGoal,
+            goal: profileStore.calorieGoal + credit,
             direction: profileStore.profile?.weightGoalDirection,
             bodyWeightKg: profileStore.profile?.weightKg
         )
@@ -525,10 +710,11 @@ struct TodayView: View {
         WidgetSnapshotUpdater.write(
             streakDays: viewModel.streakDays ?? profileStore.profile?.currentStreakDays ?? 0,
             caloriesConsumed: Int(caloriesFromState.rounded()),
-            calorieGoal: Int(profileStore.calorieGoal.rounded()),
+            calorieGoal: Int(profileStore.calorieGoal.rounded()),   // BASE goal; credit passed separately
             steps: steps,
             stepGoal: dailyStepGoal,
-            suggestion: standing?.recommendation ?? ""
+            suggestion: standing?.recommendation ?? "",
+            movementCreditKcal: Int(credit.rounded())
         )
     }
 
@@ -590,7 +776,7 @@ struct TodayView: View {
                 value: totals.totalProtein,
                 goal: profileStore.proteinGoal,
                 tint: .accentCool,
-                reachedPraise: "Nice — this supports fullness and recovery."
+                reachedPraise: "Nice, this supports fullness and recovery."
             )
 
             if showAllMacros {
@@ -605,7 +791,7 @@ struct TodayView: View {
                     value: totals.totalFiber,
                     goal: profileStore.fiberGoal,
                     tint: .success,
-                    reachedPraise: "Nice — fiber helps fullness and digestion."
+                    reachedPraise: "Nice, fiber helps fullness and digestion."
                 )
             }
 
@@ -694,7 +880,12 @@ struct TodayView: View {
                     )
                 }
             }
-            .onAppear { hasShownInitialMeals = true }
+            .onAppear {
+                hasShownInitialMeals = true
+                // They've logged at least one meal — retire the first-scan
+                // nudge for good, for this account (survives relaunch).
+                markFirstScanLogged()
+            }
         case .failed(let error):
             VStack(spacing: AppSpacing.md) {
                 Image(systemName: "exclamationmark.triangle")
@@ -784,1737 +975,5 @@ struct TodayView: View {
     }
 }
 
-// MARK: - Records segment (the Strava surface)
 
-/// The "how am I doing over time" home — streak hero (with Share), this
-/// week's challenge, and the 30-day record. PR-milestone + challenge-complete
-/// celebrations fire here. Shares the Tracker view model for streak data;
-/// the consistency card and weekly challenge load their own (local for the
-/// challenge, a single 30-day query for consistency — same as before, just
-/// relocated off Today).
-struct RecordsView: View {
-    @ObservedObject var viewModel: TrackerViewModel
-    let isActive: Bool
 
-    @EnvironmentObject private var profileStore: ProfileStore
-    @ObservedObject private var rhythm = LoggingRhythmStore.shared
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    @State private var recordCelebrationDays: Int? = nil
-    @State private var recordConfettiActive = false
-    @State private var challengeConfettiActive = false
-    @State private var shareImage: Image?
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: AppSpacing.xl2) {
-                recordCelebrationBanner
-                streakHero
-                weeklyChallengeSection
-                consistencySection
-            }
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.top, AppSpacing.lg)
-            .padding(.bottom, AppSpacing.xl3)
-        }
-        .refreshable {
-            await viewModel.refresh(reason: .pullToRefresh, tab: .tracker)
-        }
-        .task {
-            guard isActive else { return }
-            await viewModel.refresh(reason: .initialAppear, tab: .tracker)
-            renderShareImage()
-            maybeCelebrateWeeklyChallenge()
-        }
-        .onChange(of: viewModel.longestStreakDays) { _, _ in
-            maybeCelebrateRecord()
-        }
-        .onChange(of: viewModel.streakDays) { _, _ in renderShareImage() }
-        .onChange(of: rhythm.loggedDays) { _, _ in maybeCelebrateWeeklyChallenge() }
-    }
-
-    // MARK: Streak hero
-
-    private var streakHero: some View {
-        let current = viewModel.streakDays ?? 0
-        let longest = viewModel.longestStreakDays ?? 0
-        let grace = viewModel.graceDaysRemaining ?? 0
-        return VStack(alignment: .leading, spacing: AppSpacing.md) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "flame.fill")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(Color.accentWarm)
-                Text("\(current > 0 ? current : longest)")
-                    .appFont(.display1)
-                    .foregroundStyle(Color.ink)
-                Text(current > 0
-                     ? "day streak"
-                     : (longest > 0 ? "best streak" : "no streak yet"))
-                    .appFont(.bodyEmphasis)
-                    .foregroundStyle(Color.inkMute)
-            }
-
-            HStack(spacing: AppSpacing.lg) {
-                statChip(label: "BEST", value: "\(longest)")
-                statChip(label: "GRACE", value: "\(grace)")
-            }
-
-            if current > 0 || longest > 0, let shareImage {
-                ShareLink(
-                    item: shareImage,
-                    preview: SharePreview("My FoodieAI streak", image: shareImage)
-                ) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 15, weight: .bold))
-                        Text(current > 0 ? "Share my streak" : "Share my record")
-                            .appFont(.captionStrong)
-                    }
-                    .foregroundStyle(Color.brandDeep)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.md)
-                    .background(Capsule().fill(Color.brandSoft))
-                }
-            }
-
-            Text("Miss a day and your streak survives once — that's your grace day. Log every day for a week and we refill it.")
-                .appFont(.caption)
-                .foregroundStyle(Color.inkMute)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.xl)
-                .fill(
-                    LinearGradient(
-                        colors: [Color.brandSoft.opacity(0.85), Color.bgSurface],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
-                    )
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.xl)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-        .appShadow(.shadowCard)
-        .overlay(BrandConfetti(active: recordConfettiActive))
-    }
-
-    private func statChip(label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).eyebrow().foregroundStyle(Color.inkMute)
-            Text(value).appFont(.title1).foregroundStyle(Color.ink)
-        }
-    }
-
-    private func renderShareImage() {
-        let current = viewModel.streakDays ?? 0
-        let longest = viewModel.longestStreakDays ?? 0
-        let days = current > 0 ? current : longest
-        guard days > 0 else { return }
-        shareImage = ShareCardRenderer.streakImage(
-            days: days, label: current > 0 ? "day streak" : "best streak")
-    }
-
-    // MARK: Record celebration (PR moment)
-
-    @ViewBuilder
-    private var recordCelebrationBanner: some View {
-        if let days = recordCelebrationDays {
-            RecordCelebrationBanner(
-                days: days,
-                confettiActive: recordConfettiActive,
-                onDismiss: {
-                    Haptics.tap()
-                    withAnimation(.appReveal) {
-                        recordCelebrationDays = nil
-                        recordConfettiActive = false
-                    }
-                }
-            )
-            .transition(.opacity.combined(with: .move(edge: .top)))
-        }
-    }
-
-    private func maybeCelebrateRecord() {
-        guard let longest = viewModel.longestStreakDays else { return }
-        guard let milestone = RecordCelebrationStore.shared
-                .consumePendingStreakRecord(longestStreak: longest) else { return }
-        withAnimation(.appReveal) { recordCelebrationDays = milestone }
-        Haptics.success()
-        if !reduceMotion { recordConfettiActive = true }
-    }
-
-    // MARK: Weekly challenge
-
-    @ViewBuilder
-    private var weeklyChallengeSection: some View {
-        if !rhythm.loggedDays.isEmpty {
-            WeeklyChallengeCard(
-                challenge: weeklyChallenge,
-                completedWeeks: WeeklyChallengeStore.shared.completedCount,
-                confettiActive: challengeConfettiActive
-            )
-        }
-    }
-
-    private var weeklyChallenge: WeeklyChallenge {
-        WeeklyChallengeEngine.compute(loggedDays: rhythm.loggedDays, now: Date())
-    }
-
-    private func maybeCelebrateWeeklyChallenge() {
-        let challenge = weeklyChallenge
-        guard challenge.isComplete else { return }
-        if WeeklyChallengeStore.shared.markCompleted(weekKey: challenge.weekKey) {
-            Haptics.success()
-            if !reduceMotion { challengeConfettiActive = true }
-        }
-    }
-
-    // MARK: Consistency record
-
-    private var consistencySection: some View {
-        ConsistencyCard(
-            goal: profileStore.calorieGoal,
-            direction: profileStore.profile?.weightGoalDirection,
-            bodyWeightKg: profileStore.profile?.weightKg
-        )
-    }
-}
-
-// MARK: - Pattern card (Phase 15)
-
-/// One row in the Today → Patterns section. Same surface treatment as
-/// MealCard (white, radius-lg, hairline border, shadow-card) so the
-/// section reads as a peer of the meal list.
-///
-/// Icon mapping:
-///   - .frequent       → arrow.counterclockwise.circle  (brand)
-///   - .firstThisWeek  → sparkles                       (accentCool)
-///   - .streak         → flame.fill                     (accentWarm)
-///   - .moodCluster    → cloud.rain                     (inkMute)
-struct PatternCard: View {
-    let pattern: Pattern
-
-    var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            Image(systemName: iconName)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(iconColor)
-                .frame(width: 24, height: 24)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(pattern.title)
-                    .appFont(.bodyEmphasis)
-                    .foregroundStyle(Color.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let detail = pattern.detail, !detail.isEmpty {
-                    Text(detail)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, AppSpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-        .appShadow(.shadowCard)
-        .accessibilityElement(children: .combine)
-    }
-
-    private var iconName: String {
-        switch pattern.kind {
-        case .frequent:      return "arrow.counterclockwise.circle"
-        case .firstThisWeek: return "sparkles"
-        case .streak:        return "flame.fill"
-        case .moodCluster:   return "cloud.rain"
-        }
-    }
-
-    private var iconColor: Color {
-        switch pattern.kind {
-        case .frequent:      return .brand
-        case .firstThisWeek: return .accentCool
-        case .streak:        return .accentWarm
-        case .moodCluster:   return .inkMute
-        }
-    }
-}
-
-// MARK: - Weekly recap banner (Week 3 polish)
-
-/// "This week" entry point for the latest recap. Lives only when
-/// `latestRecap` is non-nil — we never show a teaser for a recap that
-/// doesn't exist yet.
-///
-/// Week 3 polish:
-///   - subtle reveal: opacity + 6pt upward drift on first appear, with
-///     a small scale-in on the icon halo so the card lands rather than
-///     popping in.
-///   - copy: "Your week is ready" with a coach-attribution subtitle.
-///     Uses the recap's `headlineStat` when present so the user sees a
-///     concrete promise of content, falling back to the coach's name.
-///   - respects Reduce Motion: drift and scale collapse to a flat fade.
-///
-/// No retained Tasks; no timers; the reveal is a one-shot driven by
-/// `.onAppear` flipping a single `@State` flag.
-struct WeeklyRecapBanner: View {
-    let recap: WeeklyRecap
-    let onTap: () -> Void
-
-    @State private var revealed: Bool = false
-    @State private var haloPulsed: Bool = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// Title is evergreen — the recap's body is the real content, so
-    /// the entry point only needs to invite the tap.
-    private var title: String { "Your week is ready" }
-
-    /// Subtitle prefers a concrete promise (the headlineStat) but
-    /// gracefully drops to a coach byline when the server returned
-    /// without one. Never empty when the banner is on screen.
-    private var subtitle: String {
-        if let stat = recap.headlineStat, !stat.isEmpty {
-            return stat
-        }
-        return "A short reflection from \(recap.coachName)"
-    }
-
-    /// Secondary line — coach byline when a headlineStat already
-    /// occupies the subtitle. `nil` when the subtitle already conveys
-    /// the coach's voice (no headlineStat) so the card doesn't stack
-    /// redundant attribution.
-    private var coachByline: String? {
-        guard let stat = recap.headlineStat, !stat.isEmpty else { return nil }
-        return "From \(recap.coachName)"
-    }
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: AppSpacing.md) {
-                ZStack {
-                    Circle()
-                        .fill(Color.brandSoft)
-                        .frame(width: 38, height: 38)
-                        .scaleEffect(haloPulsed ? 1 : 0.85)
-                    Image(systemName: "calendar.badge.clock")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Color.brandDeep)
-                    // Tiny sparkle accent floats off the halo so the
-                    // banner reads as a small reward, not just another
-                    // calendar entry. Static glyph (no infinite anim)
-                    // honoring Reduce Motion — `haloPulsed` already
-                    // gates the one-shot reveal scale.
-                    Image(systemName: "sparkle")
-                        .font(.system(size: 9, weight: .heavy))
-                        .foregroundStyle(Color.accentWarm)
-                        .offset(x: 14, y: -14)
-                        .opacity(haloPulsed ? 1 : 0)
-                        .accessibilityHidden(true)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Text(title)
-                            .appFont(.title2)
-                            .foregroundStyle(Color.ink)
-                            .lineLimit(1)
-                    }
-                    Text(subtitle)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                        .lineLimit(1)
-                    if let byline = coachByline {
-                        Text(byline)
-                            .appFont(.caption)
-                            .foregroundStyle(Color.inkLight)
-                            .lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .heavy))
-                    .foregroundStyle(Color.inkLight)
-            }
-            .padding(AppSpacing.md)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: AppRadius.lg)
-                    .strokeBorder(Color.brand.opacity(0.35), lineWidth: 1)
-            )
-            .appShadow(.shadowCard)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(
-            coachByline.map { "\(title). \(subtitle). \($0). Tap to read." }
-                ?? "\(title). \(subtitle). Tap to read."
-        )
-        .opacity(revealed ? 1 : 0)
-        .offset(y: (revealed || reduceMotion) ? 0 : 6)
-        .onAppear {
-            guard !revealed else { return }
-            let revealAnim: Animation = reduceMotion ? .appReduced : .motionReveal
-            withAnimation(revealAnim) { revealed = true }
-            if !reduceMotion {
-                withAnimation(.appBouncy.delay(0.08)) { haloPulsed = true }
-            } else {
-                haloPulsed = true
-            }
-        }
-    }
-}
-
-// MARK: - Eat-to-goal suggestion card
-
-/// Inline card surfaced on the Today screen when the user is under their
-/// daily calorie goal, with a smart, meal-aware suggestion of what to eat
-/// (see `MealSuggestionEngine`). It's the inverse of the over-goal
-/// "burn it off" walk/jog nudge.
-///
-/// Visual treatment mirrors the weekly recap banner — BgSurface fill,
-/// hairline border, shadowCard — so it reads as a peer of the existing
-/// Today cards. The leading icon is slot-specific (sunrise / sun / moon /
-/// leaf) and tinted `accentCool` for a soft, non-judgmental feel.
-///
-/// `onScan` routes to the Home tab via the shared NotificationRouter
-/// (the same channel notification taps use), so the user lands on the
-/// capture flow with one tap. `onDismiss` only clears the card for
-/// this session — pull-to-refresh re-arms it if the user is still under.
-private struct EatToGoalCard: View {
-    let suggestion: MealSuggestionEngine.Suggestion
-    let onScan: () -> Void
-    let onDismiss: () -> Void
-
-    var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            ZStack {
-                Circle()
-                    .fill(Color.brandSoft)
-                    .frame(width: 36, height: 36)
-                Image(systemName: suggestion.systemImage)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.accentCool)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(suggestion.headline)
-                    .appFont(.bodyEmphasis)
-                    .foregroundStyle(Color.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(suggestion.detail)
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if !suggestion.ideas.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(suggestion.ideas, id: \.self) { idea in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Image(systemName: "circle.fill")
-                                    .font(.system(size: 4))
-                                    .foregroundStyle(Color.brand)
-                                Text(idea)
-                                    .appFont(.caption)
-                                    .foregroundStyle(Color.inkMute)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                    .padding(.top, 4)
-                }
-
-                if let note = suggestion.proteinNote {
-                    Text(note)
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkLight)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 2)
-                }
-
-                Button(action: onScan) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 11, weight: .heavy))
-                        Text("Scan a meal")
-                            .appFont(.captionStrong)
-                    }
-                    .foregroundStyle(Color.brandDeep)
-                    .padding(.top, 4)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Scan a meal")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(Color.inkLight)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss suggestion")
-        }
-        .padding(AppSpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-        .appShadow(.shadowCard)
-        .accessibilityElement(children: .contain)
-    }
-}
-
-
-// MARK: - Metric ring (paired Daily Loop hero)
-
-/// A compact progress ring with a number + unit at its center. Sized by
-/// `diameter`; the center type scales with it so one component serves both
-/// the solo calorie hero (large) and the paired calorie/movement rings
-/// (smaller). Animates its arc on appear and when the value changes.
-private struct MetricRing: View {
-    let value: Double
-    let goal: Double
-    let number: String
-    let unit: String
-    let tint: Color
-    var diameter: CGFloat = 128
-    var stroke: CGFloat = 12
-
-    @State private var arc: Double = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var progress: Double {
-        guard goal > 0 else { return 0 }
-        return min(max(value / goal, 0), 1)
-    }
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .inset(by: stroke / 2)
-                .stroke(Color.borderHairline,
-                        style: StrokeStyle(lineWidth: stroke, lineCap: .round))
-            Circle()
-                .inset(by: stroke / 2)
-                .trim(from: 0, to: arc)
-                .stroke(tint,
-                        style: StrokeStyle(lineWidth: stroke, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            VStack(spacing: 0) {
-                Text(number)
-                    .font(.custom(AppFont.PS.mplusBlack, size: diameter * 0.26))
-                    .kerning(-1)
-                    .foregroundStyle(Color.ink)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                Text(unit)
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-            }
-            .padding(.horizontal, stroke + 6)
-        }
-        .frame(width: diameter, height: diameter)
-        .appShadow(.shadowFloating)
-        .onAppear {
-            withAnimation(reduceMotion ? .appReduced : .motionProgressFill.delay(0.1)) {
-                arc = progress
-            }
-        }
-        .onChange(of: progress) { _, p in
-            withAnimation(reduceMotion ? .appReduced : .motionProgressFill) { arc = p }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(number) \(unit)")
-    }
-}
-
-// MARK: - Record celebration banner (PR moment)
-
-/// Strava-style "new personal record" moment, shown on Today when the
-/// user's all-time-longest streak crosses a milestone. Celebratory but
-/// on-brand: brand-soft fill, flame glyph, and a one-shot BrandConfetti
-/// burst over the card. Dismissible; never re-fires for the same record
-/// (see `RecordCelebrationStore`).
-private struct RecordCelebrationBanner: View {
-    let days: Int
-    let confettiActive: Bool
-    let onDismiss: () -> Void
-
-    var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            ZStack {
-                Circle()
-                    .fill(Color.brand.opacity(0.18))
-                    .frame(width: 38, height: 38)
-                Image(systemName: "flame.fill")
-                    .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(Color.accentWarm)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("New personal record!")
-                    .appFont(.bodyEmphasis)
-                    .foregroundStyle(Color.ink)
-                Text("Your longest streak yet — \(days) day\(days == 1 ? "" : "s").")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(Color.inkLight)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss")
-        }
-        .padding(AppSpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.brandSoft)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.brand.opacity(0.35), lineWidth: 1)
-        )
-        .overlay(BrandConfetti(active: confettiActive))
-        .appShadow(.shadowCard)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("New personal record. Your longest streak yet, \(days) days.")
-    }
-}
-
-// MARK: - Weekly challenge card
-
-/// "This week" adaptive logging challenge — a clean progress card: eyebrow,
-/// goal title, a single progress bar, and a footnote that either nudges
-/// ("2 days left · beat last week") or celebrates ("3 weeks done"). One
-/// BrandConfetti burst on first completion. Same surface treatment as the
-/// other Today cards so it reads as a peer, not a banner.
-private struct WeeklyChallengeCard: View {
-    let challenge: WeeklyChallenge
-    let completedWeeks: Int
-    let confettiActive: Bool
-
-    private var fraction: Double {
-        guard challenge.target > 0 else { return 0 }
-        return min(1, Double(challenge.progress) / Double(challenge.target))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            HStack {
-                Text("THIS WEEK").eyebrow()
-                    .foregroundStyle(Color.brandDeep)
-                Spacer()
-                if challenge.isComplete {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(Color.success)
-                }
-            }
-
-            Text(challenge.isComplete
-                 ? "Challenge complete!"
-                 : "Log meals \(challenge.target) days")
-                .appFont(.title2)
-                .foregroundStyle(Color.ink)
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.borderHairline)
-                    Capsule()
-                        .fill(challenge.isComplete ? Color.success : Color.brand)
-                        .frame(width: geo.size.width * fraction)
-                }
-            }
-            .frame(height: 8)
-
-            HStack(spacing: 6) {
-                Text("\(challenge.progress) / \(challenge.target) days")
-                    .appFont(.captionStrong)
-                    .foregroundStyle(Color.ink)
-                Spacer()
-                Text(footnote)
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-            }
-        }
-        .padding(AppSpacing.lg)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-        .appShadow(.shadowCard)
-        .overlay(BrandConfetti(active: confettiActive))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityText)
-    }
-
-    private var footnote: String {
-        if challenge.isComplete {
-            return completedWeeks == 1 ? "1 week done" : "\(completedWeeks) weeks done"
-        }
-        let left = challenge.daysLeftInWeek == 1
-            ? "Last day"
-            : "\(challenge.daysLeftInWeek) days left"
-        if challenge.lastWeekCount > 0 {
-            return "\(left) · beat last week (\(challenge.lastWeekCount))"
-        }
-        return left
-    }
-
-    private var accessibilityText: String {
-        challenge.isComplete
-            ? "Weekly challenge complete. \(completedWeeks) weeks done."
-            : "Weekly challenge: log meals \(challenge.target) days. "
-                + "\(challenge.progress) of \(challenge.target) done."
-    }
-}
-
-// MARK: - Record celebration store
-
-/// Local, UserDefaults-backed tracker for streak personal records, mirroring
-/// the LoggingRhythmStore / FavoritesStore pattern. Decides when the
-/// all-time-longest streak has crossed a celebration-worthy milestone —
-/// purely from the value the Tracker already loads, so it costs no egress.
-///
-/// The first observation silently adopts the current best, so we never
-/// retroactively celebrate a streak earned before this shipped (and a failed
-/// profile load, which leaves the streak nil and never calls in, can't
-/// trigger a false record). Progress is marked on read, so the same record
-/// can't re-fire when the user re-opens Today.
-@MainActor
-final class RecordCelebrationStore {
-    static let shared = RecordCelebrationStore()
-
-    /// Ascending ladder of streak milestones worth a celebration.
-    static let streakMilestones = [3, 7, 14, 21, 30, 50, 75, 100, 150, 200, 300, 365]
-
-    private let defaults: UserDefaults
-    private let seenKey = "foodie.records.v1.lastSeenLongestStreak"
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-    }
-
-    /// The highest milestone the longest streak crossed since we last saw
-    /// it, or nil when there's nothing new to celebrate. Advances the stored
-    /// high-water mark as a side effect.
-    func consumePendingStreakRecord(longestStreak: Int) -> Int? {
-        guard longestStreak >= 0 else { return nil }
-        guard defaults.object(forKey: seenKey) != nil else {
-            // First ever observation — adopt silently, celebrate nothing.
-            defaults.set(longestStreak, forKey: seenKey)
-            return nil
-        }
-        let lastSeen = defaults.integer(forKey: seenKey)
-        guard longestStreak > lastSeen else { return nil }
-        let crossed = Self.streakMilestones.filter { $0 > lastSeen && $0 <= longestStreak }
-        defaults.set(longestStreak, forKey: seenKey)
-        return crossed.max()
-    }
-
-    #if DEBUG
-    /// Test hook: forget all record history.
-    func reset() { defaults.removeObject(forKey: seenKey) }
-    #endif
-}
-
-// MARK: - Streak detail sheet (Phase 21)
-
-/// Small explanatory sheet presented when the user taps the streak
-/// chip. Displays current streak, longest streak, grace remaining,
-/// and a one-line description of the grace-day mechanic.
-private struct StreakDetailSheet: View {
-    let current: Int
-    let longest: Int
-    let graceRemaining: Int
-
-    /// Pre-rendered share card image, prepared on appear so the ShareLink
-    /// has something to hand the share sheet immediately.
-    @State private var shareImage: Image?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                Text("YOUR STREAK").eyebrow()
-                    .foregroundStyle(Color.inkMute)
-                Text("\(current) day\(current == 1 ? "" : "s")")
-                    .appFont(.display1)
-                    .foregroundStyle(Color.ink)
-            }
-
-            HStack(spacing: AppSpacing.lg) {
-                statBlock(label: "BEST", value: "\(longest)")
-                statBlock(label: "GRACE", value: "\(graceRemaining)")
-            }
-
-            Text("Miss a day and your streak survives once — that's your grace day. Log every day for a week and we refill it. We don't penalize humans.")
-                .appFont(.caption)
-                .foregroundStyle(Color.inkMute)
-                .fixedSize(horizontal: false, vertical: true)
-
-            shareButton
-
-            Spacer()
-        }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.top, AppSpacing.xl)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.bgCanvas)
-        .onAppear(perform: renderShareImage)
-    }
-
-    /// A branded "flex" card the user can post anywhere. Hidden until the
-    /// image is ready, and only when there's an actual streak to show.
-    @ViewBuilder
-    private var shareButton: some View {
-        if let shareImage {
-            ShareLink(
-                item: shareImage,
-                preview: SharePreview("My FoodieAI streak", image: shareImage)
-            ) {
-                HStack(spacing: 8) {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 15, weight: .bold))
-                    Text(current > 0 ? "Share my streak" : "Share my record")
-                        .appFont(.captionStrong)
-                }
-                .foregroundStyle(Color.brandDeep)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, AppSpacing.md)
-                .background(Capsule().fill(Color.brandSoft))
-            }
-        }
-    }
-
-    private func renderShareImage() {
-        let days = current > 0 ? current : longest
-        guard days > 0 else { return }
-        let label = current > 0 ? "day streak" : "best streak"
-        shareImage = ShareCardRenderer.streakImage(days: days, label: label)
-    }
-
-    private func statBlock(label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).eyebrow()
-                .foregroundStyle(Color.inkMute)
-            Text(value)
-                .appFont(.title1)
-                .foregroundStyle(Color.ink)
-        }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, AppSpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-    }
-}
-
-// MARK: - Consistency record card
-
-/// Owns the 30-day history fetch + consistency computation for the Today
-/// record card. Self-contained so the card can be dropped into the Today
-/// layout with one line; reloads on `.foodLogDidChange` so a fresh save is
-/// reflected without leaving the tab.
-@MainActor
-private final class ConsistencyLoader: ObservableObject {
-    @Published var stats: ConsistencyStats?
-    /// Day buckets parallel to `stats?.days` (same order, oldest → newest,
-    /// same length). Retained so the record dot-grid can open a day's full
-    /// log detail without a second query — the consistency fetch already
-    /// pulled every log in the 30-day window into memory.
-    @Published var buckets: [DailyBucket] = []
-    private let logService = FoodLogService()
-
-    func load(goal: Double,
-              direction: CalorieGoalCalculator.GoalDirection?,
-              days: Int = 30) async {
-        let cal = Calendar.current
-        let startToday = cal.startOfDay(for: Date())
-        guard let from = cal.date(byAdding: .day, value: -(days - 1), to: startToday),
-              let to = cal.date(byAdding: .day, value: 1, to: startToday) else { return }
-        do {
-            let logs = try await logService.logs(from: from, to: to)
-            let buckets = DailyBucketing.bucket(logs, from: from, to: to, calendar: cal)
-            stats = ConsistencyStats.compute(
-                buckets: buckets, goal: goal, direction: direction)
-            self.buckets = buckets
-        } catch {
-            // Keep any prior stats; a transient failure (incl. task
-            // cancellation when the goal changes) shouldn't blank the card.
-        }
-    }
-}
-
-/// The "Strava for food" proof loop for scale-free users: how many of the
-/// last 30 days you stayed on goal, your best and current runs, a glanceable
-/// day grid, and a few earned milestones. Hides itself until there's at
-/// least one tracked day so new users don't see an empty shell.
-private struct ConsistencyCard: View {
-    let goal: Double
-    let direction: CalorieGoalCalculator.GoalDirection?
-    var bodyWeightKg: Double? = nil
-    @StateObject private var loader = ConsistencyLoader()
-    /// Day whose detail sheet is open. Set when a tracked dot is tapped.
-    @State private var selectedBucket: DailyBucket?
-
-    var body: some View {
-        // Always render a concrete host (zero-height when empty) so the
-        // `.task` reliably mounts — a `Group` that resolves to nothing when
-        // `stats` is nil can skip the task and the card would never load.
-        content
-            .task(id: goal) {
-                await loader.load(goal: goal, direction: direction)
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(for: .foodLogDidChange)
-            ) { _ in
-                Task { await loader.load(goal: goal, direction: direction) }
-            }
-            .sheet(item: $selectedBucket) { bucket in
-                // Reuse the same day-detail surface as Week/Month. A delete
-                // here is the only path that needs a re-fetch (rare, explicit
-                // action) so the grid settles to the new totals.
-                DayDetailSheet(
-                    bucket: bucket,
-                    onDeleted: {
-                        Task { await loader.load(goal: goal, direction: direction) }
-                    },
-                    goal: goal,
-                    direction: direction,
-                    bodyWeightKg: bodyWeightKg
-                )
-            }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if let stats = loader.stats, stats.daysTracked > 0 {
-            card(stats)
-        } else {
-            Color.clear.frame(height: 0)
-        }
-    }
-
-    @ViewBuilder
-    private func card(_ stats: ConsistencyStats) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            Text("YOUR RECORD").eyebrow()
-                .foregroundStyle(Color.brandDeep)
-
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("\(stats.daysOnGoal)")
-                    .appFont(.display2)
-                    .foregroundStyle(Color.ink)
-                Text(direction == .gain ? "days on target" : "days on goal")
-                    .appFont(.bodyEmphasis)
-                    .foregroundStyle(Color.inkMute)
-            }
-            Text("of \(stats.daysTracked) tracked \(stats.daysTracked == 1 ? "day" : "days") · last 30 days")
-                .appFont(.caption)
-                .foregroundStyle(Color.inkLight)
-
-            dotGrid(stats)
-                .padding(.top, 2)
-
-            if stats.bestStreak > 0 {
-                HStack(spacing: AppSpacing.lg) {
-                    streakStat(value: stats.currentStreak, label: "current")
-                    streakStat(value: stats.bestStreak, label: "best run")
-                }
-            }
-
-            let badges = earnedBadges(stats)
-            if !badges.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(badges, id: \.self) { badge in
-                        HStack(spacing: 4) {
-                            Image(systemName: "rosette")
-                                .font(.system(size: 10, weight: .bold))
-                            Text(badge).appFont(.caption)
-                        }
-                        .foregroundStyle(Color.brandDeep)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.brandSoft))
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg).fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-        .appShadow(.shadowCard)
-    }
-
-    private func streakStat(value: Int, label: String) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: "flame.fill")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(value > 0 ? Color.brand : Color.inkLight)
-            Text("\(value)")
-                .appFont(.bodyEmphasis)
-                .foregroundStyle(Color.ink)
-            Text(label)
-                .appFont(.caption)
-                .foregroundStyle(Color.inkMute)
-        }
-    }
-
-    private func dotGrid(_ stats: ConsistencyStats) -> some View {
-        let columns = Array(
-            repeating: GridItem(.flexible(minimum: 8), spacing: 5), count: 10)
-        return LazyVGrid(columns: columns, spacing: 5) {
-            ForEach(Array(stats.days.enumerated()), id: \.offset) { index, state in
-                dayDot(index: index, state: state)
-            }
-        }
-    }
-
-    /// One day square. Tracked days — on-goal (green) *and* over-goal (red)
-    /// — are tappable and open that day's full log detail. The bucket comes
-    /// from `loader.buckets`, which is parallel to `stats.days` and already
-    /// in memory, so opening a day costs no extra Supabase egress.
-    /// Untracked days have nothing to show, so they stay inert.
-    @ViewBuilder
-    private func dayDot(index: Int, state: ConsistencyStats.DayState) -> some View {
-        let bucket = index < loader.buckets.count ? loader.buckets[index] : nil
-        if let bucket, bucket.hasLogs {
-            Button {
-                Haptics.selection()
-                selectedBucket = bucket
-            } label: {
-                dotShape(state)
-            }
-            .buttonStyle(CalendarCellButtonStyle())
-            .accessibilityLabel(dotAccessibilityLabel(bucket: bucket, state: state))
-        } else {
-            dotShape(state)
-                .accessibilityHidden(true)
-        }
-    }
-
-    private func dotShape(_ state: ConsistencyStats.DayState) -> some View {
-        RoundedRectangle(cornerRadius: 3)
-            .fill(color(for: state))
-            .aspectRatio(1, contentMode: .fit)
-    }
-
-    /// Cached so building 30 labels doesn't bootstrap 30 ICU formatters.
-    private static let dotDateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateStyle = .medium
-        return f
-    }()
-
-    private func dotAccessibilityLabel(bucket: DailyBucket,
-                                       state: ConsistencyStats.DayState) -> String {
-        let dateStr = Self.dotDateFormatter.string(from: bucket.date)
-        let count = bucket.logs.count
-        let mealStr = "\(count) meal\(count == 1 ? "" : "s")"
-        let verdict = state == .onGoal ? "on goal" : "over goal"
-        return "\(dateStr), \(mealStr), \(verdict). Tap to view details."
-    }
-
-    private func color(for state: ConsistencyStats.DayState) -> Color {
-        switch state {
-        case .onGoal:    return Color.brand
-        case .off:       return Color.error.opacity(0.65)
-        case .untracked: return Color.borderHairline
-        }
-    }
-
-    private func earnedBadges(_ stats: ConsistencyStats) -> [String] {
-        var out: [String] = []
-        if stats.bestStreak >= 7 { out.append("7-day streak") }
-        if stats.daysOnGoal >= 20 { out.append("20 on-goal days") }
-        if stats.totalMeals >= 50 { out.append("50 meals") }
-        return out
-    }
-}
-
-// MARK: - Shareable record card
-
-/// Branded, screenshot-ready card for sharing a streak / record to the iOS
-/// share sheet — Strava's "flex" without a social backend. Rendered to a
-/// flat image by `ShareCardRenderer`; no network, just pixels. Square so it
-/// drops cleanly into stories, posts, and messages.
-struct StreakShareCard: View {
-    let days: Int
-    let label: String   // "day streak" / "best streak"
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color.brandBright, Color.brand],
-                startPoint: .top, endPoint: .bottom
-            )
-
-            // Soft ring flourish echoing the Month/Week header motif.
-            Circle()
-                .strokeBorder(Color.brandDeep.opacity(0.10), lineWidth: 2)
-                .frame(width: 420, height: 420)
-                .offset(x: 150, y: -170)
-
-            VStack(spacing: 12) {
-                Spacer()
-                Image(systemName: "flame.fill")
-                    .font(.system(size: 76, weight: .bold))
-                    .foregroundStyle(Color.accentWarm)
-                Text("\(days)")
-                    .font(.custom(AppFont.PS.mplusBlack, size: 150))
-                    .kerning(-3)
-                    .foregroundStyle(Color.brandDeep)
-                Text(label.uppercased())
-                    .font(.custom(AppFont.PS.nunitoExtraBold, size: 25))
-                    .tracking(3)
-                    .foregroundStyle(Color.brandDeep.opacity(0.85))
-                Spacer()
-                Text("FoodieAI")
-                    .font(.custom(AppFont.PS.mplusBlack, size: 22))
-                    .foregroundStyle(Color.brandDeep.opacity(0.70))
-                    .padding(.bottom, 28)
-            }
-            .padding(30)
-        }
-        .frame(width: 360, height: 360)
-    }
-}
-
-/// Rasterizes a SwiftUI view into a shareable `Image` using the native
-/// `ImageRenderer` (iOS 16+). Main-actor isolated because ImageRenderer is.
-@MainActor
-enum ShareCardRenderer {
-    static func render<V: View>(_ view: V, scale: CGFloat = 3) -> Image? {
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = scale
-        guard let ui = renderer.uiImage else { return nil }
-        return Image(uiImage: ui)
-    }
-
-    static func streakImage(days: Int, label: String) -> Image? {
-        render(StreakShareCard(days: days, label: label))
-    }
-}
-
-
-/// Reads today's movement from HealthKit (steps + active energy) so the goal
-/// loop can reflect "I moved" — the activity half of the energy loop. Fully
-/// guarded: every path no-ops when Health data is unavailable or read access
-/// hasn't been granted, so the app behaves identically when HealthKit isn't
-/// set up. Read-only — we never write to Health.
-///
-/// NOTE (device pass): functional only once the **HealthKit capability** is
-/// added in Xcode → Signing & Capabilities (which registers the App ID
-/// capability under automatic signing) and the user grants read access on a
-/// real device. Adding the entitlement by hand without that registration is
-/// what risks breaking signing, so it's intentionally left to the Xcode UI.
-@MainActor
-final class HealthActivityService: ObservableObject {
-    static let shared = HealthActivityService()
-
-    struct TodayActivity: Equatable {
-        let steps: Int
-        let activeEnergyKcal: Double
-    }
-
-    @Published private(set) var today: TodayActivity?
-    /// True once the user has run the auth request without it erroring — i.e.
-    /// the capability/provisioning is in place and they opted in. Read access
-    /// itself is opaque (Apple hides it), so this only means "connected," not
-    /// "granted." Persisted so the movement ring keeps showing across launches
-    /// even before today's first steps land — e.g. just after local midnight.
-    @Published private(set) var connected: Bool
-
-    private let store = HKHealthStore()
-    private let defaults: UserDefaults
-    private let connectedKey = "foodie.health.connected.v1"
-    /// Live-update plumbing — observer queries + a polling timer that run only
-    /// while a movement surface is on screen (see `startLiveUpdates`).
-    private var liveObservers: [HKObserverQuery] = []
-    private var liveTimer: Timer?
-    /// True while the sensor streams are running. Guards against the 2–3
-    /// `startLiveUpdates` calls that fire in a burst on a foreground+active-tab
-    /// transition tearing down and rebuilding the sensors needlessly.
-    private var isLive = false
-
-    /// Core Motion pedometer for *real-time* step updates. HealthKit only
-    /// commits steps in delayed batches, so the ring would lag behind an
-    /// active walk; `CMPedometer` streams the live cumulative count straight
-    /// from the motion chip (~1s cadence). Foreground + real-device only.
-    private let pedometer = CMPedometer()
-    /// Last values from each source. We publish the *max* of the two step
-    /// counts so the ring never visibly drops (HealthKit may include Watch
-    /// steps; the pedometer is iPhone-only but instant).
-    private var hkSteps: Int?
-    private var hkEnergy: Double?
-    private var liveSteps: Int?
-    /// Live active-energy estimate derived from `liveSteps` × bodyweight (see
-    /// `MovementEnergy.activeKcalFromSteps`). HealthKit has no live-calorie
-    /// stream, so this walking-only estimate is what makes the active-kcal
-    /// figure climb in real time; the measured HK value overtakes it (we
-    /// publish the max) once HealthKit commits. Needs `liveWeightKg`.
-    private var liveActiveKcal: Double?
-    private var liveWeightKg: Double?
-    /// The local day the live streams were armed for. The pedometer's cumulative
-    /// count is anchored to the midnight it started from, so if the app stays
-    /// open across midnight we must re-arm to reset to the new day (see `tick`).
-    private var liveStartDay: Date?
-    /// Persistent HealthKit observer that keeps the home-screen widget fresh
-    /// while the app is closed (see `enableWidgetBackgroundSync`). Distinct from
-    /// `liveObservers` — this one is NOT torn down by `stopLiveUpdates`; it must
-    /// outlive the foreground session so HealthKit can resume the app for it.
-    private var widgetObserver: HKObserverQuery?
-    /// True once `enableBackgroundDelivery` has succeeded, so we don't keep
-    /// re-requesting it every foreground (it fails until step-read is granted).
-    private var widgetBackgroundDeliveryOn = false
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        self.connected = defaults.bool(forKey: connectedKey)
-    }
-
-    var isAvailable: Bool { HKHealthStore.isHealthDataAvailable() }
-
-    private var readTypes: Set<HKObjectType> {
-        var types: Set<HKObjectType> = []
-        if let steps = HKQuantityType.quantityType(forIdentifier: .stepCount) {
-            types.insert(steps)
-        }
-        if let energy = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned) {
-            types.insert(energy)
-        }
-        return types
-    }
-
-    /// Request read access. HealthKit shows the system sheet at most once;
-    /// returns false when Health is unavailable or the request errors (e.g.
-    /// the capability isn't enabled yet).
-    @discardableResult
-    func requestAuthorization() async -> Bool {
-        guard isAvailable else { return false }
-        do {
-            try await store.requestAuthorization(toShare: [], read: readTypes)
-            if !connected {
-                connected = true
-                defaults.set(true, forKey: connectedKey)
-            }
-            // Now that read access is (likely) granted, arm the background
-            // widget sync so it works this very session — not just after the
-            // next foreground.
-            enableWidgetBackgroundSync()
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    /// Keep the home-screen widget's step count fresh while the app is closed,
-    /// at low battery cost. iOS wakes the app in the background — at most
-    /// **hourly** for steps, never per-footstep — when new step data lands; we
-    /// query today's steps and update just the widget snapshot's `steps` field.
-    /// This is the ceiling iOS allows: truly live (per-step) widget updates from
-    /// a closed app aren't possible on the platform. Idempotent — safe to call
-    /// on every foreground; re-requests background delivery until it succeeds
-    /// (it fails until the user grants step-read access). Requires the HealthKit
-    /// Background Delivery entitlement.
-    func enableWidgetBackgroundSync(timeZone: TimeZone = .current) {
-        guard isAvailable,
-              let stepType = HKQuantityType.quantityType(forIdentifier: .stepCount) else { return }
-
-        // Execute the long-lived observer once per process. Its handler is what
-        // HealthKit invokes (by resuming the app) when new step data arrives.
-        if widgetObserver == nil {
-            let query = HKObserverQuery(sampleType: stepType, predicate: nil) { [weak self] _, completion, _ in
-                Task { @MainActor in
-                    await self?.syncWidgetSteps(timeZone: timeZone)
-                    completion()   // MUST signal completion or HealthKit stops delivering
-                }
-            }
-            store.execute(query)
-            widgetObserver = query
-        }
-
-        guard !widgetBackgroundDeliveryOn else { return }
-        store.enableBackgroundDelivery(for: stepType, frequency: .hourly) { [weak self] success, _ in
-            guard success else { return }
-            Task { @MainActor in self?.widgetBackgroundDeliveryOn = true }
-        }
-    }
-
-    /// Background path: refresh only the widget's step count from HealthKit.
-    /// The other daily figures are owned by the foreground app (a step doesn't
-    /// change calories/streak), so we leave them as last written.
-    func syncWidgetSteps(timeZone: TimeZone = .current) async {
-        guard let steps = await sum(.stepCount, unit: .count(), timeZone: timeZone) else { return }
-        WidgetSnapshotUpdater.updateSteps(Int(steps))
-    }
-
-    /// Load today's totals for the user's local day. Surfaces a card only
-    /// when Health actually returned a value; otherwise clears it. Live
-    /// pedometer steps (if any) are merged in via `publishActivity`.
-    func refreshToday(timeZone: TimeZone = .current) async {
-        guard isAvailable else { return }
-        async let steps = sum(.stepCount, unit: .count(), timeZone: timeZone)
-        async let energy = sum(.activeEnergyBurned, unit: .kilocalorie(), timeZone: timeZone)
-        let s = await steps
-        let e = await energy
-        hkSteps = s.map { Int($0) }
-        hkEnergy = e
-        publishActivity()
-    }
-
-    /// Combine the live + batched sources into the published `today`. Both
-    /// steps and active energy publish the *larger* of (live, measured) so the
-    /// ring never jumps backward; clears `today` only when nothing has data.
-    private func publishActivity() {
-        let steps = maxOptional(liveSteps, hkSteps)
-        let energy = maxOptional(liveActiveKcal, hkEnergy)
-        if steps == nil && energy == nil {
-            today = nil
-        } else {
-            today = TodayActivity(steps: steps ?? 0, activeEnergyKcal: energy ?? 0)
-        }
-    }
-
-    private func maxOptional<T: Comparable>(_ a: T?, _ b: T?) -> T? {
-        switch (a, b) {
-        case let (x?, y?): return Swift.max(x, y)
-        case let (x?, nil): return x
-        case let (nil, y?): return y
-        case (nil, nil): return nil
-        }
-    }
-
-    /// Apply a fresh live step count from the pedometer stream, and refresh the
-    /// step-derived live active-energy estimate alongside it.
-    private func applyLiveSteps(_ steps: Int) {
-        liveSteps = steps
-        if let kg = liveWeightKg {
-            let est = MovementEnergy.activeKcalFromSteps(steps, weightKg: kg)
-            liveActiveKcal = est >= 1 ? est : nil
-        }
-        publishActivity()
-    }
-
-    /// Supply the bodyweight used for the live active-energy estimate. Safe to
-    /// call as the profile loads/changes; recomputes against the current live
-    /// step count without restarting the sensor streams.
-    func setMovementWeight(_ kg: Double?) {
-        guard liveWeightKg != kg else { return }
-        liveWeightKg = kg
-        if let steps = liveSteps { applyLiveSteps(steps) }
-    }
-
-    /// Begin live-ish step/energy updates while a movement surface is visible.
-    /// Two mechanisms, because HealthKit writes pedometer data in batches:
-    ///   - an `HKObserverQuery` that re-fetches the instant new data lands, and
-    ///   - a light 30s polling timer that catches the in-between so the ring
-    ///     keeps climbing as you walk.
-    /// Call from `.onAppear`; ALWAYS pair with `stopLiveUpdates()` on disappear
-    /// so observers/timers don't leak. Foreground-only (no background delivery).
-    func startLiveUpdates(timeZone: TimeZone = .current, weightKg: Double? = nil) {
-        if let weightKg { liveWeightKg = weightKg }
-        // Already streaming → don't churn the sensors. Callers fire this 2–3×
-        // in a burst on a foreground+active-tab transition; just keep the
-        // estimate weight current and bail.
-        guard !isLive else {
-            if let steps = liveSteps { applyLiveSteps(steps) }
-            return
-        }
-        stopLiveUpdates()  // clean slate (also resets isLive)
-        isLive = true
-
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = timeZone
-        let startOfDay = cal.startOfDay(for: Date())
-        liveStartDay = startOfDay
-
-        // Real-time path: stream live cumulative steps since local midnight.
-        // This is what actually makes the ring climb as you walk; the
-        // HealthKit observers below only catch up energy + a Watch-inclusive
-        // total in the background.
-        if CMPedometer.isStepCountingAvailable() {
-            pedometer.startUpdates(from: startOfDay) { [weak self] data, error in
-                guard let data, error == nil else { return }
-                let steps = data.numberOfSteps.intValue
-                Task { @MainActor in self?.applyLiveSteps(steps) }
-            }
-        }
-
-        guard isAvailable else { return }
-        for id in [HKQuantityTypeIdentifier.stepCount, .activeEnergyBurned] {
-            guard let type = HKQuantityType.quantityType(forIdentifier: id) else { continue }
-            let query = HKObserverQuery(sampleType: type, predicate: nil) { [weak self] _, completion, _ in
-                Task { @MainActor in
-                    await self?.refreshToday(timeZone: timeZone)
-                    completion()
-                }
-            }
-            store.execute(query)
-            liveObservers.append(query)
-        }
-        liveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.tick(timeZone: timeZone) }
-        }
-    }
-
-    /// Periodic live refresh. If the local day rolled over while the app stayed
-    /// open, re-arm the streams so the pedometer restarts from the new midnight
-    /// — its cumulative count is anchored to the day it started, so without this
-    /// an app left open past midnight would keep showing yesterday's steps.
-    private func tick(timeZone: TimeZone) async {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = timeZone
-        if let day = liveStartDay, !cal.isDate(day, inSameDayAs: Date()) {
-            let kg = liveWeightKg
-            stopLiveUpdates()                                    // clears the stale live count
-            startLiveUpdates(timeZone: timeZone, weightKg: kg)   // re-anchors to today's midnight
-        }
-        await refreshToday(timeZone: timeZone)
-    }
-
-    /// Tear down the live observers, polling timer, and pedometer stream.
-    /// Idempotent. Clears the cached live count so a later restart (e.g. after
-    /// a day rollover) can't briefly publish yesterday's total.
-    func stopLiveUpdates() {
-        for query in liveObservers { store.stop(query) }
-        liveObservers.removeAll()
-        liveTimer?.invalidate()
-        liveTimer = nil
-        if CMPedometer.isStepCountingAvailable() {
-            pedometer.stopUpdates()
-        }
-        liveSteps = nil
-        liveActiveKcal = nil
-        liveStartDay = nil
-        isLive = false
-    }
-
-    private func sum(_ id: HKQuantityTypeIdentifier,
-                     unit: HKUnit,
-                     timeZone: TimeZone) async -> Double? {
-        guard let type = HKQuantityType.quantityType(forIdentifier: id) else { return nil }
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = timeZone
-        let start = cal.startOfDay(for: Date())
-        let predicate = HKQuery.predicateForSamples(
-            withStart: start, end: Date(), options: .strictStartDate)
-        return await withCheckedContinuation { (cont: CheckedContinuation<Double?, Never>) in
-            let query = HKStatisticsQuery(
-                quantityType: type,
-                quantitySamplePredicate: predicate,
-                options: .cumulativeSum
-            ) { _, stats, _ in
-                cont.resume(returning: stats?.sumQuantity()?.doubleValue(for: unit))
-            }
-            store.execute(query)
-        }
-    }
-}
-
-// MARK: - Daily Loop hero (extracted observing subview)
-
-/// The paired calories + movement rings, pulled out of `TodayView` into its own
-/// view. `HealthActivityService` is `@ObservedObject` HERE (not on TodayView),
-/// so a live step/active-energy tick invalidates ONLY this subview — not the
-/// ~2,400-line TodayView body, which used to re-run `MealSuggestionEngine` +
-/// `DayCalorieStanding` on every footstep. Calorie/profile inputs are passed in,
-/// so a meal log re-renders the parent (and this), while a step re-renders only
-/// this. The parent keeps its own non-observed reads of `health` for the widget
-/// snapshot + eat-to-goal card, which don't need to update per step.
-private struct DailyLoopHeroView: View {
-    let calories: Double
-    let calorieGoal: Double
-    let profile: Profile?
-    @ObservedObject var health = HealthActivityService.shared
-
-    private var movementGuidance: MovementGuidance.Result {
-        MovementGuidance.compute(
-            direction: profile?.weightGoalDirection,
-            ageYears: profile?.ageYears,
-            currentSteps: health.today?.steps ?? 0,
-            consumed: calories,
-            calorieGoal: calorieGoal,
-            weightKg: profile?.weightKg
-        )
-    }
-    private var dailyStepGoal: Int { movementGuidance.stepGoal }
-    private var movementGoalSuggestion: String { movementGuidance.line }
-    private var movementCreditKcal: Double {
-        guard let profile, let activity = health.today else { return 0 }
-        return MovementEnergy.budgetCredit(
-            profile: profile,
-            activeEnergyKcal: activity.activeEnergyKcal,
-            steps: activity.steps
-        )
-    }
-
-    private enum CalorieRingStanding: Equatable { case under, approaching, onGoal, over }
-    private static let calorieToleranceKcal = DayCalorieStanding.onGoalToleranceKcal
-    private static func calorieRingStanding(consumed: Double, goal: Double) -> CalorieRingStanding {
-        guard goal > 0, consumed.isFinite else { return .under }
-        let tol = calorieToleranceKcal
-        if consumed >= goal + tol { return .over }
-        if consumed >= goal - tol { return .onGoal }
-        if consumed >= 0.80 * goal { return .approaching }
-        return .under
-    }
-
-    var body: some View {
-        let baseGoal = calorieGoal
-        let credit = movementCreditKcal
-        let effectiveGoal = baseGoal + credit
-        let standing = Self.calorieRingStanding(consumed: calories, goal: effectiveGoal)
-        VStack(spacing: AppSpacing.md) {
-            if health.today != nil || health.connected {
-                let activity = health.today
-                HStack(alignment: .top, spacing: AppSpacing.xl) {
-                    ringColumn(
-                        value: calories, goal: effectiveGoal,
-                        number: Self.heroNumber(calories), unit: "kcal",
-                        tint: standing == .over ? .error : .brand,
-                        caption: "energy in",
-                        sub: credit >= 1
-                            ? "of \(Self.heroNumber(baseGoal)) +\(Self.heroNumber(credit)) moved"
-                            : "of \(Self.heroNumber(baseGoal))",
-                        diameter: 128
-                    )
-                    ringColumn(
-                        value: Double(activity?.steps ?? 0),
-                        goal: Double(dailyStepGoal),
-                        number: Self.heroNumber(Double(activity?.steps ?? 0)),
-                        unit: "steps",
-                        tint: .accentCool,
-                        caption: "moving",
-                        sub: movementSubtitle(activity),
-                        diameter: 128
-                    )
-                }
-                if credit >= 1 {
-                    movementCreditChip(credit)
-                }
-                Text(movementGoalSuggestion)
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, AppSpacing.sm)
-            } else {
-                MetricRing(
-                    value: calories, goal: baseGoal,
-                    number: Self.heroNumber(calories), unit: "kcal",
-                    tint: standing == .over ? .error : .brand,
-                    diameter: 172
-                )
-                Text("of \(Self.heroNumber(baseGoal)) kcal goal")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                if health.isAvailable {
-                    connectMovementCard
-                }
-            }
-            calorieWarningCaption(standing)
-        }
-        .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.vertical, AppSpacing.md)
-        .animation(.appReduced, value: standing)
-        .task { await health.refreshToday() }
-    }
-
-    private func movementCreditChip(_ credit: Double) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: "arrow.uturn.backward")
-                .font(.system(size: 11, weight: .bold))
-            Text("Moving earned back ~\(Self.heroNumber(credit)) kcal of room")
-                .appFont(.captionStrong)
-        }
-        .foregroundStyle(Color.accentCool)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Color.brandSoft))
-        .accessibilityLabel("Moving earned back about \(Self.heroNumber(credit)) calories of eating room.")
-    }
-
-    private func movementSubtitle(_ activity: HealthActivityService.TodayActivity?) -> String {
-        guard let activity else { return "no data yet" }
-        if activity.activeEnergyKcal >= 1 {
-            return "~\(Int(activity.activeEnergyKcal.rounded())) kcal active"
-        }
-        return "goal \(Self.heroNumber(Double(dailyStepGoal)))"
-    }
-
-    private func ringColumn(value: Double, goal: Double,
-                            number: String, unit: String, tint: Color,
-                            caption: String, sub: String,
-                            diameter: CGFloat) -> some View {
-        VStack(spacing: AppSpacing.xs) {
-            MetricRing(value: value, goal: goal, number: number,
-                       unit: unit, tint: tint, diameter: diameter)
-            Text(caption.uppercased())
-                .appFont(.labelEyebrow)
-                .foregroundStyle(Color.inkMute)
-            Text(sub)
-                .appFont(.caption)
-                .foregroundStyle(Color.inkLight)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var connectMovementCard: some View {
-        Button {
-            Task {
-                await health.requestAuthorization()
-                await health.refreshToday()
-            }
-        } label: {
-            HStack(alignment: .top, spacing: AppSpacing.md) {
-                ZStack {
-                    Circle().fill(Color.brandSoft).frame(width: 42, height: 42)
-                    Image(systemName: "figure.walk.motion")
-                        .font(.system(size: 19, weight: .semibold))
-                        .foregroundStyle(Color.accentCool)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Add your movement")
-                        .appFont(.bodyEmphasis)
-                        .foregroundStyle(Color.ink)
-                    Text("Connect Apple Health to show today's steps and active calories next to your goal — your full energy loop, in and out.")
-                        .appFont(.caption)
-                        .foregroundStyle(Color.inkMute)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 6) {
-                        Image(systemName: "heart.text.square.fill")
-                            .font(.system(size: 12, weight: .bold))
-                        Text("Connect Apple Health")
-                            .appFont(.captionStrong)
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .heavy))
-                    }
-                    .foregroundStyle(Color.brandDeep)
-                    .padding(.top, 2)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(AppSpacing.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: AppRadius.lg)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.brandSoft.opacity(0.85), Color.bgSurface],
-                            startPoint: .topLeading, endPoint: .bottomTrailing
-                        )
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: AppRadius.lg)
-                    .strokeBorder(Color.brand.opacity(0.30), lineWidth: 1)
-            )
-            .appShadow(.shadowCard)
-            .contentShape(RoundedRectangle(cornerRadius: AppRadius.lg))
-        }
-        .buttonStyle(.plain)
-        .padding(.top, AppSpacing.sm)
-        .accessibilityLabel("Add your movement. Connect Apple Health to show today's steps and active calories next to your goal.")
-    }
-
-    @ViewBuilder
-    private func calorieWarningCaption(_ standing: CalorieRingStanding) -> some View {
-        switch standing {
-        case .under:
-            EmptyView()
-        case .approaching:
-            VStack(spacing: 2) {
-                Text("You're close to today's goal")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                Text("Small choices now keep dinner flexible.")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkLight)
-                    .multilineTextAlignment(.center)
-            }
-            .transition(.opacity)
-        case .onGoal:
-            VStack(spacing: 2) {
-                Text("Right on your goal today")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                Text("Nicely balanced — a little room either way is fine.")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkLight)
-                    .multilineTextAlignment(.center)
-            }
-            .transition(.opacity)
-        case .over:
-            // For a gain goal a surplus is the plan working, not a slip —
-            // affirm it instead of the gentle lose/maintain "fresh start" line.
-            let isGain = profile?.weightGoalDirection == .gain
-            VStack(spacing: 2) {
-                Text(isGain ? "Surplus logged today" : "A little over today")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkMute)
-                Text(isGain
-                     ? "That extra fuel is what builds — nice work."
-                     : "No big deal — tomorrow's a fresh start.")
-                    .appFont(.caption)
-                    .foregroundStyle(Color.inkLight)
-                    .multilineTextAlignment(.center)
-            }
-            .transition(.opacity)
-        }
-    }
-
-    private static func heroNumber(_ v: Double) -> String {
-        guard v.isFinite else { return "—" }
-        return heroFormatter.string(from: NSNumber(value: v.rounded()))
-            ?? "\(Int(v.rounded()))"
-    }
-    private static let heroFormatter: NumberFormatter = {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.maximumFractionDigits = 0
-        return f
-    }()
-}

@@ -289,6 +289,10 @@ final class CaptureViewModel: ObservableObject {
     func setPhoto(_ image: UIImage, source: PhotoSource = .library) {
         Haptics.tap()
         lastPhotoSource = source
+        pendingUploadedImage = nil   // fresh photo, don't reuse a prior upload
+        pendingVisualDescriptor = nil
+        visualSuggestedName = nil
+        visualTimesSeen = 0
         state = .picked(image)
     }
 
@@ -368,6 +372,10 @@ final class CaptureViewModel: ObservableObject {
                     AnalyticsService.Event.mealAnalyzed,
                     ["source": lastPhotoSource.rawValue])
                 Haptics.prepare()
+                // NOVEL_DIRECTIONS Idea 4 — embed the photo once here (reused
+                // at save), log its nearest prior match for on-device threshold
+                // tuning, and surface a name suggestion when the read flag is on.
+                await noteVisualMemory(for: image)
                 state = .confirmingName(image, response)
             } else {
                 Haptics.warning()
@@ -779,6 +787,69 @@ final class CaptureViewModel: ObservableObject {
     ///   3. Build a `NewFoodLog` carrying both paths. NO `user_id` — DB
     ///      default + RLS handle that.
     ///   4. Insert; transition to `.saved`.
+    /// Storage objects from a save attempt whose image upload succeeded but
+    /// whose row insert failed. `retrySave()` reuses these instead of
+    /// uploading fresh copies, so a flaky insert can't orphan a new image on
+    /// every retry. Cleared once the row commits or the meal is abandoned.
+    private var pendingUploadedImage: UploadedImage? = nil
+
+    /// User-facing copy for a failed save. Never surfaces a raw Supabase /
+    /// Postgres error string — those belong in the logs, not on screen. Maps
+    /// known cases to friendly copy and everything else to a safe generic.
+    static func friendlySaveMessage(for error: Error) -> String {
+        if let save = error as? SaveError, let desc = save.errorDescription {
+            return desc
+        }
+        if error is URLError {
+            return "Couldn't save. Check your connection and try again."
+        }
+        return "Something went wrong saving your meal. Please try again."
+    }
+
+    // MARK: - Visual Food Memory (NOVEL_DIRECTIONS Idea 4)
+
+    /// Name suggested from a confident visual match to a past meal. Only ever
+    /// set when the opt-in read flag is on AND the match is within the tuned
+    /// threshold; nil otherwise. The UI may offer it as a non-destructive
+    /// pre-fill for the name-confirm step.
+    @Published private(set) var visualSuggestedName: String? = nil
+
+    /// How many past meals look like the analyzed photo (the "you've had this N
+    /// times" signal). Only meaningful when the read flag is on and the
+    /// threshold is tuned; 0 otherwise.
+    @Published private(set) var visualTimesSeen: Int = 0
+
+    /// The analyzed photo's feature-print, stashed at analyze time so `save()`
+    /// records it without a second Vision pass.
+    private var pendingVisualDescriptor: VisualDescriptor? = nil
+
+    /// Embed the analyzed photo once, stash it for `save()`, and set a name
+    /// suggestion when the store recognizes the dish. Recognition is
+    /// self-calibrating and self-gating: `VisualFoodMemory` learns the user's
+    /// own "same dish" threshold from their repeat history and stays silent
+    /// until it has enough evidence, so no manual flag is needed. Fully
+    /// best-effort: a nil embedding silently skips everything.
+    private func noteVisualMemory(for image: UIImage) async {
+        visualSuggestedName = nil
+        visualTimesSeen = 0
+        pendingVisualDescriptor = nil
+        guard let descriptor = await VisionMealEmbedder.embed(image) else { return }
+        pendingVisualDescriptor = descriptor
+        if let name = await VisualFoodMemory.shared.suggestedName(for: descriptor) {
+            visualSuggestedName = name
+            visualTimesSeen = await VisualFoodMemory.shared.timesSeen(descriptor)
+        }
+        #if DEBUG
+        let nearest = await VisualFoodMemory.shared.nearestMatch(to: descriptor)
+        let learned = await VisualFoodMemory.shared.learnedThreshold
+        NSLog("[VisualMemory] nearest=%@ dist=%.2f learnedThreshold=%@ suggested=%@",
+              nearest?.entry.foodName ?? "none",
+              nearest?.distance ?? -1,
+              learned.map { String(format: "%.2f", $0) } ?? "nil (need more repeats)",
+              visualSuggestedName ?? "nil")
+        #endif
+    }
+
     func save() async {
         guard case .ready(let image, let response) = state else { return }
         state = .saving(image, response)
@@ -824,10 +895,19 @@ final class CaptureViewModel: ObservableObject {
         #endif
 
         do {
-            let uploaded = try await imageService.uploadMealImages(
-                mainData: mainData,
-                thumbnailData: thumbData
-            )
+            let uploaded: UploadedImage
+            if let existing = pendingUploadedImage {
+                // A prior attempt already uploaded these objects but the row
+                // insert failed; reuse them so retrying doesn't orphan a fresh
+                // upload on every attempt.
+                uploaded = existing
+            } else {
+                uploaded = try await imageService.uploadMealImages(
+                    mainData: mainData,
+                    thumbnailData: thumbData
+                )
+                pendingUploadedImage = uploaded
+            }
             guard case .saving = state, !Task.isCancelled else { return }
             #if DEBUG
             NSLog("[Save] uploaded main_path=%@ thumb_path=%@",
@@ -856,6 +936,29 @@ final class CaptureViewModel: ObservableObject {
 
             let inserted = try await logService.insert(draft)
             guard case .saving = state, !Task.isCancelled else { return }
+            pendingUploadedImage = nil   // row committed, nothing to reuse/orphan
+
+            // NOVEL_DIRECTIONS Idea 4 — remember this meal by its photo,
+            // on-device (Vision feature-print → local store, zero egress), so
+            // future scans can recognize the dish. Reuse the descriptor embedded
+            // at analyze time (no second Vision pass); embed here only as a
+            // fallback if analyze didn't produce one. Best-effort + detached so
+            // it never blocks or fails the save.
+            let stashedDescriptor = pendingVisualDescriptor
+            pendingVisualDescriptor = nil
+            Task.detached(priority: .utility) { [resolvedFoodName] in
+                let descriptor: VisualDescriptor?
+                if let stashedDescriptor {
+                    descriptor = stashedDescriptor
+                } else {
+                    descriptor = await VisionMealEmbedder.embed(image)
+                }
+                if let descriptor {
+                    await VisualFoodMemory.shared.record(
+                        foodName: resolvedFoodName, descriptor: descriptor, at: Date()
+                    )
+                }
+            }
             #if DEBUG
             NSLog("[Save] inserted food_logs.id=%@ user_id=%@",
                   inserted.id.uuidString, inserted.userId.uuidString)
@@ -999,9 +1102,8 @@ final class CaptureViewModel: ObservableObject {
     /// Phase 21.13 — when the quest celebration is showing OR the
     /// evaluator is still running, stash the snapshot and drop to
     /// `.idle` instead. The stash is later promoted to `.moodPulse`
-    /// either by the modal's `onDismiss` (quest fired) or by
-    /// `finishQuestEvaluation(questFired: false)` (no quest, user
-    /// already closed the success sheet).
+    /// either by the modal's `onDismiss` (quest fired) or, when no quest
+    /// fires, by `promotePendingMoodPulse()` off the success-sheet close.
     func discardSaved() {
         guard case .saved(let image, let response, let log) = state else {
             return
@@ -1014,18 +1116,6 @@ final class CaptureViewModel: ObservableObject {
             state = .idle
         } else {
             state = .moodPulse(image, response, log)
-        }
-    }
-
-    /// Called by the save Task once the daily-quest evaluator returns.
-    /// If a celebration is going to play, the modal handles the mood
-    /// handoff on dismiss. If no celebration is going to play and the
-    /// user has already closed the success sheet, promote the mood
-    /// pulse from the stash now so it doesn't get orphaned.
-    func finishQuestEvaluation(questFired: Bool) {
-        questEvaluationInFlight = false
-        if !questFired {
-            promotePendingMoodPulse()
         }
     }
 
@@ -1110,6 +1200,10 @@ final class CaptureViewModel: ObservableObject {
     func resetToPick() {
         editedFoodName = nil
         patternInsight = nil
+        pendingUploadedImage = nil
+        pendingVisualDescriptor = nil
+        visualSuggestedName = nil
+        visualTimesSeen = 0
         state = .idle
     }
 
@@ -1118,6 +1212,10 @@ final class CaptureViewModel: ObservableObject {
     func discardCurrent() {
         editedFoodName = nil
         patternInsight = nil
+        pendingUploadedImage = nil
+        pendingVisualDescriptor = nil
+        visualSuggestedName = nil
+        visualTimesSeen = 0
         state = .idle
     }
 
@@ -1227,6 +1325,132 @@ final class CaptureViewModel: ObservableObject {
     /// when the user starts a new flow.
     func clearRelogToast() {
         relogToast = nil
+    }
+
+    // MARK: - Phase 23: Vault
+
+    /// Save the currently-analyzed meal to the durable Vault. Independent
+    /// of the log-save path — the user can vault a food without logging it,
+    /// or after logging it. Best-effort: never disturbs the main capture
+    /// state.
+    ///
+    /// From `.saved` / `.moodPulse` (already logged) it snapshots the
+    /// inserted `food_logs` row directly (photo + id already exist, zero
+    /// upload). From `.ready` / `.saving` / `.saveFailed` it ensures the
+    /// photo is uploaded once — reusing / seeding `pendingUploadedImage`
+    /// so a later "Save to today" doesn't re-upload — and inserts a vault
+    /// item with no source log yet.
+    @discardableResult
+    func saveCurrentToVault() async -> VaultStore.AddOutcome {
+        switch state {
+        case .saved(_, _, let log), .moodPulse(_, _, let log):
+            return await vaultLoggedMeal(log)
+        case .ready(let image, let response),
+             .saving(let image, let response),
+             .saveFailed(let image, let response, _):
+            return await vaultUnloggedMeal(image: image, response: response)
+        default:
+            return .failed
+        }
+    }
+
+    private func vaultLoggedMeal(_ log: FoodLog) async -> VaultStore.AddOutcome {
+        if VaultStore.shared.isInVault(foodName: log.foodName) { return .alreadySaved }
+        let outcome = await VaultStore.shared.add(from: log)
+        emitVaultHaptic(outcome)
+        return outcome
+    }
+
+    private func vaultUnloggedMeal(image: UIImage,
+                                   response: AnalyzeResponse) async -> VaultStore.AddOutcome {
+        let resolvedFoodName = editedFoodName ?? response.analysis.food ?? "Unknown"
+        if VaultStore.shared.isInVault(foodName: resolvedFoodName) { return .alreadySaved }
+
+        let uploaded = await ensureUploadedImage(image)
+
+        let draft = NewVaultItem(
+            foodName:       resolvedFoodName,
+            imagePath:      uploaded?.mainPath,
+            imageThumbPath: uploaded?.thumbPath,
+            calories:       response.analysis.calories ?? 0,
+            carbsG:         response.analysis.carbs ?? 0,
+            sugarG:         response.analysis.sugar ?? 0,
+            proteinG:       response.analysis.protein,
+            fatG:           response.analysis.fat,
+            fiberG:         response.analysis.fiber,
+            benefits:       response.analysis.benefits ?? [],
+            drawbacks:      response.analysis.drawbacks ?? [],
+            nutrients:      response.analysis.nutrients ?? [],
+            coachName:      response.coach,
+            coachAdvice:    response.analysis.coachAdvice,
+            sourceLogId:    nil
+        )
+        let outcome = await VaultStore.shared.add(draft)
+        emitVaultHaptic(outcome)
+        return outcome
+    }
+
+    /// Ensure the current photo is in Storage, reusing a prior upload when
+    /// one exists and caching a fresh one in `pendingUploadedImage` so a
+    /// subsequent `save()` doesn't upload it again. Returns nil if the
+    /// compression or upload fails; the vault item is then saved without a
+    /// photo rather than failing outright.
+    private func ensureUploadedImage(_ image: UIImage) async -> UploadedImage? {
+        if let existing = pendingUploadedImage { return existing }
+        let mainTask = Task.detached(priority: .userInitiated) {
+            ImagePreparation.compressMain(image)
+        }
+        let thumbTask = Task.detached(priority: .userInitiated) {
+            ImagePreparation.compressThumbnail(image)
+        }
+        guard let mainData = await mainTask.value,
+              let thumbData = await thumbTask.value else { return nil }
+        do {
+            let uploaded = try await imageService.uploadMealImages(
+                mainData: mainData, thumbnailData: thumbData
+            )
+            pendingUploadedImage = uploaded
+            return uploaded
+        } catch {
+            #if DEBUG
+            NSLog("[Vault] image upload FAILED: %@", "\(error)")
+            #endif
+            return nil
+        }
+    }
+
+    private func emitVaultHaptic(_ outcome: VaultStore.AddOutcome) {
+        switch outcome {
+        case .saved, .alreadySaved: Haptics.success()
+        case .failed:               Haptics.error()
+        }
+    }
+
+    /// Re-log a Vault item into today. Mirrors `relog(_:)` but sources the
+    /// meal from a `SavedFood` snapshot instead of a `food_logs` row.
+    /// Reuses the same stored photo (no re-upload) and freezes the saved
+    /// macros. Drops a `RelogToast` for the view layer; the main capture
+    /// state is untouched.
+    func relogFromVault(_ item: SavedFood) async {
+        do {
+            let inserted = try await logService.insert(item.newFoodLogForRelog())
+            #if DEBUG
+            NSLog("[Vault] relogged food_logs.id=%@ from vault=%@",
+                  inserted.id.uuidString, item.id.uuidString)
+            #endif
+            Haptics.success()
+            relogToast = RelogToast(foodName: item.foodName, kind: .success)
+            AnalyticsService.shared.track(AnalyticsService.Event.mealRelogged)
+            LoggingRhythmStore.shared.markToday()
+            LocalNutritionBeliefStore.shared.update(from: inserted)
+            NotificationCenter.default.post(name: .foodLogDidChange, object: nil)
+        } catch {
+            #if DEBUG
+            NSLog("[Vault] relog FAILED for %@: %@", item.foodName, "\(error)")
+            #endif
+            Haptics.error()
+            relogToast = RelogToast(foodName: item.foodName, kind: .failure)
+        }
     }
 
     // MARK: - Phase 21.5: Daily quest

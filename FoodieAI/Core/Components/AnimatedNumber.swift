@@ -45,14 +45,14 @@ struct AnimatedNumber: View {
 
     /// Default: integer if the value rounds cleanly, one decimal otherwise.
     private static func defaultFormatter(_ v: Double) -> String {
-        if v.isNaN || v.isInfinite { return "—" }
+        if v.isNaN || v.isInfinite { return "-" }
         if v == v.rounded() { return "\(Int(v))" }
         return String(format: "%.1f", v)
     }
 
     /// Convenience: integer-only formatter, no decimals.
     static let integerFormatter: (Double) -> String = { v in
-        guard !v.isNaN, !v.isInfinite else { return "—" }
+        guard !v.isNaN, !v.isInfinite else { return "-" }
         return "\(Int(v.rounded()))"
     }
 }

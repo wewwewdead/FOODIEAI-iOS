@@ -40,11 +40,20 @@ struct OnboardingFlow: View {
                         removal:   .opacity.animation(.easeIn(duration: 0.22))
                     ))
             case .signIn:
-                SignInView()
+                // Reached via the quiz (goal picked) → "save your plan";
+                // reached via the hero's "Already have an account?" shortcut
+                // (no goal yet) → "welcome / returning".
+                SignInView(context: vm.archetype != nil ? .savePlan : .returning)
                     .transition(.opacity)
             case .archetype:
                 OnboardingArchetypeView(vm: vm, ctaNamespace: ctaNamespace,
                                         isSignedIn: auth.isSignedIn)
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.38)),
+                        removal:   .opacity.animation(.easeIn(duration: 0.22))
+                    ))
+            case .barriers:
+                OnboardingBarriersStepView(vm: vm, ctaNamespace: ctaNamespace)
                     .transition(.asymmetric(
                         insertion: .opacity.animation(.easeOut(duration: 0.38)),
                         removal:   .opacity.animation(.easeIn(duration: 0.22))
@@ -55,20 +64,19 @@ struct OnboardingFlow: View {
                         insertion: .opacity.animation(.easeOut(duration: 0.38)),
                         removal:   .opacity.animation(.easeIn(duration: 0.22))
                     ))
-            case .coaches:
-                OnboardingCoachStepView(vm: vm, ctaNamespace: ctaNamespace)
-                    .transition(.asymmetric(
-                        insertion: .opacity.animation(.easeOut(duration: 0.38)),
-                        removal:   .opacity.animation(.easeIn(duration: 0.22))
-                    ))
-            case .notifications:
-                OnboardingNotificationStepView(vm: vm, ctaNamespace: ctaNamespace)
-                    .transition(.asymmetric(
-                        insertion: .opacity.animation(.easeOut(duration: 0.38)),
-                        removal:   .opacity.animation(.easeIn(duration: 0.22))
-                    ))
             case .subscription:
-                OnboardingSubscriptionStepView(vm: vm, ctaNamespace: ctaNamespace)
+                // Phase 24 — the offer step IS the real paywall now: prices,
+                // trial timeline, plan selector and buy CTA are visible with no
+                // extra tap (the old comparison screen hid all of that behind a
+                // "Try Pro" tap only ~29% took). A completed purchase, the close
+                // control, and the secondary "Continue with Free" all call
+                // `onFinish` to advance, so it still never hard-blocks. Rendered
+                // inline (not a sheet) so it inherits the environment, and
+                // `analyticsContext:"onboarding"` keeps this paywall_viewed
+                // separable from in-app upsells.
+                PaywallView(onFinish: { vm.advance() },
+                            analyticsContext: "onboarding",
+                            planCallback: planCallback)
                     .transition(.asymmetric(
                         insertion: .opacity.animation(.easeOut(duration: 0.38)),
                         removal:   .opacity.animation(.easeIn(duration: 0.22))
@@ -117,31 +125,69 @@ struct OnboardingFlow: View {
         // resumption to plug into without touching the bootstrap
         // contract here.
     }
+
+    // MARK: - Plan callback
+
+    /// Carries the plan the user just saw on the reveal into the paywall header
+    /// so the offer reads as the next step toward THEIR goal. Prefers the
+    /// weight projection (goal + a concrete date, the strongest hook); falls
+    /// back to the daily calorie target; nil when physiology was skipped, in
+    /// which case the paywall keeps its generic header. Unit-agnostic on
+    /// purpose (no kg/lb) since the display unit isn't carried out of the form.
+    private var planCallback: String? {
+        guard let phys = vm.physiology else { return nil }
+        if let target = vm.targetWeightKg,
+           let proj = CalorieGoalCalculator.projectWeight(
+                currentKg: phys.weightKg, targetKg: target, goal: phys.goal) {
+            return "On track to hit your goal weight by \(Self.monthYear.string(from: proj.goalDate))"
+        }
+        return "Your plan is set: \(CalorieGoalCalculator.compute(phys).calories) calories a day"
+    }
+
+    private static let monthYear: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMMM yyyy"
+        return f
+    }()
 }
 
-// MARK: - Subscription comparison step
+// MARK: - Subscription offer step
+//
+// Phase 24 — the onboarding offer step is now `PaywallView` itself, rendered
+// inline with `onFinish: { vm.advance() }` (see the `.subscription` case in
+// `OnboardingFlow.body`). The old soft Free-vs-Pro comparison screen
+// (`OnboardingSubscriptionStepView`) that hid prices behind an extra "Try Pro"
+// tap has been removed: only ~29% of completers took that tap, so the real
+// paywall now shows to everyone who reaches the step.
 
-/// Phase 22 — informational Pro vs Free comparison shown after the
-/// notification opt-in and before the completing screen. Never blocks
-/// onboarding: both CTAs advance the flow. "Try Pro" presents the
-/// existing `PaywallView` sheet (which handles purchase/restore/Apple
-/// disclosure); regardless of purchase outcome the flow continues so
-/// the user is never trapped here by a cancel or a StoreKit error.
+// MARK: - Barriers (empathy / commitment) step
+
+/// Phase 23. A low-friction, multi-select "what's gotten in the way before?"
+/// step between the goal and physiology. It's a commitment device: naming the
+/// obstacles deepens investment and makes the coming plan feel personal, while
+/// staying kind (skippable, "no judgment"). Selections live in the view model
+/// (session-only) and are reported as a count in the completion analytics.
 ///
-/// Free-tier copy makes the server's 4-then-2 policy explicit so
-/// users aren't surprised on day 8 when their cap drops. Mirrors the
-/// language used in `SubscriptionInfoView` so the two surfaces stay
-/// in lockstep.
-///
-/// Lives inline in OnboardingFlow.swift rather than its own file so
-/// new files don't need a pbxproj add (project uses manual file
-/// management — see project memory).
-private struct OnboardingSubscriptionStepView: View {
+/// Inline in OnboardingFlow.swift (not its own file) to avoid a pbxproj add,
+/// the manual-file-management convention this project uses (see project memory).
+private struct OnboardingBarriersStepView: View {
     @ObservedObject var vm: OnboardingViewModel
     var ctaNamespace: Namespace.ID? = nil
 
-    @EnvironmentObject private var subscriptions: SubscriptionManager
-    @State private var showingPaywall = false
+    private struct Option: Identifiable {
+        let id: String
+        let label: String
+        let icon: String
+    }
+
+    private static let options: [Option] = [
+        .init(id: "evening_drift",   label: "Losing track by the evening", icon: "moon.stars"),
+        .init(id: "late_snacking",   label: "Late-night snacking",         icon: "fork.knife"),
+        .init(id: "eating_out",      label: "Eating out or takeout",       icon: "takeoutbag.and.cup.and.straw"),
+        .init(id: "portions",        label: "Portion sizes",               icon: "circle.grid.2x2"),
+        .init(id: "stress_eating",   label: "Stress or emotional eating",  icon: "heart"),
+        .init(id: "slip_ups",        label: "Giving up after a slip",      icon: "arrow.uturn.down"),
+    ]
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -149,250 +195,75 @@ private struct OnboardingSubscriptionStepView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
-                    heroIcon
-                    headline
-                    bodyParagraph
-                    comparisonCard
-                    bonusWeekNote
+                    Text("What's gotten in the way before?")
+                        .appFont(.display1)
+                        .foregroundStyle(Color.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, AppSpacing.xl3)
+                    Text("Pick any that feel familiar, we'll keep them in mind. No judgment.")
+                        .appFont(.bodyV2)
+                        .foregroundStyle(Color.inkMute)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    VStack(spacing: AppSpacing.xs) {
+                        ForEach(Self.options) { option in
+                            row(option)
+                        }
+                    }
+
                     Spacer(minLength: AppSpacing.lg)
-                    buttons
-                    disclaimer
+
+                    PrimaryButton(title: vm.barriers.isEmpty ? "Skip" : "Continue") {
+                        Haptics.tap()
+                        vm.advance()
+                    }
+                    .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
                 }
                 .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.xl3)
                 .padding(.bottom, AppSpacing.lg)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             BackChevron(action: { Haptics.tap(); vm.back() })
         }
-        .sheet(isPresented: $showingPaywall) {
-            PaywallView()
-                .environmentObject(subscriptions)
-        }
+        .animation(.appReveal, value: vm.barriers)
     }
 
-    // MARK: - Header
-
-    private var heroIcon: some View {
-        ZStack {
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [ProGold.cream, ProGold.warm],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 88, height: 88)
-                .shadow(color: ProGold.warm.opacity(0.45), radius: 12, x: 0, y: 4)
-            Image(systemName: "crown.fill")
-                .font(.system(size: 38, weight: .heavy))
-                .foregroundStyle(.white)
-                .shadow(color: ProGold.deep.opacity(0.5), radius: 1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, AppSpacing.lg)
-    }
-
-    private var headline: some View {
-        Text("Free is generous.\nPro is for everyday.")
-            .appFont(.display1)
-            .foregroundStyle(Color.ink)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var bodyParagraph: some View {
-        Text("Most days you'll never hit the free limit. Pro is for the people who snap every meal — same insights, more scans.")
-            .appFont(.bodyV2)
-            .foregroundStyle(Color.inkMute)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    // MARK: - Comparison card
-
-    private var comparisonCard: some View {
-        VStack(spacing: 0) {
-            comparisonHeaderRow
-            comparisonRow(
-                label: "Photo scans / day",
-                free: "4, then 2",
-                pro: "10"
-            )
-            comparisonRow(
-                label: "Manual logging",
-                free: "Unlimited",
-                pro: "Unlimited"
-            )
-            comparisonRow(
-                label: "FoodOS, recap, story",
-                free: "Included",
-                pro: "Included"
-            )
-            comparisonRow(
-                label: "Cancel anytime",
-                free: "—",
-                pro: "Yes"
-            )
-        }
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .fill(Color.bgSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppRadius.lg)
-                .strokeBorder(Color.borderHairline, lineWidth: 1)
-        )
-    }
-
-    private var comparisonHeaderRow: some View {
-        HStack {
-            Text("")
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text("FREE")
-                .appFont(.labelEyebrow)
-                .foregroundStyle(Color.inkMute)
-                .frame(width: 100, alignment: .center)
-            HStack(spacing: 4) {
-                Image(systemName: "crown.fill")
-                    .font(.system(size: 10, weight: .heavy))
-                Text("PRO")
-                    .appFont(.labelEyebrow)
+    private func row(_ option: Option) -> some View {
+        let isSelected = vm.barriers.contains(option.id)
+        return Button {
+            Haptics.selection()
+            if isSelected { vm.barriers.remove(option.id) }
+            else { vm.barriers.insert(option.id) }
+        } label: {
+            HStack(spacing: AppSpacing.md) {
+                Image(systemName: option.icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.brandDeep : Color.inkMute)
+                    .frame(width: 26)
+                Text(option.label)
+                    .appFont(.body)
+                    .foregroundStyle(Color.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.brand : Color.borderHairline)
             }
-            .foregroundStyle(ProGold.deep)
-            .frame(width: 80, alignment: .center)
-        }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.top, AppSpacing.md)
-        .padding(.bottom, AppSpacing.sm)
-    }
-
-    private func comparisonRow(label: String, free: String, pro: String) -> some View {
-        HStack(alignment: .top) {
-            Text(label)
-                .appFont(.bodyEmphasis)
-                .foregroundStyle(Color.textPrimary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(free)
-                .appFont(.caption)
-                .foregroundStyle(Color.inkMute)
-                .multilineTextAlignment(.center)
-                .frame(width: 100, alignment: .center)
-            Text(pro)
-                .appFont(.captionStrong)
-                .foregroundStyle(ProGold.deep)
-                .multilineTextAlignment(.center)
-                .frame(width: 80, alignment: .center)
-        }
-        .padding(.horizontal, AppSpacing.md)
-        .padding(.vertical, AppSpacing.md)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.borderHairline)
-                .frame(height: 1)
-        }
-    }
-
-    // Spells out the bonus-week policy so day-8 users aren't surprised
-    // when their cap drops from 4 to 2. Bonus framing — "to help you
-    // get the hang of it" — keeps it generous rather than bait-and-
-    // switch.
-    private var bonusWeekNote: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "gift.fill")
-                .font(.system(size: 13, weight: .heavy))
-                .foregroundStyle(Color.brandDeep)
-                .padding(.top, 2)
-            (
-                Text("Free starts with 4 scans/day for your first week ")
-                    .appFont(.caption)
-                + Text("to help you build the habit, ")
-                    .appFont(.caption)
-                + Text("then settles at 2/day.")
-                    .appFont(.captionStrong)
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.sm + 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .fill(isSelected ? Color.brandSoft : Color.bgSurface)
             )
-            .foregroundStyle(Color.inkMute)
-            .fixedSize(horizontal: false, vertical: true)
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.lg)
+                    .strokeBorder(isSelected ? Color.brand : Color.borderHairline,
+                                  lineWidth: isSelected ? 1.5 : 1)
+            )
         }
-        .padding(AppSpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppRadius.md)
-                .fill(Color.brandSoft.opacity(0.7))
-        )
-    }
-
-    // MARK: - CTAs
-
-    private var buttons: some View {
-        VStack(spacing: AppSpacing.sm) {
-            // Primary CTA depends on current tier. A user who already
-            // upgraded in the paywall sheet sees "Continue" instead of
-            // a redundant "Try Pro" prompt.
-            if subscriptions.tier == .pro {
-                PrimaryButton(title: "Continue",
-                              leadingSystemImage: "checkmark") {
-                    vm.advance()
-                }
-                .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
-            } else {
-                Button {
-                    Haptics.tap()
-                    showingPaywall = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "crown.fill")
-                            .font(.system(size: 16, weight: .heavy))
-                        Text("Try Pro")
-                            .appFont(.title2)
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: 60)
-                    .background(
-                        Capsule().fill(
-                            LinearGradient(
-                                colors: [ProGold.warm, ProGold.edgeDark],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    )
-                    .overlay(
-                        Capsule().strokeBorder(ProGold.cream.opacity(0.6), lineWidth: 0.8)
-                    )
-                    .shadow(color: ProGold.warm.opacity(0.45), radius: 10, x: 0, y: 4)
-                }
-                .buttonStyle(.plain)
-                .matchedCTA(OnboardingHeroView.ctaMatchedID, in: ctaNamespace)
-            }
-
-            // Secondary always available. Free users see this as a
-            // soft opt-out; pro users see it as a way to bypass the
-            // "Continue" tap if they want to keep moving.
-            Button {
-                Haptics.tap()
-                vm.advance()
-            } label: {
-                Text(subscriptions.tier == .pro
-                     ? "Skip"
-                     : "Continue with Free")
-                    .appFont(.bodyEmphasis)
-                    .foregroundStyle(Color.inkMute)
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .background(
-                        Capsule().strokeBorder(Color.borderHairline, lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var disclaimer: some View {
-        Text("Upgrade or cancel anytime in Profile.")
-            .appFont(.caption)
-            .foregroundStyle(Color.inkLight)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, AppSpacing.xs)
+        .buttonStyle(.plain)
     }
 }
 
@@ -404,8 +275,8 @@ private struct OnboardingSubscriptionStepView: View {
         .environmentObject(SubscriptionManager.shared)
 }
 
-#Preview("Subscription step") {
-    OnboardingSubscriptionStepView(vm: OnboardingViewModel(initialStep: .subscription))
+#Preview("Onboarding paywall") {
+    PaywallView(onFinish: {}, analyticsContext: "onboarding")
         .environmentObject(SubscriptionManager.shared)
 }
 #endif

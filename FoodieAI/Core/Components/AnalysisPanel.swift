@@ -157,7 +157,7 @@ private struct AnalysisPanelPreview: View {
                     kind: .nutrients,
                     title: "Nutrients",
                     items: [
-                        "Calcium: bone health — score 70",
+                        "Calcium: bone health, score 70",
                         "Lycopene: antioxidant",
                         "Protein: muscle synthesis"
                     ],

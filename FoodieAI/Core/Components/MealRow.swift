@@ -310,7 +310,7 @@ struct MealRow: View {
                 benefits: ["Olive oil monounsaturated fats", "Feta calcium"],
                 drawbacks: [],
                 nutrients: ["Calcium 180mg", "Iron 2mg"],
-                coachAdvice: "Beautiful balance — keep this one in rotation.",
+                coachAdvice: "Beautiful balance, keep this one in rotation.",
                 coachName: "Albert Einstein"
             ))
             // No coach advice; arrays still populated.

@@ -240,7 +240,7 @@ struct RecapView: View {
         let f = DateFormatter()
         f.locale = .current
         f.dateFormat = "MMM d"
-        return "\(f.string(from: start)) — \(f.string(from: end))"
+        return "\(f.string(from: start)), \(f.string(from: end))"
     }
 
     /// Pick up to 4 collage meals. Rule: highest-calorie first, ties
@@ -626,7 +626,7 @@ struct PastRecapsView: View {
         let f = DateFormatter()
         f.locale = .current
         f.dateFormat = "MMM d"
-        return "\(f.string(from: start)) — \(f.string(from: end))"
+        return "\(f.string(from: start)), \(f.string(from: end))"
     }
 }
 

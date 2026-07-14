@@ -156,7 +156,7 @@ struct NotificationDeniedView: View {
                 Text("Notifications are off for Foodie")
                     .appFont(.display2)
                     .foregroundStyle(Color.ink)
-                Text("Open Settings to turn them on. We only schedule on your device — nothing leaves Foodie.")
+                Text("Open Settings to turn them on. We only schedule on your device, nothing leaves Foodie.")
                     .appFont(.bodyV2)
                     .foregroundStyle(Color.inkMute)
                     .fixedSize(horizontal: false, vertical: true)

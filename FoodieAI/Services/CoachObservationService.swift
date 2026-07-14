@@ -52,19 +52,6 @@ actor CoachObservationService {
         return rows.first
     }
 
-    /// All observations (including dismissed) ordered newest-first, for
-    /// a future "Coach Notes" history screen. Not consumed by Phase 16's
-    /// Today UI — included now so Phase 17's recap has it ready.
-    func recentObservations(limit: Int = 30) async throws -> [CoachObservation] {
-        try await client
-            .from("coach_observations")
-            .select()
-            .order("created_at", ascending: false)
-            .limit(limit)
-            .execute()
-            .value
-    }
-
     /// Observations created in the last `days` days that match
     /// `(patternKind, patternSubject)`. The dedup-by-subject guardrail
     /// uses this to skip generation when the same focus pattern has

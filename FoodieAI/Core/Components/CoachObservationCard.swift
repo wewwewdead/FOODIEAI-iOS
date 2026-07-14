@@ -83,7 +83,7 @@ struct CoachObservationCard: View {
         id: UUID(),
         userId: UUID(),
         coachName: "Marcus Aurelius",
-        body: "Routine is the rhythm of a life lived deliberately. The pizza on Fridays — perhaps that is your ritual. Notice it without judging it.",
+        body: "Routine is the rhythm of a life lived deliberately. The pizza on Fridays, perhaps that is your ritual. Notice it without judging it.",
         patternKind: "frequent",
         patternSubject: "margherita pizza",
         dismissedAt: nil,

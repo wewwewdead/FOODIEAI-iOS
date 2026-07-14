@@ -17,6 +17,7 @@ enum WidgetSnapshotUpdater {
                       steps: Int,
                       stepGoal: Int,
                       suggestion: String,
+                      movementCreditKcal: Int = 0,
                       now: Date = Date()) {
         let snapshot = WidgetSnapshot(
             streakDays: max(0, streakDays),
@@ -25,7 +26,8 @@ enum WidgetSnapshotUpdater {
             steps: max(0, steps),
             stepGoal: max(0, stepGoal),
             updatedAt: now,
-            suggestion: suggestion
+            suggestion: suggestion,
+            movementCreditKcal: max(0, movementCreditKcal)
         )
 
         // Skip needless writes/reloads when only the timestamp would change.
@@ -35,7 +37,8 @@ enum WidgetSnapshotUpdater {
            existing.calorieGoal == snapshot.calorieGoal,
            existing.steps == snapshot.steps,
            existing.stepGoal == snapshot.stepGoal,
-           existing.suggestion == snapshot.suggestion {
+           existing.suggestion == snapshot.suggestion,
+           (existing.movementCreditKcal ?? 0) == (snapshot.movementCreditKcal ?? 0) {
             return
         }
 

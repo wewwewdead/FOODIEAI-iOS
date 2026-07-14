@@ -455,8 +455,7 @@ struct OrbJourneyProbeView: View {
                       Color(red: 0.98, green: 0.80, blue: 0.30)],
             isPro: false,
             isActive: true,
-            enabled: true,
-            useFluid: false
+            enabled: true
         )
         .task {
             try? await Task.sleep(nanoseconds: 900_000_000)
@@ -508,8 +507,7 @@ struct FluidProbeView: View {
                       Color(red: 0.85, green: 0.25, blue: 0.20)],
             isPro: false,
             isActive: true,
-            enabled: true,
-            useFluid: true
+            enabled: true
         )
         .task {
             try? await Task.sleep(nanoseconds: 400_000_000)

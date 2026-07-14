@@ -234,7 +234,7 @@ struct ProgressRing: View {
     }()
 
     private static func kFormatter(_ v: Double) -> String {
-        guard v.isFinite else { return "—" }
+        guard v.isFinite else { return "-" }
         return numberFormatter.string(from: NSNumber(value: v.rounded()))
             ?? "\(Int(v.rounded()))"
     }

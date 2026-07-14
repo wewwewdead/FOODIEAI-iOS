@@ -82,11 +82,11 @@ struct FoodOSMomentFeedbackView: View {
     private var confirmationCopy: String {
         switch recordedFeedback {
         case .willTry:
-            return "Got it — FoodOS will check in after your next mood note."
+            return "Got it, FoodOS will check in after your next mood note."
         case .notUseful:
-            return "Got it — I'll show fewer moments like this."
+            return "Got it, I'll show fewer moments like this."
         case .helpful, .none:
-            return "Got it — FoodOS will learn from this."
+            return "Got it, FoodOS will learn from this."
         }
     }
 }

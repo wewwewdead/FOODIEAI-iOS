@@ -3,8 +3,8 @@ import SwiftUI
 
 /// `LAUNCH_SIGN_OUT_PROBE=1` entry point. On appear, calls
 /// `AuthService.signOut()` once, then defers to `RootView` so the
-/// auth-routed UI re-renders the post-sign-out state (Onboarding /
-/// LandingView). Used to capture the sign-out flow without UI taps.
+/// auth-routed UI re-renders the post-sign-out state (Onboarding).
+/// Used to capture the sign-out flow without UI taps.
 struct SignOutProbeView: View {
     @EnvironmentObject private var auth: AuthService
     @State private var didTrigger = false

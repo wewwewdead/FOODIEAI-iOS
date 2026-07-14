@@ -101,7 +101,13 @@
           "groupNumber" : 2,
           "internalID" : "6772708593",
           "introductoryOffers" : [
-
+            {
+              "displayPrice" : "0.00",
+              "internalID" : "6772708593_INTRO_FREE_3D",
+              "numberOfPeriods" : 1,
+              "paymentMode" : "free",
+              "subscriptionPeriod" : "P3D"
+            }
           ],
           "localizations" : [
             {

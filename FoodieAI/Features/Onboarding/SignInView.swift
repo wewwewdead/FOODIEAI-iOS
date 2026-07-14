@@ -2,6 +2,12 @@ import SwiftUI
 import AuthenticationServices
 import CryptoKit
 
+/// Where the user arrived at sign-in from — Phase 23 moved sign-in to the end
+/// of onboarding, so the copy adapts: `.savePlan` after the quiz + plan reveal
+/// ("keep the plan you just built"), `.returning` for the hero's "Already have
+/// an account?" shortcut.
+enum SignInContext { case savePlan, returning }
+
 /// Sign-in surface. Three vertical zones: wordmark + hero copy, the two
 /// provider buttons, and reassurance microcopy with legal links.
 ///
@@ -10,6 +16,10 @@ import CryptoKit
 /// required on or accessible from the sign-in screen.
 struct SignInView: View {
     @EnvironmentObject private var auth: AuthService
+
+    /// Defaults to `.returning` so the stand-alone #Preview and any legacy
+    /// call site keep working without the argument.
+    var context: SignInContext = .returning
 
     @State private var isSigningIn = false
     @State private var errorMessage: String?
@@ -36,6 +46,21 @@ struct SignInView: View {
         .background(Color.bgCanvas.ignoresSafeArea())
     }
 
+    // MARK: - Context copy
+
+    private var heroTitle: String {
+        context == .savePlan ? "Save your plan" : "Welcome back"
+    }
+
+    private var heroSubtitle: String {
+        switch context {
+        case .savePlan:
+            return "Create your free account to keep your personalized plan and track from any device."
+        case .returning:
+            return "Sign in to pick up right where you left off."
+        }
+    }
+
     // MARK: - Zones
 
     private var heroZone: some View {
@@ -47,13 +72,17 @@ struct SignInView: View {
 
             VStack(spacing: AppSpacing.md) {
                 HStack(spacing: AppSpacing.sm) {
-                    Text("Welcome")
+                    Text(heroTitle)
                         .appFont(.display2)
                         .foregroundStyle(Color.ink)
-                    BouncingBadge(text: "free!", style: .free)
+                    // "free!" reassures a new account; a returning "Welcome
+                    // back" doesn't need it.
+                    if context == .savePlan {
+                        BouncingBadge(text: "free!", style: .free)
+                    }
                 }
 
-                Text("Track meals from a photo.\nGet coached by people who knew a thing or two about life.")
+                Text(heroSubtitle)
                     .appFont(.bodyV2)
                     .foregroundStyle(Color.inkMute)
                     .multilineTextAlignment(.center)

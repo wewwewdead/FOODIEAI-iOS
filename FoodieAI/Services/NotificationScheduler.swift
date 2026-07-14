@@ -151,6 +151,11 @@ final class NotificationScheduler {
         cancelAll()
 
         guard preferences.masterEnabled else {
+            // Master off cancels EVERYTHING we own — including the weekly
+            // recap, which `cancelAll()` deliberately spares (it has its own
+            // lifecycle). Without this, flipping the master toggle off left a
+            // previously-scheduled Sunday recap firing.
+            await scheduleWeeklyRecap(timeZone: timeZone, enabled: false)
             #if DEBUG
             NSLog("[Notif] reschedule: master OFF, cleared all reminders")
             #endif
@@ -158,23 +163,23 @@ final class NotificationScheduler {
         }
 
         if preferences.breakfast, let comps = inferred.breakfast {
-            await scheduleRecurring(
-                window: .breakfast, comps: comps, timeZone: timeZone
+            await scheduleWindowRespectingSuppression(
+                .breakfast, comps: comps, timeZone: timeZone
             )
         }
         if preferences.lunch, let comps = inferred.lunch {
-            await scheduleRecurring(
-                window: .lunch, comps: comps, timeZone: timeZone
+            await scheduleWindowRespectingSuppression(
+                .lunch, comps: comps, timeZone: timeZone
             )
         }
         if preferences.dinner, let comps = inferred.dinner {
-            await scheduleRecurring(
-                window: .dinner, comps: comps, timeZone: timeZone
+            await scheduleWindowRespectingSuppression(
+                .dinner, comps: comps, timeZone: timeZone
             )
         }
-        if preferences.weeklyRecap {
-            await scheduleWeeklyRecap(timeZone: timeZone, enabled: true)
-        }
+        // Always reconcile the recap (schedule if on, cancel if off) so
+        // turning the recap toggle off actually removes a prior schedule.
+        await scheduleWeeklyRecap(timeZone: timeZone, enabled: preferences.weeklyRecap)
 
         #if DEBUG
         await dumpPending(prefix: "[Notif] after reschedule:")
@@ -230,6 +235,10 @@ final class NotificationScheduler {
 
         do {
             try await center.add(request)
+            // Remember the suppression for the rest of today so a later
+            // same-day `reschedule` keeps it suppressed instead of reinstating
+            // a recurring trigger that would re-nag before the window.
+            markWindowSuppressed(window, timeZone: timeZone)
             #if DEBUG
             NSLog("[Notif] suppressed today's %@ — one-shot scheduled for tomorrow %02d:%02d",
                   window.rawValue, recurringComps.hour ?? -1, recurringComps.minute ?? -1)
@@ -243,6 +252,52 @@ final class NotificationScheduler {
         #if DEBUG
         await dumpPending(prefix: "[Notif] after suppress:")
         #endif
+    }
+
+    // MARK: - Suppression memory (durable across reschedules)
+
+    /// Local-day marker so an early log's suppression survives a later
+    /// same-day `reschedule`. Without it, `reschedule`'s `cancelAll()` +
+    /// re-add of the recurring trigger reinstated the very reminder the
+    /// early log was meant to silence. Keyed `window.rawValue` → local
+    /// "yyyy-MM-dd"; self-expiring (stale-day entries are pruned on write).
+    private static let suppressionDefaultsKey = "notif.suppressedWindows.v1"
+
+    private func suppressionDayKey(_ date: Date, timeZone: TimeZone) -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let c = cal.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    private func markWindowSuppressed(_ window: MealWindow, timeZone: TimeZone) {
+        let key = suppressionDayKey(Date(), timeZone: timeZone)
+        var map = (UserDefaults.standard.dictionary(forKey: Self.suppressionDefaultsKey)
+                   as? [String: String]) ?? [:]
+        map = map.filter { $0.value == key }   // prune stale days
+        map[window.rawValue] = key
+        UserDefaults.standard.set(map, forKey: Self.suppressionDefaultsKey)
+    }
+
+    private func isWindowSuppressedToday(_ window: MealWindow, timeZone: TimeZone) -> Bool {
+        let key = suppressionDayKey(Date(), timeZone: timeZone)
+        let map = (UserDefaults.standard.dictionary(forKey: Self.suppressionDefaultsKey)
+                   as? [String: String]) ?? [:]
+        return map[window.rawValue] == key
+    }
+
+    /// Schedule a window's reminder, honoring an earlier same-day
+    /// suppression: if the user already logged this meal today, keep the
+    /// one-shot-tomorrow suppression instead of reinstating the recurring
+    /// trigger (which could fire again before today's window).
+    private func scheduleWindowRespectingSuppression(_ window: MealWindow,
+                                                     comps: DateComponents,
+                                                     timeZone: TimeZone) async {
+        if isWindowSuppressedToday(window, timeZone: timeZone) {
+            await suppressTodaysWindow(window, recurringComps: comps, timeZone: timeZone)
+        } else {
+            await scheduleRecurring(window: window, comps: comps, timeZone: timeZone)
+        }
     }
 
     // MARK: - Weekly recap
@@ -443,18 +498,18 @@ final class NotificationScheduler {
             let n = MealSuggestionEngine.roundKcal(remaining)
             let amount = n > 0 ? "about \(n) calories" : "a little room"
             return ("A bit under maintenance",
-                    "You've got \(amount) left today — a small bite keeps your weight steady.")
+                    "You've got \(amount) left today, a small bite keeps your weight steady.")
         case .underGain(let remaining):
             let n = MealSuggestionEngine.roundKcal(remaining)
             let amount = n > 0 ? "About \(n) calories" : "A little room"
             return ("Still short of your target",
-                    "\(amount) left toward your goal — one more bite helps you build.")
+                    "\(amount) left toward your goal, one more bite helps you build.")
         case .overMove(let exceededBy, let weightKg):
             let n = MealSuggestionEngine.roundKcal(exceededBy)
             let walk = ActivityBurnEstimator.walkMinutes(toBurn: exceededBy, weightKg: weightKg)
             let over = n > 0 ? "about \(n) calories over" : "a little over"
             return ("A little over today",
-                    "You're \(over) — no worries, a \(walk)-min walk tomorrow evens it out.")
+                    "You're \(over), no worries, a \(walk)-min walk tomorrow evens it out.")
         }
     }
 
@@ -541,9 +596,9 @@ final class NotificationScheduler {
     /// encouragement when there is one; otherwise stays light.
     private static func comebackBody(bestStreakDays: Int) -> String {
         if bestStreakDays >= 3 {
-            return "Whenever you're ready, a quick photo picks things back up — your \(bestStreakDays)-day best is in reach again."
+            return "Whenever you're ready, a quick photo picks things back up, your \(bestStreakDays)-day best is in reach again."
         }
-        return "No pressure — snap your next meal whenever you're ready and pick up right where you left off."
+        return "No pressure, snap your next meal whenever you're ready and pick up right where you left off."
     }
 
     // MARK: - Internal scheduling
@@ -617,19 +672,19 @@ final class NotificationScheduler {
         case .breakfast:
             pool = [
                 "Morning. Snap it when you're ready.",
-                "Whatever you're having — capture it.",
+                "Whatever you're having, capture it.",
                 "Breakfast time? No rush.",
                 "A photo when you eat is enough.",
                 "Easy start. Snap it.",
                 "Whenever you're ready.",
-                "Morning meal — when it lands.",
+                "Morning meal, when it lands.",
             ]
         case .lunch:
             pool = [
                 "Lunch time? Snap it when you're ready.",
-                "Midday meal — capture it.",
+                "Midday meal, capture it.",
                 "Whenever you eat, the photo's enough.",
-                "Lunch — no pressure.",
+                "Lunch, no pressure.",
                 "Eat first, snap second.",
                 "Quick photo when you can.",
                 "Mid-day check-in.",
@@ -637,8 +692,8 @@ final class NotificationScheduler {
         case .dinner:
             pool = [
                 "Dinner time? Snap it when you're ready.",
-                "Evening meal — capture it.",
-                "No rush — photo when you eat.",
+                "Evening meal, capture it.",
+                "No rush, photo when you eat.",
                 "Dinner. Whenever.",
                 "End-of-day check-in.",
                 "Eat well. Snap it.",

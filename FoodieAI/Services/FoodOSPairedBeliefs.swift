@@ -517,7 +517,7 @@ enum FoodOSPairedBeliefs {
         let from = Int(axis.lastAvg.rounded())
         let to   = Int(axis.thisAvg.rounded())
         let title = "Your \(axis.label) \(direction) from about \(from)g to \(to)g per meal this week."
-        let body  = "A real shift — worth noticing if it wasn't on purpose."
+        let body  = "A real shift, worth noticing if it wasn't on purpose."
         let evidence = "Based on \(axis.thisCount) meals this week and \(axis.lastCount) last week."
 
         return ValueCandidate(
@@ -594,9 +594,9 @@ enum FoodOSPairedBeliefs {
         let mealNoun = max(cur, prev) == 1 ? "meal" : "meals"
         let title: String
         if cur > prev {
-            title = "You logged far more this week than last — \(cur) \(mealNoun) vs \(prev)."
+            title = "You logged far more this week than last, \(cur) \(mealNoun) vs \(prev)."
         } else if cur < prev {
-            title = "You logged less this week than last — \(cur) \(mealNoun) vs \(prev)."
+            title = "You logged less this week than last, \(cur) \(mealNoun) vs \(prev)."
         } else {
             return nil
         }
@@ -629,9 +629,9 @@ enum FoodOSPairedBeliefs {
         let foodNoun = thisDistinct == 1 ? "food" : "foods"
         let title: String
         if thisDistinct > lastDistinct {
-            title = "Your meals got more varied — \(thisDistinct) different \(foodNoun) this week."
+            title = "Your meals got more varied, \(thisDistinct) different \(foodNoun) this week."
         } else if thisDistinct < lastDistinct {
-            title = "Your meals got more focused — \(thisDistinct) different \(foodNoun) this week."
+            title = "Your meals got more focused, \(thisDistinct) different \(foodNoun) this week."
         } else {
             return nil
         }

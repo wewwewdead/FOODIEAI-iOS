@@ -199,7 +199,7 @@ struct NotificationSettingsView: View {
         let label = f.string(from: dt)
         switch confidence {
         case .insufficient: return "Suggested time \(label)."
-        case .low:          return "Around \(label) — based on a few logs."
+        case .low:          return "Around \(label), based on a few logs."
         case .good:         return "Usually \(label)."
         }
     }

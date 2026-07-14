@@ -17,10 +17,10 @@ enum AppShadow: String, CaseIterable, Identifiable {
     case nav, card, cardHover, image, upload
     // v2 (Phase 14 — REDESIGN_DESIGN_SYSTEM.md §Shadow).
     // Single-layer, soft, modern. Replaces the v1 multi-layer Bootstrap stack.
-    case shadowCard       // 0 6 14 rgba(0,0,0,0.05) — default card lift
-    case shadowCta        // 0 8 16 rgba(184,202,56,0.18) — colored CTA shadow
-    case shadowFloating   // 0 4 10 rgba(0,0,0,0.08) — coach badge, segmented thumb
-    case shadowElevated   // 0 12 30 rgba(0,0,0,0.18) — modal / overlay lifted above page (Phase 21.11)
+    case shadowCard       // 0 6 14 rgba(0,0,0,0.05), default card lift
+    case shadowCta        // 0 8 16 rgba(184,202,56,0.18), colored CTA shadow
+    case shadowFloating   // 0 4 10 rgba(0,0,0,0.08), coach badge, segmented thumb
+    case shadowElevated   // 0 12 30 rgba(0,0,0,0.18), modal / overlay lifted above page (Phase 21.11)
 
     var id: String { rawValue }
 
